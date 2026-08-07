@@ -1,5 +1,8 @@
 import os
+import tomllib
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Any, TypeVar
 
 ROOT = Path(__file__).resolve().parents[2]
 VENDOR = ROOT / "vendor" / "whisper.cpp"
@@ -8,20 +11,52 @@ MODELS_DIR = ROOT / "models"
 DATA_DIR = ROOT / "data"
 UPLOADS_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "voice_to_note.db"
+CONFIG_PATH = ROOT / "vtn.toml"
 
-WHISPER_MODEL = os.environ.get("VTN_WHISPER_MODEL", "large-v3-turbo")
+T = TypeVar("T")
+
+
+def read_config_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with path.open("rb") as f:
+        return tomllib.load(f)
+
+
+def resolve(
+    key: str,
+    default: T,
+    cast: Callable[[Any], T],
+    env: Mapping[str, str],
+    settings: Mapping[str, Any],
+) -> T:
+    """VTN_<KEY> in the environment wins, then vtn.toml, then the default."""
+    raw = env.get(f"VTN_{key.upper()}")
+    if raw is None:
+        raw = settings.get(key)
+    return default if raw is None else cast(raw)
+
+
+_SETTINGS = read_config_file(CONFIG_PATH)
+
+
+def _setting(key: str, default: T, cast: Callable[[Any], T] = str) -> T:
+    return resolve(key, default, cast, os.environ, _SETTINGS)
+
+
+WHISPER_MODEL = _setting("whisper_model", "large-v3-turbo")
 WHISPER_MODEL_PATH = MODELS_DIR / f"ggml-{WHISPER_MODEL}.bin"
 VAD_MODEL_PATH = MODELS_DIR / "ggml-silero-v5.1.2.bin"
 
 SEG_MODEL_PATH = MODELS_DIR / "sherpa-onnx-pyannote-segmentation-3-0" / "model.onnx"
-EMB_MODEL = os.environ.get("VTN_EMB_MODEL", "nemo_en_titanet_large.onnx")
+EMB_MODEL = _setting("emb_model", "nemo_en_titanet_large.onnx")
 EMB_MODEL_PATH = MODELS_DIR / EMB_MODEL
 
-NUM_SPEAKERS = int(os.environ.get("VTN_NUM_SPEAKERS", "-1"))
-DIAR_THRESHOLD = float(os.environ.get("VTN_DIAR_THRESHOLD", "0.5"))
+NUM_SPEAKERS = _setting("num_speakers", -1, int)
+DIAR_THRESHOLD = _setting("diar_threshold", 0.5, float)
 
-MATCH_THRESHOLD = float(os.environ.get("VTN_MATCH_THRESHOLD", "0.5"))
+MATCH_THRESHOLD = _setting("match_threshold", 0.5, float)
 
-CLAUDE_MODEL = os.environ.get("VTN_CLAUDE_MODEL", "sonnet")
-OLLAMA_URL = os.environ.get("VTN_OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("VTN_OLLAMA_MODEL", "qwen3:8b")
+CLAUDE_MODEL = _setting("claude_model", "sonnet")
+OLLAMA_URL = _setting("ollama_url", "http://localhost:11434")
+OLLAMA_MODEL = _setting("ollama_model", "qwen3:8b")

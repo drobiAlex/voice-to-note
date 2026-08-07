@@ -23,6 +23,18 @@ def segments_from_whisper(raw: dict) -> list[Segment]:
     return segs
 
 
+def segments_as_dicts(segments: Sequence[Segment], names: dict[str, str]) -> list[dict]:
+    return [
+        {
+            "t0_ms": s.t0_ms,
+            "t1_ms": s.t1_ms,
+            "speaker": display_name(s.speaker, names),
+            "text": s.text,
+        }
+        for s in segments
+    ]
+
+
 def transcript_text(segments: Sequence[Segment], names: dict[str, str]) -> str:
     # consecutive segments from the same person become one timestamped line
     lines: list[str] = []

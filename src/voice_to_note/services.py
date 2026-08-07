@@ -1,15 +1,20 @@
+import json
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TypeVar
 
 from . import config
-from .domain import Memo, Speaker, SpeakerMatch, Turn
+from .domain import Extraction, Memo, Speaker, SpeakerMatch, Turn
 from .gateways import audio, llm, sherpa, whisper
 from .storage.repository import Repository
 from .transforms.notes import SCHEMA, parse_notes, render_notes
-from .transforms.segments import segments_from_whisper, transcript_text
+from .transforms.segments import (
+    segments_as_dicts,
+    segments_from_whisper,
+    transcript_text,
+)
 from .transforms.speakers import (
     assign_speakers,
     auto_named,
@@ -54,7 +59,7 @@ def process_memo(repo: Repository, src: Path, log: Log = _silent) -> ProcessResu
     audio.to_wav16k(src, wav)
     duration = audio.duration_seconds(wav)
     log(f"transcribing ({duration:.0f}s audio) …")
-    raw = whisper.transcribe(wav)
+    raw = whisper.transcribe(wav, duration)
     segs = segments_from_whisper(raw)
     language = raw.get("result", {}).get("language", "")
     log("diarizing …")
@@ -156,11 +161,28 @@ def run_extraction(repo: Repository, memo_id: int) -> str:
     return backend
 
 
-def notes(repo: Repository, memo_id: int) -> str:
+def _extraction(repo: Repository, memo_id: int) -> Extraction:
     extraction = repo.extraction(memo_id)
     if not extraction:
         raise NotFound(f"no extraction for memo {memo_id} — run: vtn extract {memo_id}")
-    return render_notes(extraction)
+    return extraction
+
+
+def notes(repo: Repository, memo_id: int) -> str:
+    return render_notes(_extraction(repo, memo_id))
+
+
+def notes_json(repo: Repository, memo_id: int) -> str:
+    return json.dumps(_extraction(repo, memo_id).data, ensure_ascii=False)
+
+
+def transcript_json(repo: Repository, memo_id: int) -> str:
+    segments = segments_as_dicts(repo.segments(memo_id), repo.display_names(memo_id))
+    return json.dumps(segments, ensure_ascii=False)
+
+
+def memos_json(repo: Repository) -> str:
+    return json.dumps([asdict(m) for m in repo.memos()], ensure_ascii=False)
 
 
 def ask(repo: Repository, memo_id: int, question: str) -> tuple[str, str]:

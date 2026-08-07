@@ -5,7 +5,7 @@ import pytest
 
 from voice_to_note import config, services
 from voice_to_note.domain import Segment, Speaker, Turn
-from voice_to_note.gateways import llm
+from voice_to_note.gateways import llm, whisper
 from voice_to_note.storage.repository import Repository
 
 ALICE_VOICE = np.array([1.0, 0.0, 0.0], dtype=np.float32)
@@ -73,6 +73,38 @@ def fake_llm(monkeypatch, *, claude=None, ollama=None) -> list[str]:
     return seen
 
 
+def test_processing_gives_the_transcriber_the_audio_duration(repo, tmp_path, monkeypatch):
+    # whisper's timeout budget is derived from the duration, so it has to arrive
+    src = tmp_path / "standup.m4a"
+    src.write_bytes(b"fake audio")
+    monkeypatch.setattr(services.config, "UPLOADS_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(services.audio, "to_wav16k", lambda _src, _dst: None)
+    monkeypatch.setattr(services.audio, "duration_seconds", lambda _path: 137.5)
+    seen = {}
+
+    def transcribe(wav_path, duration_s):
+        seen["wav"], seen["duration_s"] = wav_path, duration_s
+        return {
+            "transcription": [{"text": " Hello ", "offsets": {"from": 0, "to": 1000}}],
+            "result": {"language": "en"},
+        }
+
+    monkeypatch.setattr(services.whisper, "transcribe", transcribe)
+    fake_diarization(monkeypatch, [Turn(0, 1000, "S1")], {"S1": ALICE_VOICE})
+
+    result = services.process_memo(repo, src)
+
+    assert seen["duration_s"] == 137.5
+    assert seen["wav"].name.startswith("standup-")
+    assert repo.memo(result.memo_id).duration_s == 137.5
+    assert [s.text for s in repo.segments(result.memo_id)] == ["Hello"]
+
+
+def test_transcription_timeout_scales_with_duration_above_a_floor():
+    assert whisper.timeout_for(10) == whisper.TIMEOUT_FLOOR_S
+    assert whisper.timeout_for(600) == 2400
+
+
 def test_rediarization_ignores_the_memos_own_speakers_when_matching(repo, wav, monkeypatch):
     memo_id = add_memo(
         repo,
@@ -132,6 +164,13 @@ def test_unparseable_claude_output_falls_back_to_ollama(repo, wav, monkeypatch):
     assert services.run_extraction(repo, memo_id) == f"ollama/{config.OLLAMA_MODEL}"
     assert repo.extraction(repo.memo(memo_id).id).data["title"] == "Sprint sync"
     assert "[00:00] Alice: Ship it" in prompts[0]
+
+
+def test_notes_json_round_trips_the_stored_extraction(repo, wav):
+    # the scripting contract: `vtn notes --json` parses back to what was stored
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Hello", speaker="S1")])
+    repo.save_extraction(memo_id, "claude", NOTES)
+    assert json.loads(services.notes_json(repo, memo_id)) == NOTES
 
 
 def test_extraction_error_names_every_backend_that_failed(repo, wav, monkeypatch):

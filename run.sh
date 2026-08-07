@@ -52,11 +52,11 @@ if [ ! -f "$SEG_DIR/model.onnx" ]; then
   curl -fSL "$SHERPA_RELEASES/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2" \
     | tar -xj -C "$MODELS_DIR"
 fi
-EMB="$MODELS_DIR/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx"
+EMB="$MODELS_DIR/nemo_en_titanet_large.onnx"
 if [ ! -f "$EMB" ]; then
   echo "downloading speaker embedding model …"
   curl -fSL -o "$EMB" \
-    "$SHERPA_RELEASES/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx"
+    "$SHERPA_RELEASES/speaker-recongition-models/nemo_en_titanet_large.onnx"
 fi
 
 if [ $# -gt 0 ]; then

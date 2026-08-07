@@ -5,8 +5,17 @@ from pathlib import Path
 
 from .. import config
 
+# transcription runs faster than real time even on CPU; this is a stuck-process
+# guard, not a performance target
+TIMEOUT_FACTOR = 4
+TIMEOUT_FLOOR_S = 120
 
-def transcribe(wav: Path) -> dict:
+
+def timeout_for(duration_s: float) -> float:
+    return max(TIMEOUT_FLOOR_S, TIMEOUT_FACTOR * duration_s)
+
+
+def transcribe(wav: Path, duration_s: float) -> dict:
     if not config.WHISPER_BIN.exists():
         raise RuntimeError("whisper-cli not built — run ./run.sh first")
     if not config.WHISPER_MODEL_PATH.exists():
@@ -24,7 +33,13 @@ def transcribe(wav: Path) -> dict:
         ]
         if config.VAD_MODEL_PATH.exists():
             cmd += ["--vad", "--vad-model", str(config.VAD_MODEL_PATH)]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        timeout = timeout_for(duration_s)
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                f"whisper-cli timed out after {timeout:.0f}s on {wav.name}"
+            ) from e
         if proc.returncode != 0:
             raise RuntimeError(f"whisper-cli failed:\n{proc.stderr[-2000:]}")
         return json.loads(out.with_suffix(".json").read_text())
