@@ -95,17 +95,17 @@ def _claude(prompt: str) -> str:
     return proc.stdout
 
 
-def _ollama(prompt: str) -> str:
-    body = json.dumps(
-        {
-            "model": config.OLLAMA_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False,
-            "think": False,
-            "format": SCHEMA,
-            "options": {"temperature": 0, "num_ctx": 32768},
-        }
-    ).encode()
+def _ollama(prompt: str, schema: dict | None = SCHEMA) -> str:
+    payload = {
+        "model": config.OLLAMA_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "think": False,
+        "options": {"temperature": 0, "num_ctx": 32768},
+    }
+    if schema is not None:
+        payload["format"] = schema
+    body = json.dumps(payload).encode()
     req = urllib.request.Request(
         f"{config.OLLAMA_URL}/api/chat",
         data=body,
@@ -127,6 +127,35 @@ def _parse(text: str) -> dict:
     if missing:
         raise ValueError(f"missing keys: {missing}")
     return data
+
+
+ASK_PROMPT = """Answer the question using only this voice-memo transcript. Reference speakers and timestamps where helpful. If the answer is not in the transcript, say so plainly. Be concise.
+
+Question: {question}
+
+Transcript:
+{transcript}"""
+
+
+def ask(transcript: str, question: str) -> tuple[str, str]:
+    prompt = ASK_PROMPT.format(question=question, transcript=transcript)
+    errors = []
+    if claude_available():
+        try:
+            return "claude", _claude(prompt).strip()
+        except (RuntimeError, subprocess.TimeoutExpired) as e:
+            errors.append(f"claude: {e}")
+    if ollama_available():
+        try:
+            return f"ollama/{config.OLLAMA_MODEL}", _ollama(prompt, schema=None).strip()
+        except (RuntimeError, urllib.error.URLError) as e:
+            errors.append(f"ollama: {e}")
+    if errors:
+        raise RuntimeError("ask failed: " + "; ".join(errors))
+    raise RuntimeError(
+        "no backend: install claude CLI, or run Ollama and"
+        f" `ollama pull {config.OLLAMA_MODEL}`"
+    )
 
 
 def extract(transcript: str) -> tuple[str, dict]:

@@ -203,6 +203,15 @@ def cmd_notes(args: argparse.Namespace) -> None:
     print_notes(db.connect(), args.id)
 
 
+def cmd_ask(args: argparse.Namespace) -> None:
+    con = db.connect()
+    if not con.execute("SELECT 1 FROM memos WHERE id=?", (args.id,)).fetchone():
+        sys.exit(f"no memo with id {args.id}")
+    question = " ".join(args.question)
+    backend, answer = extract.ask(transcript_text(con, args.id), question)
+    print(f"({backend})\n\n{answer}")
+
+
 def cmd_rename(args: argparse.Namespace) -> None:
     con = db.connect()
     with con:
@@ -241,6 +250,11 @@ def main() -> None:
     sp = sub.add_parser("notes", help="show extracted notes for a memo")
     sp.add_argument("id", type=int)
     sp.set_defaults(fn=cmd_notes)
+
+    sp = sub.add_parser("ask", help="ask a question about a memo: ask <id> <question...>")
+    sp.add_argument("id", type=int)
+    sp.add_argument("question", nargs="+")
+    sp.set_defaults(fn=cmd_ask)
 
     sp = sub.add_parser("rename", help="name a speaker: rename <memo_id> <label> <name>")
     sp.add_argument("id", type=int)
