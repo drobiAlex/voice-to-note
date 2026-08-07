@@ -1,9 +1,10 @@
 import argparse
+import json
 import sys
 import uuid
 from pathlib import Path
 
-from . import audio, config, db, diarize, transcribe
+from . import audio, config, db, diarize, extract, transcribe
 
 
 def fmt_ts(ms: int) -> str:
@@ -43,9 +44,15 @@ def cmd_process(args: argparse.Namespace) -> None:
             "INSERT INTO speakers (memo_id, label) VALUES (?,?)",
             [(memo_id, lb) for lb in labels],
         )
-    print(f"memo {memo_id} — {len(segs)} segments, {len(labels)} speakers, language={lang}\n")
-    for s in segs:
-        print(f"{fmt_ts(s['t0_ms'])}  {s['speaker'] or '?'}: {s['text']}")
+    print(f"memo {memo_id} — {len(segs)} segments, {len(labels)} speakers, language={lang}")
+    try:
+        print("extracting notes …")
+        backend = run_extraction(con, memo_id)
+        print(f"extracted via {backend}\n")
+        print_notes(con, memo_id)
+    except RuntimeError as e:
+        print(f"extraction skipped: {e}")
+        print(f"retry later with: vtn extract {memo_id}")
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -116,6 +123,86 @@ def cmd_diarize(args: argparse.Namespace) -> None:
     print(f"done — {len(labels)} speakers: {', '.join(labels)}")
 
 
+def transcript_text(con, memo_id: int) -> str:
+    names = speaker_names(con, memo_id)
+    lines: list[str] = []
+    cur_sp, cur_t0, buf = None, 0, []
+    for s in con.execute(
+        "SELECT t0_ms, speaker, text FROM segments WHERE memo_id=? ORDER BY t0_ms",
+        (memo_id,),
+    ):
+        sp = names.get(s["speaker"], s["speaker"]) or "Unknown"
+        if sp != cur_sp:
+            if buf:
+                lines.append(f"[{fmt_ts(cur_t0)}] {cur_sp}: {' '.join(buf)}")
+            cur_sp, cur_t0, buf = sp, s["t0_ms"], []
+        buf.append(s["text"])
+    if buf:
+        lines.append(f"[{fmt_ts(cur_t0)}] {cur_sp}: {' '.join(buf)}")
+    return "\n".join(lines)
+
+
+def run_extraction(con, memo_id: int) -> str:
+    backend, data = extract.extract(transcript_text(con, memo_id))
+    with con:
+        con.execute("DELETE FROM extractions WHERE memo_id=?", (memo_id,))
+        con.execute(
+            "INSERT INTO extractions (memo_id, backend, json) VALUES (?,?,?)",
+            (memo_id, backend, json.dumps(data, ensure_ascii=False)),
+        )
+        con.execute("UPDATE memos SET status='extracted' WHERE id=?", (memo_id,))
+    return backend
+
+
+def print_notes(con, memo_id: int) -> None:
+    row = con.execute(
+        "SELECT backend, json, created_at FROM extractions WHERE memo_id=?", (memo_id,)
+    ).fetchone()
+    if not row:
+        sys.exit(f"no extraction for memo {memo_id} — run: vtn extract {memo_id}")
+    d = json.loads(row["json"])
+    print(f"# {d['title']}")
+    print(f"  ({row['backend']}, {row['created_at']})\n")
+    print(d["summary"] + "\n")
+    if d["action_items"]:
+        print("ACTION ITEMS")
+        for a in d["action_items"]:
+            extra = ", ".join(x for x in (a.get("owner"), a.get("deadline")) if x)
+            print(f"  [ ] {a['task']}" + (f"  ({extra})" if extra else ""))
+        print()
+    for key, header in (
+        ("decisions", "DECISIONS"),
+        ("key_insights", "KEY INSIGHTS"),
+        ("open_questions", "OPEN QUESTIONS"),
+    ):
+        if d[key]:
+            print(header)
+            for item in d[key]:
+                print(f"  - {item}")
+            print()
+    if d["dates"]:
+        print("DATES")
+        for x in d["dates"]:
+            print(f"  - {x['date']}: {x['context']}")
+        print()
+    if d["tags"]:
+        print("tags: " + ", ".join(d["tags"]))
+
+
+def cmd_extract(args: argparse.Namespace) -> None:
+    con = db.connect()
+    if not con.execute("SELECT 1 FROM memos WHERE id=?", (args.id,)).fetchone():
+        sys.exit(f"no memo with id {args.id}")
+    print(f"extracting memo {args.id} …")
+    backend = run_extraction(con, args.id)
+    print(f"done via {backend}\n")
+    print_notes(con, args.id)
+
+
+def cmd_notes(args: argparse.Namespace) -> None:
+    print_notes(db.connect(), args.id)
+
+
 def cmd_rename(args: argparse.Namespace) -> None:
     con = db.connect()
     with con:
@@ -146,6 +233,14 @@ def main() -> None:
     sp = sub.add_parser("diarize", help="(re)run diarization on an existing memo")
     sp.add_argument("id", type=int)
     sp.set_defaults(fn=cmd_diarize)
+
+    sp = sub.add_parser("extract", help="(re)extract structured notes for a memo")
+    sp.add_argument("id", type=int)
+    sp.set_defaults(fn=cmd_extract)
+
+    sp = sub.add_parser("notes", help="show extracted notes for a memo")
+    sp.add_argument("id", type=int)
+    sp.set_defaults(fn=cmd_notes)
 
     sp = sub.add_parser("rename", help="name a speaker: rename <memo_id> <label> <name>")
     sp.add_argument("id", type=int)

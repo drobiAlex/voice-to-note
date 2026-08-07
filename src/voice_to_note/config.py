@@ -19,3 +19,7 @@ EMB_MODEL_PATH = MODELS_DIR / EMB_MODEL
 
 NUM_SPEAKERS = int(os.environ.get("VTN_NUM_SPEAKERS", "-1"))
 DIAR_THRESHOLD = float(os.environ.get("VTN_DIAR_THRESHOLD", "0.5"))
+
+CLAUDE_MODEL = os.environ.get("VTN_CLAUDE_MODEL", "sonnet")
+OLLAMA_URL = os.environ.get("VTN_OLLAMA_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.environ.get("VTN_OLLAMA_MODEL", "qwen3:8b")
