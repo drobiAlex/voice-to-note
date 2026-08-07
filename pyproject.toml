@@ -3,7 +3,11 @@ name = "voice-to-note"
 version = "0.1.0"
 description = "Local voice memo -> transcript -> speakers -> structured notes"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "numpy>=2.4.6",
+    "sherpa-onnx>=1.13.4",
+    "sherpa-onnx-core==1.13.4",
+]
 
 [project.scripts]
 vtn = "voice_to_note.cli:main"
@@ -11,6 +15,18 @@ vtn = "voice_to_note.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# PyPI's sherpa-onnx macOS wheel lacks the bundled onnxruntime dylib;
+# the k2-fsa flat index ships complete wheels.
+[[tool.uv.index]]
+name = "k2-fsa-sherpa-onnx"
+url = "https://k2-fsa.github.io/sherpa/onnx/cpu.html"
+format = "flat"
+explicit = true
+
+[tool.uv.sources]
+sherpa-onnx = { index = "k2-fsa-sherpa-onnx" }
+sherpa-onnx-core = { index = "k2-fsa-sherpa-onnx" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/voice_to_note"]

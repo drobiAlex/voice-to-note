@@ -12,3 +12,10 @@ DB_PATH = DATA_DIR / "voice_to_note.db"
 WHISPER_MODEL = os.environ.get("VTN_WHISPER_MODEL", "large-v3-turbo")
 WHISPER_MODEL_PATH = MODELS_DIR / f"ggml-{WHISPER_MODEL}.bin"
 VAD_MODEL_PATH = MODELS_DIR / "ggml-silero-v5.1.2.bin"
+
+SEG_MODEL_PATH = MODELS_DIR / "sherpa-onnx-pyannote-segmentation-3-0" / "model.onnx"
+EMB_MODEL = os.environ.get("VTN_EMB_MODEL", "nemo_en_titanet_large.onnx")
+EMB_MODEL_PATH = MODELS_DIR / EMB_MODEL
+
+NUM_SPEAKERS = int(os.environ.get("VTN_NUM_SPEAKERS", "-1"))
+DIAR_THRESHOLD = float(os.environ.get("VTN_DIAR_THRESHOLD", "0.5"))

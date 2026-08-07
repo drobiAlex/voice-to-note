@@ -45,6 +45,20 @@ if [ ! -f "$VAD" ]; then
   fi
 fi
 
+SHERPA_RELEASES="https://github.com/k2-fsa/sherpa-onnx/releases/download"
+SEG_DIR="$MODELS_DIR/sherpa-onnx-pyannote-segmentation-3-0"
+if [ ! -f "$SEG_DIR/model.onnx" ]; then
+  echo "downloading speaker segmentation model …"
+  curl -fSL "$SHERPA_RELEASES/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2" \
+    | tar -xj -C "$MODELS_DIR"
+fi
+EMB="$MODELS_DIR/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx"
+if [ ! -f "$EMB" ]; then
+  echo "downloading speaker embedding model …"
+  curl -fSL -o "$EMB" \
+    "$SHERPA_RELEASES/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx"
+fi
+
 if [ $# -gt 0 ]; then
   exec uv run vtn "$@"
 fi

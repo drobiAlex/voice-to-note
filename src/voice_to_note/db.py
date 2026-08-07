@@ -20,6 +20,13 @@ CREATE TABLE IF NOT EXISTS segments (
   text TEXT NOT NULL,
   speaker TEXT
 );
+CREATE TABLE IF NOT EXISTS speakers (
+  id INTEGER PRIMARY KEY,
+  memo_id INTEGER NOT NULL REFERENCES memos(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  name TEXT,
+  UNIQUE(memo_id, label)
+);
 """
 
 
