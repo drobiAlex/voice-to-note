@@ -30,3 +30,12 @@ sherpa-onnx-core = { index = "k2-fsa-sherpa-onnx" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/voice_to_note"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

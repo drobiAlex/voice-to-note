@@ -3,7 +3,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from . import config
+from .. import config
 
 
 def transcribe(wav: Path) -> dict:
@@ -28,20 +28,3 @@ def transcribe(wav: Path) -> dict:
         if proc.returncode != 0:
             raise RuntimeError(f"whisper-cli failed:\n{proc.stderr[-2000:]}")
         return json.loads(out.with_suffix(".json").read_text())
-
-
-def segments(raw: dict) -> list[dict]:
-    segs = []
-    for s in raw.get("transcription", []):
-        text = s["text"].strip()
-        if not text:
-            continue
-        segs.append(
-            {
-                "t0_ms": s["offsets"]["from"],
-                "t1_ms": s["offsets"]["to"],
-                "text": text,
-                "tokens": s.get("tokens", []),
-            }
-        )
-    return segs
