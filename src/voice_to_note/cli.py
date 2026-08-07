@@ -27,7 +27,6 @@ def cmd_process(args: argparse.Namespace) -> None:
     print("diarizing …")
     turns = diarize.diarize(wav)
     diarize.assign_speakers(segs, turns)
-    labels = sorted({s["speaker"] for s in segs if s["speaker"]})
     con = db.connect()
     with con:
         cur = con.execute(
@@ -40,10 +39,7 @@ def cmd_process(args: argparse.Namespace) -> None:
             "INSERT INTO segments (memo_id, t0_ms, t1_ms, text, speaker) VALUES (?,?,?,?,?)",
             [(memo_id, s["t0_ms"], s["t1_ms"], s["text"], s["speaker"]) for s in segs],
         )
-        con.executemany(
-            "INSERT INTO speakers (memo_id, label) VALUES (?,?)",
-            [(memo_id, lb) for lb in labels],
-        )
+        labels = store_speakers(con, memo_id, wav, turns)
     print(f"memo {memo_id} — {len(segs)} segments, {len(labels)} speakers, language={lang}")
     try:
         print("extracting notes …")
@@ -106,21 +102,45 @@ def cmd_diarize(args: argparse.Namespace) -> None:
             (args.id,),
         )
     ]
+    keep_names = {
+        r["label"]: r["name"]
+        for r in con.execute(
+            "SELECT label, name FROM speakers WHERE memo_id=? AND name IS NOT NULL",
+            (args.id,),
+        )
+    }
     print(f"diarizing memo {args.id} …")
     turns = diarize.diarize(wav)
     diarize.assign_speakers(segs, turns)
-    labels = sorted({s["speaker"] for s in segs if s["speaker"]})
     with con:
         con.executemany(
             "UPDATE segments SET speaker=? WHERE id=?",
             [(s["speaker"], s["id"]) for s in segs],
         )
-        con.execute("DELETE FROM speakers WHERE memo_id=?", (args.id,))
-        con.executemany(
-            "INSERT INTO speakers (memo_id, label) VALUES (?,?)",
-            [(args.id, lb) for lb in labels],
-        )
+        labels = store_speakers(con, args.id, wav, turns, keep_names)
     print(f"done — {len(labels)} speakers: {', '.join(labels)}")
+
+
+def store_speakers(con, memo_id: int, wav: Path, turns: list[dict],
+                   keep_names: dict | None = None) -> list[str]:
+    keep_names = keep_names or {}
+    embs = diarize.speaker_embeddings(wav, turns)
+    con.execute("DELETE FROM speakers WHERE memo_id=?", (memo_id,))
+    matches = diarize.match_known_speakers(con, embs)
+    labels = sorted({t["speaker"] for t in turns})
+    rows = []
+    for lb in labels:
+        name = keep_names.get(lb) or (matches[lb][0] if lb in matches else None)
+        emb = embs.get(lb)
+        rows.append((memo_id, lb, name, emb.tobytes() if emb is not None else None))
+    con.executemany(
+        "INSERT INTO speakers (memo_id, label, name, embedding) VALUES (?,?,?,?)",
+        rows,
+    )
+    for lb, (nm, sim) in matches.items():
+        if not keep_names.get(lb):
+            print(f"  {lb} sounds like {nm} (similarity {sim:.2f}) — auto-named")
+    return labels
 
 
 def transcript_text(con, memo_id: int) -> str:

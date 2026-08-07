@@ -44,4 +44,7 @@ def connect() -> sqlite3.Connection:
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA foreign_keys=ON")
     con.executescript(SCHEMA)
+    cols = {r["name"] for r in con.execute("PRAGMA table_info(speakers)")}
+    if "embedding" not in cols:
+        con.execute("ALTER TABLE speakers ADD COLUMN embedding BLOB")
     return con
