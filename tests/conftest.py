@@ -1,6 +1,18 @@
 import pytest
 
+from voice_to_note.domain import Segment
 from voice_to_note.storage.repository import Repository
+
+
+def seg(i: int, text: str | None = None, speaker: str = "S1") -> Segment:
+    """One stored segment, identified the way the database identifies it.
+    Passing text="" means an empty line, not a default one."""
+    return Segment(i * 1000, i * 1000 + 900, f"line {i}" if text is None else text, speaker, i)
+
+
+def transcript(n: int) -> list[Segment]:
+    """A stored transcript of n lines, in the order they were spoken."""
+    return [seg(i) for i in range(n)]
 
 
 class FakeResponse:
