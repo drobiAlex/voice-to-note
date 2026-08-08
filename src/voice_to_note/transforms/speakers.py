@@ -14,7 +14,8 @@ MIN_CHUNK_SAMPLES = 8000
 
 
 def turns_from_clusters(clusters: Iterable[tuple[float, float, int]]) -> list[Turn]:
-    # cluster ids are arbitrary; relabel S1, S2 … in order of first appearance
+    """Names the voices S1, S2 … in the order they first speak, since the
+    clustering's own ids carry no meaning."""
     order: dict[int, int] = {}
     turns = []
     for start_s, end_s, cluster in clusters:
@@ -25,6 +26,7 @@ def turns_from_clusters(clusters: Iterable[tuple[float, float, int]]) -> list[Tu
 
 
 def assign_speakers(segments: Sequence[Segment], turns: Sequence[Turn]) -> list[Segment]:
+    """Decides who said each line of the transcript."""
     # max-overlap wins; segments in gaps fall back to the nearest turn boundary
     out = []
     for s in segments:
@@ -45,16 +47,13 @@ def assign_speakers(segments: Sequence[Segment], turns: Sequence[Turn]) -> list[
 
 
 def sample_range(turn: Turn) -> tuple[int, int]:
+    """Where a turn sits in the recorded audio."""
     return turn.start_ms * SAMPLES_PER_MS, turn.end_ms * SAMPLES_PER_MS
 
 
 def select_fingerprint_turns(turns: Sequence[Turn], total_samples: int) -> list[Turn]:
-    """Which of one speaker's turns to embed, longest first.
-
-    Longest turns carry the most voice; the budget keeps a long memo cheap.
-    A turn that runs past the end of the audio yields only what was recorded,
-    so it is measured by that and, if too short, costs nothing from the budget.
-    """
+    """Picks the audio that best represents one speaker's voice: their longest
+    turns, capped so that a long memo stays cheap to fingerprint."""
     chosen: list[Turn] = []
     used_ms = 0
     for t in sorted(turns, key=lambda t: t.end_ms - t.start_ms, reverse=True):
@@ -74,6 +73,7 @@ def unit(v: np.ndarray) -> np.ndarray:
 
 
 def average_embedding(embeddings: Sequence[np.ndarray]) -> np.ndarray:
+    """Blends several samples of one voice into a single fingerprint."""
     return unit(np.mean(embeddings, axis=0))
 
 
@@ -82,6 +82,7 @@ def match_known_speakers(
     pool: dict[str, list[np.ndarray]],
     threshold: float,
 ) -> dict[str, SpeakerMatch]:
+    """Recognises voices the user has already put a name to elsewhere."""
     # compare against named speakers from other memos; best cosine wins.
     # everything is put on the unit sphere here rather than trusting callers:
     # otherwise a long vector outscores a similar-sounding voice.
@@ -108,7 +109,7 @@ def resolve_speaker_names(
     matches: dict[str, SpeakerMatch],
     keep_names: dict[str, str],
 ) -> list[Speaker]:
-    # a name given by hand outranks anything voice matching suggests
+    """Settles each speaker's name; one given by hand outranks any voice match."""
     return [
         Speaker(
             label,
@@ -122,4 +123,5 @@ def resolve_speaker_names(
 def auto_named(
     matches: dict[str, SpeakerMatch], keep_names: dict[str, str]
 ) -> list[tuple[str, SpeakerMatch]]:
+    """The matches worth announcing: the ones the user did not name by hand."""
     return [(label, m) for label, m in matches.items() if not keep_names.get(label)]

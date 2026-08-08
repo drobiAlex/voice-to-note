@@ -43,6 +43,8 @@ SCHEMA = {
 
 
 def parse_notes(text: str) -> dict:
+    """Rescues the notes from whatever wrapping an LLM put around them, and
+    refuses anything missing a section the reader expects."""
     text = text.strip()
     if "<think>" in text and "</think>" in text:
         text = text.split("</think>", 1)[1]
@@ -57,6 +59,7 @@ def parse_notes(text: str) -> dict:
 
 
 def render_notes(extraction: Extraction) -> str:
+    """Lays the notes out the way a person reads them."""
     d = extraction.data
     lines = [
         f"# {d['title']}",

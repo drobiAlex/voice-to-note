@@ -49,6 +49,7 @@ class Repository:
     """Every SQL statement in the app lives here."""
 
     def __init__(self, path: Path | str | None = None):
+        """Opens the memo database, creating or upgrading it as needed."""
         path = Path(path) if path is not None else config.DB_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
         self.con = sqlite3.connect(path)
@@ -59,11 +60,13 @@ class Repository:
         self._migrate()
 
     def _migrate(self) -> None:
+        """Lets a database created before voice matching store fingerprints."""
         cols = {r["name"] for r in self.con.execute("PRAGMA table_info(speakers)")}
         if "embedding" not in cols:
             self.con.execute("ALTER TABLE speakers ADD COLUMN embedding BLOB")
 
     def close(self) -> None:
+        """Closes the memo database."""
         self.con.close()
 
     # --- memos ---------------------------------------------------------
@@ -78,6 +81,7 @@ class Repository:
         segments: Sequence[Segment],
         speakers: Sequence[Speaker] = (),
     ) -> int:
+        """Stores a finished transcription: memo, segments and speakers together."""
         with self.con:
             cur = self.con.execute(
                 "INSERT INTO memos (filename, wav_path, duration_s, language, status)"
@@ -94,12 +98,14 @@ class Repository:
         return memo_id
 
     def memos(self) -> list[Memo]:
+        """Every memo, newest first."""
         return [
             _memo(r)
             for r in self.con.execute(f"SELECT {MEMO_COLUMNS} FROM memos ORDER BY id DESC")
         ]
 
     def memo(self, memo_id: int) -> Memo | None:
+        """One memo's details, or nothing when that id was never stored."""
         row = self.con.execute(
             f"SELECT {MEMO_COLUMNS} FROM memos WHERE id=?", (memo_id,)
         ).fetchone()
@@ -108,6 +114,7 @@ class Repository:
     # --- segments ------------------------------------------------------
 
     def segments(self, memo_id: int) -> list[Segment]:
+        """A memo's transcript in the order it was spoken."""
         return [
             Segment(r["t0_ms"], r["t1_ms"], r["text"], r["speaker"], r["id"])
             for r in self.con.execute(
@@ -120,6 +127,7 @@ class Repository:
     def save_diarization(
         self, memo_id: int, segments: Sequence[Segment], speakers: Sequence[Speaker]
     ) -> None:
+        """Records a fresh speaker pass over a memo that already exists."""
         with self.con:
             self.con.executemany(
                 "UPDATE segments SET speaker=? WHERE id=?",
@@ -130,6 +138,7 @@ class Repository:
     # --- speakers ------------------------------------------------------
 
     def _write_speakers(self, memo_id: int, speakers: Sequence[Speaker]) -> None:
+        """Replaces a memo's speaker roster, voice fingerprints included."""
         self.con.execute("DELETE FROM speakers WHERE memo_id=?", (memo_id,))
         self.con.executemany(
             "INSERT INTO speakers (memo_id, label, name, embedding) VALUES (?,?,?,?)",
@@ -145,6 +154,7 @@ class Repository:
         )
 
     def display_names(self, memo_id: int) -> dict[str, str]:
+        """What to call each speaker on screen, falling back to their label."""
         return {
             r["label"]: r["name"] or r["label"]
             for r in self.con.execute(
@@ -153,6 +163,7 @@ class Repository:
         }
 
     def named_speakers(self, memo_id: int) -> dict[str, str]:
+        """Only the speakers a person has actually named."""
         return {
             r["label"]: r["name"]
             for r in self.con.execute(
@@ -164,6 +175,7 @@ class Repository:
     def known_embeddings(
         self, exclude_memo_id: int | None = None
     ) -> dict[str, list[np.ndarray]]:
+        """Voice fingerprints of everyone named so far, for matching new memos."""
         sql = (
             "SELECT name, embedding FROM speakers"
             " WHERE name IS NOT NULL AND embedding IS NOT NULL"
@@ -180,6 +192,7 @@ class Repository:
         return pool
 
     def rename_speaker(self, memo_id: int, label: str, name: str) -> bool:
+        """Names one speaker, reporting whether that label was there to name."""
         with self.con:
             cur = self.con.execute(
                 "UPDATE speakers SET name=? WHERE memo_id=? AND label=?",
@@ -190,6 +203,7 @@ class Repository:
     # --- extractions ---------------------------------------------------
 
     def save_extraction(self, memo_id: int, backend: str, data: dict) -> None:
+        """Files notes against a memo, replacing any earlier attempt."""
         with self.con:
             self.con.execute("DELETE FROM extractions WHERE memo_id=?", (memo_id,))
             self.con.execute(
@@ -199,6 +213,7 @@ class Repository:
             self.con.execute("UPDATE memos SET status='extracted' WHERE id=?", (memo_id,))
 
     def extraction(self, memo_id: int) -> Extraction | None:
+        """A memo's stored notes, if extraction has run for it."""
         row = self.con.execute(
             "SELECT backend, json, created_at FROM extractions WHERE memo_id=?",
             (memo_id,),
@@ -209,6 +224,7 @@ class Repository:
 
 
 def _memo(row: sqlite3.Row) -> Memo:
+    """Presents a stored row as a memo."""
     return Memo(
         row["id"],
         row["filename"],

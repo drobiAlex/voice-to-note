@@ -6,6 +6,7 @@ TIMEOUT_S = 600
 
 
 def to_wav16k(src: Path, dst: Path) -> None:
+    """Normalizes any recording into the one audio format the models accept."""
     dst.parent.mkdir(parents=True, exist_ok=True)
     try:
         subprocess.run(
@@ -23,6 +24,7 @@ def to_wav16k(src: Path, dst: Path) -> None:
 
 
 def duration_seconds(path: Path) -> float:
+    """How long a recording runs, which sets the transcription time budget."""
     try:
         out = subprocess.run(
             [

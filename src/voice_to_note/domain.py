@@ -5,6 +5,8 @@ import numpy as np
 
 @dataclass(frozen=True)
 class Segment:
+    """One timed line of transcript — what the transcriber produces."""
+
     t0_ms: int
     t1_ms: int
     text: str
@@ -14,6 +16,8 @@ class Segment:
 
 @dataclass(frozen=True)
 class Turn:
+    """A stretch of audio one person speaks — what the diarizer produces."""
+
     start_ms: int
     end_ms: int
     speaker: str
@@ -21,6 +25,8 @@ class Turn:
 
 @dataclass(frozen=True, eq=False)
 class Speaker:
+    """A voice in one memo: its label, any name given, and its fingerprint."""
+
     label: str
     name: str | None = None
     embedding: np.ndarray | None = None
@@ -28,12 +34,16 @@ class Speaker:
 
 @dataclass(frozen=True)
 class SpeakerMatch:
+    """A voice recognised as someone already named in an earlier memo."""
+
     name: str
     similarity: float
 
 
 @dataclass(frozen=True)
 class Memo:
+    """One recording the app has processed."""
+
     id: int
     filename: str
     wav_path: str
@@ -45,6 +55,8 @@ class Memo:
 
 @dataclass(frozen=True)
 class Extraction:
+    """The structured notes an LLM produced for a memo."""
+
     backend: str
     data: dict
     created_at: str

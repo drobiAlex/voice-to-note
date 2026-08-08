@@ -36,6 +36,8 @@ class ExtractionError(Exception):
 
 @dataclass
 class ProcessResult:
+    """What `vtn process` reports back once a memo is safely stored."""
+
     memo_id: int
     segment_count: int
     labels: list[str]
@@ -43,10 +45,12 @@ class ProcessResult:
 
 
 def _silent(message: str) -> None:
+    """Default for callers that want the work done without progress reports."""
     pass
 
 
 def require_memo(repo: Repository, memo_id: int) -> Memo:
+    """Finds a memo, or fails with something the user can act on."""
     memo = repo.memo(memo_id)
     if not memo:
         raise NotFound(f"no memo with id {memo_id}")
@@ -54,6 +58,7 @@ def require_memo(repo: Repository, memo_id: int) -> Memo:
 
 
 def process_memo(repo: Repository, src: Path, log: Log = _silent) -> ProcessResult:
+    """The whole pipeline for a new recording: audio in, stored memo out."""
     wav = config.UPLOADS_DIR / f"{src.stem}-{uuid.uuid4().hex[:8]}.wav"
     log(f"converting {src.name} …")
     audio.to_wav16k(src, wav)
@@ -79,6 +84,7 @@ def process_memo(repo: Repository, src: Path, log: Log = _silent) -> ProcessResu
 
 
 def rediarize(repo: Repository, memo_id: int, log: Log = _silent) -> list[str]:
+    """Runs speaker detection over a memo again, keeping the names people gave."""
     memo = require_memo(repo, memo_id)
     wav = Path(memo.wav_path)
     if not wav.exists():
@@ -100,6 +106,7 @@ def _identify(
     keep_names: dict[str, str],
     exclude: int | None = None,
 ) -> tuple[list[str], list[Speaker], dict[str, SpeakerMatch]]:
+    """Works out who each voice belongs to, reusing names from earlier memos."""
     embeddings = sherpa.speaker_embeddings(wav, turns)
     pool = repo.known_embeddings(exclude_memo_id=exclude)
     matches = match_known_speakers(embeddings, pool, config.MATCH_THRESHOLD)
@@ -110,11 +117,13 @@ def _identify(
 def _report_matches(
     log: Log, matches: dict[str, SpeakerMatch], keep_names: dict[str, str]
 ) -> None:
+    """Tells the user which speakers were named by voice rather than by hand."""
     for label, m in auto_named(matches, keep_names):
         log(f"  {label} sounds like {m.name} (similarity {m.similarity:.2f}) — auto-named")
 
 
 def transcript(repo: Repository, memo_id: int) -> str:
+    """The speaker-labeled transcript a person or an LLM reads."""
     return transcript_text(repo.segments(memo_id), repo.display_names(memo_id))
 
 
@@ -125,11 +134,8 @@ def _complete(
     failure: str,
     unavailable: str,
 ) -> tuple[str, T]:
-    """Ask the backends in preference order for something `parse` accepts.
-
-    Output that will not parse counts as a failure of that backend, so the
-    next one still gets its turn; the caller hears about all of them at once.
-    """
+    """Gets an answer from the best backend that gives a usable one; a reply
+    that cannot be used demotes that backend rather than failing outright."""
     errors = []
     if llm.claude_available():
         try:
@@ -150,6 +156,7 @@ def _complete(
 
 
 def run_extraction(repo: Repository, memo_id: int) -> str:
+    """Turns a memo into structured notes and files them against it."""
     backend, data = _complete(
         llm.notes_prompt(transcript(repo, memo_id)),
         schema=SCHEMA,
@@ -162,6 +169,7 @@ def run_extraction(repo: Repository, memo_id: int) -> str:
 
 
 def _extraction(repo: Repository, memo_id: int) -> Extraction:
+    """Fetches a memo's notes, telling the user how to create them if missing."""
     extraction = repo.extraction(memo_id)
     if not extraction:
         raise NotFound(f"no extraction for memo {memo_id} — run: vtn extract {memo_id}")
@@ -169,23 +177,28 @@ def _extraction(repo: Repository, memo_id: int) -> Extraction:
 
 
 def notes(repo: Repository, memo_id: int) -> str:
+    """The notes as a person reads them."""
     return render_notes(_extraction(repo, memo_id))
 
 
 def notes_json(repo: Repository, memo_id: int) -> str:
+    """The notes as a script reads them."""
     return json.dumps(_extraction(repo, memo_id).data, ensure_ascii=False)
 
 
 def transcript_json(repo: Repository, memo_id: int) -> str:
+    """The transcript as a script reads it, speakers already named."""
     segments = segments_as_dicts(repo.segments(memo_id), repo.display_names(memo_id))
     return json.dumps(segments, ensure_ascii=False)
 
 
 def memos_json(repo: Repository) -> str:
+    """The memo list as a script reads it."""
     return json.dumps([asdict(m) for m in repo.memos()], ensure_ascii=False)
 
 
 def ask(repo: Repository, memo_id: int, question: str) -> tuple[str, str]:
+    """Answers a question about one memo, grounded only in what was said."""
     require_memo(repo, memo_id)
     return _complete(
         llm.ask_prompt(transcript(repo, memo_id), question),
@@ -197,5 +210,6 @@ def ask(repo: Repository, memo_id: int, question: str) -> tuple[str, str]:
 
 
 def rename_speaker(repo: Repository, memo_id: int, label: str, name: str) -> None:
+    """Puts a real name on a speaker so later memos recognise that voice."""
     if not repo.rename_speaker(memo_id, label, name):
         raise NotFound(f"no speaker {label} in memo {memo_id}")

@@ -4,6 +4,7 @@ from ..domain import Segment
 
 
 def fmt_ts(ms: int) -> str:
+    """A timestamp a listener can scrub to, counted in plain minutes."""
     m, s = divmod(ms // 1000, 60)
     return f"{m:02d}:{s:02d}"
 
@@ -14,6 +15,7 @@ def display_name(speaker: str | None, names: dict[str, str]) -> str:
 
 
 def segments_from_whisper(raw: dict) -> list[Segment]:
+    """Takes the usable speech out of a transcription, dropping silent stretches."""
     segs = []
     for s in raw.get("transcription", []):
         text = s["text"].strip()
@@ -24,6 +26,7 @@ def segments_from_whisper(raw: dict) -> list[Segment]:
 
 
 def segments_as_dicts(segments: Sequence[Segment], names: dict[str, str]) -> list[dict]:
+    """The transcript shaped for scripts to consume, speakers already named."""
     return [
         {
             "t0_ms": s.t0_ms,
@@ -36,6 +39,8 @@ def segments_as_dicts(segments: Sequence[Segment], names: dict[str, str]) -> lis
 
 
 def transcript_text(segments: Sequence[Segment], names: dict[str, str]) -> str:
+    """Builds the speaker-labeled transcript the LLM reads — naming quality here
+    decides who gets credited with action items in the notes."""
     # consecutive segments from the same person become one timestamped line
     lines: list[str] = []
     speaker, start_ms, buf = None, 0, []

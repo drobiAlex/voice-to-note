@@ -45,18 +45,22 @@ class BackendError(RuntimeError):
 
 
 def notes_prompt(transcript: str) -> str:
+    """Asks for the notes in the exact shape the app can store."""
     return NOTES_PROMPT + transcript
 
 
 def ask_prompt(transcript: str, question: str) -> str:
+    """Asks a question in a way that keeps the answer inside the transcript."""
     return ASK_PROMPT.format(question=question, transcript=transcript)
 
 
 def claude_available() -> bool:
+    """Whether the preferred backend is installed on this machine."""
     return shutil.which("claude") is not None
 
 
 def ollama_available() -> bool:
+    """Whether the local fallback is running and has the model pulled."""
     try:
         with urllib.request.urlopen(f"{config.OLLAMA_URL}/api/tags", timeout=3) as r:
             models = [m["name"] for m in json.loads(r.read()).get("models", [])]
@@ -66,6 +70,7 @@ def ollama_available() -> bool:
 
 
 def claude_complete(prompt: str) -> str:
+    """Asks Claude, through the CLI the user already signed in to."""
     try:
         proc = subprocess.run(
             ["claude", "-p", "--model", config.CLAUDE_MODEL],
@@ -79,6 +84,7 @@ def claude_complete(prompt: str) -> str:
 
 
 def ollama_complete(prompt: str, schema: dict | None = None) -> str:
+    """Asks the local model, which can be held to a required answer shape."""
     payload = {
         "model": config.OLLAMA_MODEL,
         "messages": [{"role": "user", "content": prompt}],

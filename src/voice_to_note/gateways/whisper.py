@@ -12,10 +12,12 @@ TIMEOUT_FLOOR_S = 120
 
 
 def timeout_for(duration_s: float) -> float:
+    """How long to wait on a recording before calling transcription stuck."""
     return max(TIMEOUT_FLOOR_S, TIMEOUT_FACTOR * duration_s)
 
 
 def transcribe(wav: Path, duration_s: float) -> dict:
+    """Turns speech into timed text, locally."""
     if not config.WHISPER_BIN.exists():
         raise RuntimeError("whisper-cli not built — run ./run.sh first")
     if not config.WHISPER_MODEL_PATH.exists():

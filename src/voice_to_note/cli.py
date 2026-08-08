@@ -21,6 +21,7 @@ def status(message: str = "") -> None:
 
 
 def _version() -> str:
+    """The installed version, for bug reports."""
     try:
         return version("voice-to-note")
     except PackageNotFoundError:  # running straight from a source checkout
@@ -28,6 +29,7 @@ def _version() -> str:
 
 
 def cmd_process(args: argparse.Namespace) -> None:
+    """Takes a recording all the way to notes on screen."""
     src = Path(args.file).expanduser().resolve()
     if not src.exists():
         sys.exit(f"no such file: {src}")
@@ -48,6 +50,7 @@ def cmd_process(args: argparse.Namespace) -> None:
 
 
 def cmd_list(args: argparse.Namespace) -> None:
+    """Shows what has been processed so far."""
     repo = Repository()
     if args.json:
         print(services.memos_json(repo))
@@ -63,6 +66,7 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 
 def cmd_show(args: argparse.Namespace) -> None:
+    """Prints one memo's transcript."""
     repo = Repository()
     memo = services.require_memo(repo, args.id)
     if args.json:
@@ -75,11 +79,13 @@ def cmd_show(args: argparse.Namespace) -> None:
 
 
 def cmd_diarize(args: argparse.Namespace) -> None:
+    """Redoes speaker detection when the first pass got voices wrong."""
     labels = services.rediarize(Repository(), args.id, log=status)
     status(f"done — {len(labels)} speakers: {', '.join(labels)}")
 
 
 def cmd_extract(args: argparse.Namespace) -> None:
+    """Redoes note extraction, for when it was skipped or came out poorly."""
     repo = Repository()
     services.require_memo(repo, args.id)
     status(f"extracting memo {args.id} …")
@@ -89,22 +95,26 @@ def cmd_extract(args: argparse.Namespace) -> None:
 
 
 def cmd_notes(args: argparse.Namespace) -> None:
+    """Prints the notes already extracted for a memo."""
     repo = Repository()
     print(services.notes_json(repo, args.id) if args.json else services.notes(repo, args.id))
 
 
 def cmd_ask(args: argparse.Namespace) -> None:
+    """Answers a question about one memo."""
     backend, answer = services.ask(Repository(), args.id, " ".join(args.question))
     status(f"({backend})\n")
     print(answer)
 
 
 def cmd_rename(args: argparse.Namespace) -> None:
+    """Puts a name to a speaker, which later memos then recognise by voice."""
     services.rename_speaker(Repository(), args.id, args.label, args.name)
     status(f"memo {args.id}: {args.label} -> {args.name}")
 
 
 def main() -> None:
+    """The vtn command."""
     p = argparse.ArgumentParser(
         prog="vtn",
         description="voice-to-note",

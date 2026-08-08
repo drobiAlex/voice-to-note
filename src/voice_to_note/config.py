@@ -17,6 +17,7 @@ T = TypeVar("T")
 
 
 def read_config_file(path: Path) -> dict[str, Any]:
+    """Reads the project's optional settings file, if the user wrote one."""
     if not path.exists():
         return {}
     with path.open("rb") as f:
@@ -41,6 +42,7 @@ _SETTINGS = read_config_file(CONFIG_PATH)
 
 
 def _setting(key: str, default: T, cast: Callable[[Any], T] = str) -> T:
+    """One setting, resolved against this machine's environment and config."""
     return resolve(key, default, cast, os.environ, _SETTINGS)
 
 
