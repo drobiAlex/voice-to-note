@@ -5,6 +5,7 @@ import urllib.error
 import urllib.request
 
 from .. import config
+from . import GatewayError
 
 NOTES_PROMPT = """Extract structured notes from this voice-memo transcript.
 
@@ -40,7 +41,7 @@ Transcript:
 {transcript}"""
 
 
-class BackendError(RuntimeError):
+class BackendError(GatewayError):
     """A backend was installed but the call to it failed."""
 
 
@@ -102,6 +103,11 @@ def ollama_complete(prompt: str, schema: dict | None = None) -> str:
     )
     try:
         with urllib.request.urlopen(req, timeout=1800) as r:
-            return json.loads(r.read())["message"]["content"]
+            reply = r.read()
     except urllib.error.URLError as e:
         raise BackendError(str(e)) from e
+    try:
+        return json.loads(reply)["message"]["content"]
+    except (ValueError, KeyError, TypeError) as e:
+        # ollama answers 200 with an error body when the model was never pulled
+        raise BackendError(f"unexpected reply from ollama: {reply[:500]!r}") from e

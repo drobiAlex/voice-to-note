@@ -4,6 +4,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from . import services
+from .gateways import GatewayError
 from .storage.repository import Repository
 from .transforms.segments import display_name, fmt_ts
 
@@ -164,5 +165,8 @@ def main() -> None:
     args = p.parse_args()
     try:
         args.fn(args)
-    except (services.NotFound, services.ExtractionError) as e:
+    except (services.NotFound, services.ExtractionError, GatewayError) as e:
+        # a missing binary, model or unreadable recording is something the user
+        # can fix, so it gets one line; anything else is a bug and keeps its
+        # traceback, which is the only thing that locates it
         sys.exit(str(e))

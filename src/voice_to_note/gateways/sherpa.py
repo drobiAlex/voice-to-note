@@ -13,6 +13,7 @@ from ..transforms.speakers import (
     select_fingerprint_turns,
     turns_from_clusters,
 )
+from . import GatewayError
 
 SAMPLE_RATE = 16000
 
@@ -36,7 +37,7 @@ def _embedding_config() -> sherpa_onnx.SpeakerEmbeddingExtractorConfig:
 def diarize(wav: Path) -> list[Turn]:
     """Works out who spoke when."""
     if not config.SEG_MODEL_PATH.exists() or not config.EMB_MODEL_PATH.exists():
-        raise RuntimeError("diarization models missing — run ./run.sh first")
+        raise GatewayError("diarization models missing — run ./run.sh first")
     cfg = sherpa_onnx.OfflineSpeakerDiarizationConfig(
         segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
             pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(

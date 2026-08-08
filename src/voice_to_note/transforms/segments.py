@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from typing import Any
 
 from ..domain import Segment
 
@@ -14,14 +15,25 @@ def display_name(speaker: str | None, names: dict[str, str]) -> str:
     return names.get(speaker, speaker) or "Unknown"
 
 
+def _field(source: dict, key: str, index: int) -> Any:
+    """Reads one field of a transcription, naming what a changed whisper output
+    left out — the JSON it came from lives in a temp dir the user never sees."""
+    try:
+        return source[key]
+    except (KeyError, TypeError) as e:
+        # TypeError means the entry is not a mapping at all, e.g. a bare string
+        raise ValueError(f"whisper segment {index} has no {key!r}") from e
+
+
 def segments_from_whisper(raw: dict) -> list[Segment]:
     """Takes the usable speech out of a transcription, dropping silent stretches."""
     segs = []
-    for s in raw.get("transcription", []):
-        text = s["text"].strip()
+    for i, s in enumerate(raw.get("transcription", [])):
+        text = _field(s, "text", i).strip()
         if not text:
             continue
-        segs.append(Segment(s["offsets"]["from"], s["offsets"]["to"], text))
+        offsets = _field(s, "offsets", i)
+        segs.append(Segment(_field(offsets, "from", i), _field(offsets, "to", i), text))
     return segs
 
 

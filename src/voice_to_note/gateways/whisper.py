@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 
 from .. import config
+from . import GatewayError
 
 # transcription runs faster than real time even on CPU; this is a stuck-process
 # guard, not a performance target
@@ -19,9 +20,9 @@ def timeout_for(duration_s: float) -> float:
 def transcribe(wav: Path, duration_s: float) -> dict:
     """Turns speech into timed text, locally."""
     if not config.WHISPER_BIN.exists():
-        raise RuntimeError("whisper-cli not built — run ./run.sh first")
+        raise GatewayError("whisper-cli not built — run ./run.sh first")
     if not config.WHISPER_MODEL_PATH.exists():
-        raise RuntimeError(f"model missing: {config.WHISPER_MODEL_PATH} — run ./run.sh first")
+        raise GatewayError(f"model missing: {config.WHISPER_MODEL_PATH} — run ./run.sh first")
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "out"
         cmd = [
@@ -39,9 +40,9 @@ def transcribe(wav: Path, duration_s: float) -> dict:
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired as e:
-            raise RuntimeError(
+            raise GatewayError(
                 f"whisper-cli timed out after {timeout:.0f}s on {wav.name}"
             ) from e
         if proc.returncode != 0:
-            raise RuntimeError(f"whisper-cli failed:\n{proc.stderr[-2000:]}")
+            raise GatewayError(f"whisper-cli failed:\n{proc.stderr[-2000:]}")
         return json.loads(out.with_suffix(".json").read_text())
