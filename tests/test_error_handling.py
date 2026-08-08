@@ -58,6 +58,16 @@ def fake_ollama(monkeypatch, body: bytes) -> None:
     )
 
 
+class StubRepo:
+    """Stands in for the database where a test only cares about what got called."""
+
+    def __enter__(self) -> "StubRepo":
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+
 def boom(message: str, error: type[Exception]):
     """A command that fails, with the caller choosing whether that failure reads
     as a setup problem or as a bug."""
@@ -209,7 +219,7 @@ def test_a_transcription_entry_that_is_not_a_segment_names_its_position():
 
 def test_a_missing_model_ends_the_command_with_a_message_not_a_traceback(monkeypatch):
     failure = "segmentation model missing — run ./run.sh"
-    monkeypatch.setattr(cli, "Repository", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "Repository", lambda *a, **k: StubRepo())
     monkeypatch.setattr(cli.services, "rediarize", boom(failure, GatewayError))
     monkeypatch.setattr(sys, "argv", ["vtn", "diarize", "3"])
 
@@ -223,7 +233,7 @@ def test_a_failed_conversion_ends_process_with_a_message_not_a_traceback(tmp_pat
     src = tmp_path / "standup.m4a"
     src.write_bytes(b"fake audio")
     failure = "whisper-cli not built — run ./run.sh first"
-    monkeypatch.setattr(cli, "Repository", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "Repository", lambda *a, **k: StubRepo())
     monkeypatch.setattr(cli.services, "process_memo", boom(failure, GatewayError))
     monkeypatch.setattr(sys, "argv", ["vtn", "process", str(src)])
 
@@ -239,7 +249,7 @@ def test_processing_without_ffmpeg_installed_ends_with_a_message_not_a_traceback
     # the whole seam end to end: a real gateway failure, through services, out of main()
     src = tmp_path / "standup.m4a"
     src.write_bytes(b"fake audio")
-    monkeypatch.setattr(cli, "Repository", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "Repository", lambda *a, **k: StubRepo())
     monkeypatch.setattr(services.config, "UPLOADS_DIR", tmp_path / "uploads")
     fake_missing_binary(monkeypatch, audio)
     monkeypatch.setattr(sys, "argv", ["vtn", "process", str(src)])
@@ -253,7 +263,7 @@ def test_processing_without_ffmpeg_installed_ends_with_a_message_not_a_traceback
 def test_a_bug_inside_a_command_keeps_its_traceback(monkeypatch):
     # a plain RuntimeError is a defect, not a setup problem: hiding it behind a
     # one-line exit would cost the developer the stack that locates it
-    monkeypatch.setattr(cli, "Repository", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "Repository", lambda *a, **k: StubRepo())
     monkeypatch.setattr(cli.services, "rediarize", boom("index out of range", RuntimeError))
     monkeypatch.setattr(sys, "argv", ["vtn", "diarize", "3"])
 
@@ -262,7 +272,7 @@ def test_a_bug_inside_a_command_keeps_its_traceback(monkeypatch):
 
 
 def test_an_unimplemented_command_keeps_its_traceback(monkeypatch):
-    monkeypatch.setattr(cli, "Repository", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "Repository", lambda *a, **k: StubRepo())
     monkeypatch.setattr(cli.services, "rediarize", boom("todo", NotImplementedError))
     monkeypatch.setattr(sys, "argv", ["vtn", "diarize", "3"])
 

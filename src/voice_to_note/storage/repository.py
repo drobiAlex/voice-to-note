@@ -69,6 +69,17 @@ class Repository:
         """Closes the memo database."""
         self.con.close()
 
+    def __enter__(self) -> "Repository":
+        """Hands back the already-open database: the connection is made when the
+        repository is built, so a block only scopes when it gets closed."""
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        """Closes the database when the command is done, so a long-lived process
+        cannot leave connections open behind it."""
+        self.close()
+        return False
+
     # --- memos ---------------------------------------------------------
 
     def create_memo(

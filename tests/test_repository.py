@@ -68,6 +68,20 @@ def test_unknown_memo_is_none(repo):
     assert repo.memos() == []
 
 
+def test_a_repository_block_hands_back_the_repository(tmp_path):
+    with Repository(tmp_path / "block.db") as repo:
+        memo_id = make_memo(repo)
+        assert repo.memo(memo_id).filename == "memo.m4a"
+
+
+def test_leaving_a_repository_block_closes_the_database(tmp_path):
+    with Repository(tmp_path / "block.db") as repo:
+        memo_id = make_memo(repo)
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        repo.memo(memo_id)
+
+
 def test_speaker_embeddings_round_trip_as_float32(repo):
     emb = np.array([0.5, -0.25, 0.125], dtype=np.float32)
     make_memo(repo, speakers=[Speaker("S1", "Alice", emb)])

@@ -6,7 +6,6 @@ from pathlib import Path
 from . import services
 from .gateways import GatewayError
 from .storage.repository import Repository
-from .transforms.segments import display_name, fmt_ts
 
 EXAMPLES = """examples:
   vtn process ~/memos/standup.m4a     transcribe, diarize, then extract notes
@@ -34,83 +33,84 @@ def cmd_process(args: argparse.Namespace) -> None:
     src = Path(args.file).expanduser().resolve()
     if not src.exists():
         sys.exit(f"no such file: {src}")
-    repo = Repository()
-    result = services.process_memo(repo, src, log=status)
-    status(
-        f"memo {result.memo_id} — {result.segment_count} segments,"
-        f" {len(result.labels)} speakers, language={result.language}"
-    )
-    try:
-        status("extracting notes …")
-        backend = services.run_extraction(repo, result.memo_id)
-        status(f"extracted via {backend}\n")
-        print(services.notes(repo, result.memo_id))
-    except services.ExtractionError as e:
-        status(f"extraction skipped: {e}")
-        status(f"retry later with: vtn extract {result.memo_id}")
+    with Repository() as repo:
+        result = services.process_memo(repo, src, log=status)
+        status(
+            f"memo {result.memo_id} — {result.segment_count} segments,"
+            f" {len(result.labels)} speakers, language={result.language}"
+        )
+        try:
+            status("extracting notes …")
+            backend = services.run_extraction(repo, result.memo_id)
+            status(f"extracted via {backend}\n")
+            print(services.notes(repo, result.memo_id))
+        except services.ExtractionError as e:
+            status(f"extraction skipped: {e}")
+            status(f"retry later with: vtn extract {result.memo_id}")
 
 
 def cmd_list(args: argparse.Namespace) -> None:
     """Shows what has been processed so far."""
-    repo = Repository()
-    if args.json:
-        print(services.memos_json(repo))
-        return
-    memos = repo.memos()
-    if not memos:
-        status("no memos yet")
-        return
-    for m in memos:
-        dur = f"{m.duration_s:.0f}s" if m.duration_s else "?"
-        print(f"{m.id:>4}  {m.created_at}  {dur:>6}  {m.language or '?':<3}"
-              f"  {m.status:<12} {m.filename}")
+    with Repository() as repo:
+        if args.json:
+            print(services.memos_json(repo))
+            return
+        listing = services.memos_text(repo)
+        if listing:
+            print(listing)
+        else:
+            status("no memos yet")
 
 
 def cmd_show(args: argparse.Namespace) -> None:
     """Prints one memo's transcript."""
-    repo = Repository()
-    memo = services.require_memo(repo, args.id)
-    if args.json:
-        print(services.transcript_json(repo, args.id))
-        return
-    names = repo.display_names(args.id)
-    status(f"memo {memo.id} — {memo.filename} ({memo.status})\n")
-    for s in repo.segments(args.id):
-        print(f"{fmt_ts(s.t0_ms)}  {display_name(s.speaker, names)}: {s.text}")
+    with Repository() as repo:
+        if args.json:
+            # scripts get an error for an unknown id, never an empty transcript
+            services.require_memo(repo, args.id)
+            print(services.transcript_json(repo, args.id))
+            return
+        status(services.memo_heading(repo, args.id) + "\n")
+        lines = services.transcript_lines(repo, args.id)
+        if lines:
+            print(lines)
 
 
 def cmd_diarize(args: argparse.Namespace) -> None:
     """Redoes speaker detection when the first pass got voices wrong."""
-    labels = services.rediarize(Repository(), args.id, log=status)
+    with Repository() as repo:
+        labels = services.rediarize(repo, args.id, log=status)
     status(f"done — {len(labels)} speakers: {', '.join(labels)}")
 
 
 def cmd_extract(args: argparse.Namespace) -> None:
     """Redoes note extraction, for when it was skipped or came out poorly."""
-    repo = Repository()
-    services.require_memo(repo, args.id)
-    status(f"extracting memo {args.id} …")
-    backend = services.run_extraction(repo, args.id)
-    status(f"done via {backend}\n")
-    print(services.notes(repo, args.id))
+    with Repository() as repo:
+        services.require_memo(repo, args.id)
+        status(f"extracting memo {args.id} …")
+        backend = services.run_extraction(repo, args.id)
+        status(f"done via {backend}\n")
+        print(services.notes(repo, args.id))
 
 
 def cmd_notes(args: argparse.Namespace) -> None:
     """Prints the notes already extracted for a memo."""
-    repo = Repository()
-    print(services.notes_json(repo, args.id) if args.json else services.notes(repo, args.id))
+    with Repository() as repo:
+        print(services.notes_json(repo, args.id) if args.json else services.notes(repo, args.id))
 
 
 def cmd_ask(args: argparse.Namespace) -> None:
     """Answers a question about one memo."""
-    backend, answer = services.ask(Repository(), args.id, " ".join(args.question))
+    with Repository() as repo:
+        backend, answer = services.ask(repo, args.id, " ".join(args.question))
     status(f"({backend})\n")
     print(answer)
 
 
 def cmd_rename(args: argparse.Namespace) -> None:
     """Puts a name to a speaker, which later memos then recognise by voice."""
-    services.rename_speaker(Repository(), args.id, args.label, args.name)
+    with Repository() as repo:
+        services.rename_speaker(repo, args.id, args.label, args.name)
     status(f"memo {args.id}: {args.label} -> {args.name}")
 
 

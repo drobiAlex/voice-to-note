@@ -11,6 +11,8 @@ from .gateways import audio, llm, sherpa, whisper
 from .storage.repository import Repository
 from .transforms.notes import SCHEMA, parse_notes, render_notes
 from .transforms.segments import (
+    display_name,
+    fmt_ts,
     segments_as_dicts,
     segments_from_whisper,
     transcript_text,
@@ -125,6 +127,40 @@ def _report_matches(
 def transcript(repo: Repository, memo_id: int) -> str:
     """The speaker-labeled transcript a person or an LLM reads."""
     return transcript_text(repo.segments(memo_id), repo.display_names(memo_id))
+
+
+def _duration(duration_s: float | None) -> str:
+    """A recording's length in whole seconds, or a shrug when it was never
+    measured. A zero-length recording reads as unmeasured too, which is right:
+    nothing was captured either way."""
+    return f"{duration_s:.0f}s" if duration_s else "?"
+
+
+def memos_text(repo: Repository) -> str:
+    """The memo list as a person reads it, newest first and column-aligned so the
+    ids, dates and states line up down the screen. Empty when nothing is stored."""
+    return "\n".join(
+        f"{m.id:>4}  {m.created_at}  {_duration(m.duration_s):>6}  {m.language or '?':<3}"
+        f"  {m.status:<12} {m.filename}"
+        for m in repo.memos()
+    )
+
+
+def memo_heading(repo: Repository, memo_id: int) -> str:
+    """How a transcript is introduced on screen: which recording, and how far
+    through the pipeline it got."""
+    memo = require_memo(repo, memo_id)
+    return f"memo {memo.id} — {memo.filename} ({memo.status})"
+
+
+def transcript_lines(repo: Repository, memo_id: int) -> str:
+    """The transcript as a person reads it: one timestamp-led line per segment,
+    speakers under the names they were given. Empty when nothing was transcribed."""
+    names = repo.display_names(memo_id)
+    return "\n".join(
+        f"{fmt_ts(s.t0_ms)}  {display_name(s.speaker, names)}: {s.text}"
+        for s in repo.segments(memo_id)
+    )
 
 
 def _complete(
