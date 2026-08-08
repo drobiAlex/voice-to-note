@@ -42,6 +42,8 @@ class Segment:
     text: str
     speaker: str | None = None
     id: int | None = None
+    # what a repair pass made of this line; the raw text above is never replaced
+    refined_text: str | None = None
 
 
 @dataclass(frozen=True)

@@ -165,3 +165,60 @@ def test_the_command_line_leaves_database_reads_and_formatting_to_services():
     assert "Repository(" in source
     assert "repo." not in source
     assert "from .transforms" not in source
+
+
+# --- repairing a transcript ----------------------------------------------
+
+
+def refine_result():
+    """One repaired line, one refused, the rest left as they were."""
+    return services.RefineResult(
+        changes=[services.Change(3, "so their going", "So they're going")],
+        flagged=[7],
+        untouched=16,
+    )
+
+
+def test_refining_a_memo_reports_what_it_changed(monkeypatch, capsys):
+    seen: dict = {}
+
+    def refine_transcript(_repo, memo_id, dry_run=False):
+        seen["memo_id"], seen["dry_run"] = memo_id, dry_run
+        return refine_result()
+
+    monkeypatch.setattr(services, "refine_transcript", refine_transcript)
+
+    run(monkeypatch, StubRepo(), "refine", "3")
+
+    captured = capsys.readouterr()
+    assert seen == {"memo_id": 3, "dry_run": False}
+    assert captured.out == ""
+    assert captured.err == "memo 3: repaired 1, flagged 1, unchanged 16\n"
+
+
+def test_a_diff_run_prints_the_changes_and_writes_nothing(monkeypatch, capsys):
+    seen: dict = {}
+
+    def refine_transcript(_repo, memo_id, dry_run=False):
+        seen["dry_run"] = dry_run
+        return refine_result()
+
+    monkeypatch.setattr(services, "refine_transcript", refine_transcript)
+    monkeypatch.setattr(services, "refine_diff_text", lambda _r: "[3] before\n      → after")
+
+    run(monkeypatch, StubRepo(), "refine", "3", "--diff")
+
+    captured = capsys.readouterr()
+    assert seen["dry_run"] is True
+    assert captured.out == "[3] before\n      → after\n"
+    assert captured.err == ""
+
+
+def test_a_diff_run_that_found_nothing_prints_nothing_at_all(monkeypatch, capsys):
+    # a lone blank line would read as output; it has to be silence
+    nothing = services.RefineResult(changes=[], flagged=[], untouched=17)
+    monkeypatch.setattr(services, "refine_transcript", lambda *a, **k: nothing)
+
+    run(monkeypatch, StubRepo(), "refine", "3", "--diff")
+
+    assert capsys.readouterr().out == ""

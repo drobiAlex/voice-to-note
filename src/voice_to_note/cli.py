@@ -83,6 +83,21 @@ def cmd_diarize(args: argparse.Namespace) -> None:
     status(f"done — {len(labels)} speakers: {', '.join(labels)}")
 
 
+def cmd_refine(args: argparse.Namespace) -> None:
+    """Repairs transcription errors in a memo, or shows what it would repair."""
+    with Repository() as repo:
+        result = services.refine_transcript(repo, args.id, dry_run=args.diff)
+        if args.diff:
+            diff = services.refine_diff_text(result)
+            if diff:
+                print(diff)
+            return
+        status(
+            f"memo {args.id}: repaired {len(result.changes)},"
+            f" flagged {len(result.flagged)}, unchanged {result.untouched}"
+        )
+
+
 def cmd_extract(args: argparse.Namespace) -> None:
     """Redoes note extraction, for when it was skipped or came out poorly."""
     with Repository() as repo:
@@ -141,6 +156,11 @@ def main() -> None:
     sp = sub.add_parser("diarize", help="(re)run diarization on an existing memo")
     sp.add_argument("id", type=int)
     sp.set_defaults(fn=cmd_diarize)
+
+    sp = sub.add_parser("refine", help="repair transcription errors in a memo")
+    sp.add_argument("id", type=int)
+    sp.add_argument("--diff", action="store_true", help="show the repairs without storing them")
+    sp.set_defaults(fn=cmd_refine)
 
     sp = sub.add_parser("extract", help="(re)extract structured notes for a memo")
     sp.add_argument("id", type=int)

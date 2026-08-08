@@ -50,6 +50,13 @@ class Chunk:
     targets: list[Segment]
     after: list[Segment]
 
+    @property
+    def target_ids(self) -> list[int]:
+        """The ids this window expects back. chunk_segments guarantees every
+        target has one; a hand-built Chunk need not, so those are filtered out
+        rather than trusted."""
+        return [s.id for s in self.targets if s.id is not None]
+
 
 def chunk_segments(segments: Sequence[Segment]) -> list[Chunk]:
     """Splits a transcript into windows small enough to repair in one request,

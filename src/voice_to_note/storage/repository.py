@@ -1,6 +1,6 @@
 import json
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Literal, cast
 
@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS segments (
   t0_ms INTEGER NOT NULL,
   t1_ms INTEGER NOT NULL,
   text TEXT NOT NULL,
-  speaker TEXT
+  speaker TEXT,
+  refined_text TEXT
 );
 CREATE TABLE IF NOT EXISTS extractions (
   id INTEGER PRIMARY KEY,
@@ -61,10 +62,14 @@ class Repository:
         self._migrate()
 
     def _migrate(self) -> None:
-        """Lets a database created before voice matching store fingerprints."""
+        """Lets a database made before voice matching store fingerprints, and one
+        made before transcript repair store the repaired wording."""
         cols = {r["name"] for r in self.con.execute("PRAGMA table_info(speakers)")}
         if "embedding" not in cols:
             self.con.execute("ALTER TABLE speakers ADD COLUMN embedding BLOB")
+        cols = {r["name"] for r in self.con.execute("PRAGMA table_info(segments)")}
+        if "refined_text" not in cols:
+            self.con.execute("ALTER TABLE segments ADD COLUMN refined_text TEXT")
 
     def close(self) -> None:
         """Closes the memo database."""
@@ -131,9 +136,11 @@ class Repository:
     def segments(self, memo_id: int) -> list[Segment]:
         """A memo's transcript in the order it was spoken."""
         return [
-            Segment(r["t0_ms"], r["t1_ms"], r["text"], r["speaker"], r["id"])
+            Segment(
+                r["t0_ms"], r["t1_ms"], r["text"], r["speaker"], r["id"], r["refined_text"]
+            )
             for r in self.con.execute(
-                "SELECT id, t0_ms, t1_ms, text, speaker FROM segments"
+                "SELECT id, t0_ms, t1_ms, text, speaker, refined_text FROM segments"
                 " WHERE memo_id=? ORDER BY t0_ms",
                 (memo_id,),
             )
@@ -149,6 +156,19 @@ class Repository:
                 [(s.speaker, s.id) for s in segments],
             )
             self._write_speakers(memo_id, speakers)
+
+    def update_refinements(self, memo_id: int, refinements: Mapping[int, str]) -> None:
+        """Records a repair pass over a memo. This becomes the whole set of
+        refinements that memo has, so a line the pass left out goes back to the
+        words that were actually transcribed."""
+        with self.con:
+            self.con.execute(
+                "UPDATE segments SET refined_text=NULL WHERE memo_id=?", (memo_id,)
+            )
+            self.con.executemany(
+                "UPDATE segments SET refined_text=? WHERE memo_id=? AND id=?",
+                [(text, memo_id, seg_id) for seg_id, text in refinements.items()],
+            )
 
     # --- speakers ------------------------------------------------------
 

@@ -6,6 +6,7 @@ import pytest
 from voice_to_note import config, services
 from voice_to_note.domain import Segment, Speaker, Turn
 from voice_to_note.gateways import llm, whisper
+from voice_to_note.transforms import refine
 
 ALICE_VOICE = np.array([1.0, 0.0, 0.0], dtype=np.float32)
 BOB_VOICE = np.array([0.0, 1.0, 0.0], dtype=np.float32)
@@ -208,3 +209,117 @@ def test_ask_about_a_missing_memo_is_rejected_before_calling_a_backend(repo, mon
     with pytest.raises(services.NotFound):
         services.ask(repo, 999, "anything?")
     assert prompts == []
+
+
+def refine_reply(pairs: dict[int, str]) -> str:
+    """A backend answering a repair request in the shape the parser demands."""
+    return json.dumps({"segments": [{"id": i, "text": t} for i, t in pairs.items()]})
+
+
+def add_transcript(repo, wav, lines: list[str]) -> list[int]:
+    """Stores a memo of raw transcript lines and hands back their ids."""
+    memo_id = add_memo(repo, wav, segments=[Segment(i * 1000, i * 1000 + 900, t, speaker="S1")
+                                            for i, t in enumerate(lines)])
+    return [memo_id, *[s.id for s in repo.segments(memo_id)]]
+
+
+def test_refining_a_memo_stores_the_repairs_beside_the_original(repo, wav, monkeypatch):
+    memo_id, first, second = add_transcript(
+        repo, wav, ["so their going to ship on friday", "yeah we agreed on that"]
+    )
+    fake_llm(monkeypatch, claude=refine_reply({
+        first: "So they're going to ship on Friday.",
+        second: "Yeah, we agreed on that.",
+    }))
+
+    result = services.refine_transcript(repo, memo_id)
+
+    stored = repo.segments(memo_id)
+    assert [s.refined_text for s in stored] == [
+        "So they're going to ship on Friday.",
+        "Yeah, we agreed on that.",
+    ]
+    assert [s.text for s in stored] == [
+        "so their going to ship on friday",
+        "yeah we agreed on that",
+    ]
+    assert len(result.changes) == 2
+    assert result.flagged == []
+
+
+def test_a_line_the_model_rewrote_is_flagged_and_left_as_recorded(repo, wav, monkeypatch):
+    memo_id, only = add_transcript(repo, wav, ["we ship the release on friday"])
+    fake_llm(monkeypatch, claude=refine_reply({only: "The cat sat upon the mat in silence."}))
+
+    result = services.refine_transcript(repo, memo_id)
+
+    assert repo.segments(memo_id)[0].refined_text is None
+    assert result.flagged == [only]
+    assert result.changes == []
+
+
+def test_a_repair_identical_to_the_original_counts_as_untouched(repo, wav, monkeypatch):
+    memo_id, only = add_transcript(repo, wav, ["nothing wrong with this line"])
+    fake_llm(monkeypatch, claude=refine_reply({only: "nothing wrong with this line"}))
+
+    result = services.refine_transcript(repo, memo_id)
+
+    assert result.untouched == 1
+    assert result.changes == []
+
+
+def test_a_dry_run_shows_the_repairs_without_storing_any(repo, wav, monkeypatch):
+    memo_id, only = add_transcript(repo, wav, ["so their going to ship on friday"])
+    fake_llm(monkeypatch, claude=refine_reply({only: "So they're going to ship on Friday."}))
+
+    result = services.refine_transcript(repo, memo_id, dry_run=True)
+
+    assert repo.segments(memo_id)[0].refined_text is None
+    assert [(c.segment_id, c.before, c.after) for c in result.changes] == [
+        (only, "so their going to ship on friday", "So they're going to ship on Friday.")
+    ]
+
+
+def test_refining_a_missing_memo_is_rejected_before_calling_a_backend(repo, monkeypatch):
+    prompts = fake_llm(monkeypatch, claude="anything")
+
+    with pytest.raises(services.NotFound):
+        services.refine_transcript(repo, 999)
+
+    assert prompts == []
+
+
+def test_refining_without_a_backend_says_how_to_get_one(repo, wav, monkeypatch):
+    memo_id, _only = add_transcript(repo, wav, ["so their going to ship on friday"])
+    fake_llm(monkeypatch)
+
+    with pytest.raises(services.ExtractionError, match="install claude CLI"):
+        services.refine_transcript(repo, memo_id)
+
+
+def test_the_local_backend_is_held_to_the_reply_shape(repo, wav, monkeypatch):
+    # constrained decoding is the only thing keeping a small model on-format
+    memo_id, only = add_transcript(repo, wav, ["so their going to ship on friday"])
+    seen: dict = {}
+
+    def ollama(prompt, schema=None):
+        seen["schema"] = schema
+        return refine_reply({only: "So they're going to ship on Friday."})
+
+    monkeypatch.setattr(services.llm, "claude_available", lambda: False)
+    monkeypatch.setattr(services.llm, "ollama_available", lambda: True)
+    monkeypatch.setattr(services.llm, "ollama_complete", ollama)
+
+    services.refine_transcript(repo, memo_id)
+
+    assert seen["schema"] == refine.REFINE_SCHEMA
+
+
+def test_the_diff_reads_as_one_before_and_after_per_line():
+    result = services.RefineResult(
+        changes=[services.Change(3, "so their going", "So they're going")],
+        flagged=[],
+        untouched=0,
+    )
+
+    assert services.refine_diff_text(result) == "[3] so their going\n      → So they're going"

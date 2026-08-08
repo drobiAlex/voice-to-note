@@ -19,6 +19,19 @@ CREATE TABLE speakers (
 """
 
 
+PRE_REFINEMENT_SCHEMA = """
+CREATE TABLE memos (
+  id INTEGER PRIMARY KEY, filename TEXT NOT NULL, wav_path TEXT NOT NULL,
+  duration_s REAL, language TEXT, status TEXT NOT NULL DEFAULT 'new',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE segments (
+  id INTEGER PRIMARY KEY, memo_id INTEGER NOT NULL, t0_ms INTEGER NOT NULL,
+  t1_ms INTEGER NOT NULL, text TEXT NOT NULL, speaker TEXT
+);
+"""
+
+
 def make_memo(repo, *, segments=(), speakers=(), filename="memo.m4a"):
     return repo.create_memo(
         filename=filename,
@@ -181,4 +194,57 @@ def test_pre_embedding_database_gains_the_embedding_column(tmp_path):
     emb = np.array([0.5, -0.5], dtype=np.float32)
     repo.save_diarization(1, [], [Speaker("S1", "Alice", emb)])
     assert np.array_equal(repo.known_embeddings()["Alice"][0], emb)
+    repo.close()
+
+
+def test_a_transcript_starts_out_with_nothing_refined(repo):
+    memo_id = make_memo(repo, segments=[Segment(0, 1000, "as transcribed")])
+
+    assert repo.segments(memo_id)[0].refined_text is None
+
+
+def test_a_refinement_is_stored_beside_the_words_that_were_heard(repo):
+    # the recording is the record: a repair never overwrites what was transcribed
+    memo_id = make_memo(repo, segments=[Segment(0, 1000, "so their going")])
+    seg_id = repo.segments(memo_id)[0].id
+
+    repo.update_refinements(memo_id, {seg_id: "So they're going"})
+
+    stored = repo.segments(memo_id)[0]
+    assert stored.text == "so their going"
+    assert stored.refined_text == "So they're going"
+
+
+def test_refining_a_memo_again_replaces_the_earlier_pass(repo):
+    # a second pass is the whole refinement of that memo, not an addition to it
+    memo_id = make_memo(
+        repo, segments=[Segment(0, 1000, "first line"), Segment(1000, 2000, "second line")]
+    )
+    first, second = repo.segments(memo_id)
+    repo.update_refinements(memo_id, {first.id: "First line.", second.id: "Second line."})
+
+    repo.update_refinements(memo_id, {second.id: "Second line!"})
+
+    assert [s.refined_text for s in repo.segments(memo_id)] == [None, "Second line!"]
+
+
+def test_a_database_from_before_refinement_gains_the_column(tmp_path):
+    path = tmp_path / "legacy.db"
+    con = sqlite3.connect(path)
+    con.executescript(PRE_REFINEMENT_SCHEMA)
+    con.execute("INSERT INTO memos (filename, wav_path) VALUES ('old.m4a', '/tmp/old.wav')")
+    con.execute(
+        "INSERT INTO segments (memo_id, t0_ms, t1_ms, text, speaker)"
+        " VALUES (1, 0, 1000, 'as first transcribed', 'S1')"
+    )
+    con.commit()
+    con.close()
+
+    repo = Repository(path)
+    stored = repo.segments(1)
+    assert [s.text for s in stored] == ["as first transcribed"]
+    assert stored[0].refined_text is None
+
+    repo.update_refinements(1, {stored[0].id: "As first transcribed."})
+    assert repo.segments(1)[0].refined_text == "As first transcribed."
     repo.close()

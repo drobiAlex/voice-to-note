@@ -2,6 +2,7 @@ import json
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path
 from typing import TypeVar
 
@@ -10,6 +11,13 @@ from .domain import Extraction, Memo, Speaker, SpeakerMatch, Turn
 from .gateways import audio, llm, sherpa, whisper
 from .storage.repository import Repository
 from .transforms.notes import SCHEMA, parse_notes, render_notes
+from .transforms.refine import (
+    REFINE_SCHEMA,
+    accept_repairs,
+    chunk_segments,
+    merge_refinements,
+    parse_refinements,
+)
 from .transforms.segments import (
     display_name,
     fmt_ts,
@@ -202,6 +210,60 @@ def run_extraction(repo: Repository, memo_id: int) -> str:
     )
     repo.save_extraction(memo_id, backend, data)
     return backend
+
+
+@dataclass(frozen=True)
+class Change:
+    """One line a repair pass actually changed, and what it changed it from."""
+
+    segment_id: int
+    before: str
+    after: str
+
+
+@dataclass(frozen=True)
+class RefineResult:
+    """What a repair pass did: the lines it changed, the lines whose repair was
+    refused as a rewrite, and the count it found nothing to fix in."""
+
+    changes: list[Change]
+    flagged: list[int]
+    untouched: int
+
+
+def refine_transcript(repo: Repository, memo_id: int, dry_run: bool = False) -> RefineResult:
+    """Repairs transcription errors a window at a time, reading each line in the
+    company of its neighbours. A line the model changed past recognition keeps
+    the words that were actually transcribed, and is reported instead.
+    A pass replaces the memo's whole refinement, so running it again reverts any
+    line this pass does not repair the same way."""
+    require_memo(repo, memo_id)
+    segments = repo.segments(memo_id)
+    chunks = chunk_segments(segments)
+    replies = [
+        _complete(
+            llm.refine_prompt(chunk),
+            schema=REFINE_SCHEMA,
+            parse=partial(parse_refinements, expected_ids=chunk.target_ids),
+            failure="refinement failed",
+            unavailable="no refinement backend",
+        )[1]
+        for chunk in chunks
+    ]
+    final, flagged = accept_repairs(segments, merge_refinements(chunks, replies))
+    changes = [
+        Change(s.id, s.text, final[s.id])
+        for s in segments
+        if s.id is not None and final[s.id] != s.text
+    ]
+    if not dry_run:
+        repo.update_refinements(memo_id, {c.segment_id: c.after for c in changes})
+    return RefineResult(changes, flagged, len(segments) - len(changes) - len(flagged))
+
+
+def refine_diff_text(result: RefineResult) -> str:
+    """The repairs laid out for a person to check before they are kept."""
+    return "\n".join(f"[{c.segment_id}] {c.before}\n      → {c.after}" for c in result.changes)
 
 
 def _extraction(repo: Repository, memo_id: int) -> Extraction:
