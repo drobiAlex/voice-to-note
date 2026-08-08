@@ -6,7 +6,6 @@ import pytest
 from voice_to_note import config, services
 from voice_to_note.domain import Segment, Speaker, Turn
 from voice_to_note.gateways import llm, whisper
-from voice_to_note.storage.repository import Repository
 
 ALICE_VOICE = np.array([1.0, 0.0, 0.0], dtype=np.float32)
 BOB_VOICE = np.array([0.0, 1.0, 0.0], dtype=np.float32)
@@ -21,13 +20,6 @@ NOTES = {
     "dates": [],
     "tags": [],
 }
-
-
-@pytest.fixture
-def repo(tmp_path):
-    r = Repository(tmp_path / "services.db")
-    yield r
-    r.close()
 
 
 @pytest.fixture

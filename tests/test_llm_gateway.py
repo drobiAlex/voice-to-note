@@ -2,28 +2,13 @@ import json
 import urllib.error
 
 import pytest
+from conftest import FakeResponse
 
 from voice_to_note import config
 from voice_to_note.gateways import llm
 from voice_to_note.transforms.notes import SCHEMA
 
 TRANSCRIPT = "[00:00] Alice: We ship on Friday."
-
-
-class FakeResponse:
-    """A reply from an ollama that is running, whatever it chose to say."""
-
-    def __init__(self, body: bytes):
-        self.body = body
-
-    def __enter__(self) -> "FakeResponse":
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
-
-    def read(self) -> bytes:
-        return self.body
 
 
 def fake_tags(monkeypatch, body: bytes) -> None:

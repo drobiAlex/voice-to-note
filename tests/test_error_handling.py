@@ -3,6 +3,7 @@ import subprocess
 import sys
 
 import pytest
+from conftest import FakeResponse, StubRepo
 
 from voice_to_note import cli, services
 from voice_to_note.gateways import GatewayError, audio, llm
@@ -35,37 +36,11 @@ def fake_missing_binary(monkeypatch, module) -> None:
     monkeypatch.setattr(module.subprocess, "run", run)
 
 
-class FakeResponse:
-    """An HTTP 200 whose body is whatever the test wants the model to have said."""
-
-    def __init__(self, body: bytes):
-        self.body = body
-
-    def __enter__(self) -> "FakeResponse":
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
-
-    def read(self) -> bytes:
-        return self.body
-
-
 def fake_ollama(monkeypatch, body: bytes) -> None:
     """Answers the next Ollama call with a canned body, without touching a socket."""
     monkeypatch.setattr(
         llm.urllib.request, "urlopen", lambda _req, timeout=None: FakeResponse(body)
     )
-
-
-class StubRepo:
-    """Stands in for the database where a test only cares about what got called."""
-
-    def __enter__(self) -> "StubRepo":
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
 
 
 def boom(message: str, error: type[Exception]):

@@ -22,13 +22,15 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
+      # every tool runs from the synced environment, so the pinned versions in
+      # pyproject are the single place any of them can change
       - name: Lint
-        run: uvx ruff@0.16.2 check src tests
+        run: uv run ruff check src tests
 
-      # unlike ruff, mypy has to see the project's dependencies to resolve
-      # imports, so it runs inside the synced environment rather than via uvx
       - name: Types
         run: uv run mypy src
 
+      # the floor sits ~2 points under the measured 86.81%, so ordinary churn
+      # does not fail CI but a real drop in covered behavior does
       - name: Test
-        run: uv run pytest -q
+        run: uv run pytest -q --cov=voice_to_note --cov-fail-under=84

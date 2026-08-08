@@ -3,27 +3,10 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import StubRepo
 
 from voice_to_note import cli, services
 from voice_to_note.domain import Segment, Speaker
-from voice_to_note.storage.repository import Repository
-
-
-@pytest.fixture
-def repo(tmp_path):
-    r = Repository(tmp_path / "cli.db")
-    yield r
-    r.close()
-
-
-class StubRepo:
-    """Stands in for the database where a test only cares about what got called."""
-
-    def __enter__(self) -> "StubRepo":
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
 
 
 def add_memo(

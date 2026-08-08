@@ -19,13 +19,6 @@ CREATE TABLE speakers (
 """
 
 
-@pytest.fixture
-def repo(tmp_path):
-    r = Repository(tmp_path / "test.db")
-    yield r
-    r.close()
-
-
 def make_memo(repo, *, segments=(), speakers=(), filename="memo.m4a"):
     return repo.create_memo(
         filename=filename,
