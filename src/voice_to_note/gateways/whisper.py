@@ -2,8 +2,10 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import cast
 
 from .. import config
+from ..transforms.segments import WhisperTranscription
 from . import GatewayError
 
 # transcription runs faster than real time even on CPU; this is a stuck-process
@@ -17,7 +19,7 @@ def timeout_for(duration_s: float) -> float:
     return max(TIMEOUT_FLOOR_S, TIMEOUT_FACTOR * duration_s)
 
 
-def transcribe(wav: Path, duration_s: float) -> dict:
+def transcribe(wav: Path, duration_s: float) -> WhisperTranscription:
     """Turns speech into timed text, locally."""
     if not config.WHISPER_BIN.exists():
         raise GatewayError("whisper-cli not built — run ./run.sh first")
@@ -45,4 +47,6 @@ def transcribe(wav: Path, duration_s: float) -> dict:
             ) from e
         if proc.returncode != 0:
             raise GatewayError(f"whisper-cli failed:\n{proc.stderr[-2000:]}")
-        return json.loads(out.with_suffix(".json").read_text())
+        # whisper's own output, taken at its word: the segment reader names any
+        # field it finds missing, while a missing language just reads as unset
+        return cast(WhisperTranscription, json.loads(out.with_suffix(".json").read_text()))

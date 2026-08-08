@@ -2,11 +2,12 @@ import json
 import sqlite3
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Literal, cast
 
 import numpy as np
 
 from .. import config
-from ..domain import Extraction, Memo, Segment, Speaker
+from ..domain import Extraction, Memo, NotesPayload, Segment, Speaker
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS memos (
@@ -74,7 +75,7 @@ class Repository:
         repository is built, so a block only scopes when it gets closed."""
         return self
 
-    def __exit__(self, *exc: object) -> bool:
+    def __exit__(self, *exc: object) -> Literal[False]:
         """Closes the database when the command is done, so a long-lived process
         cannot leave connections open behind it."""
         self.close()
@@ -99,6 +100,9 @@ class Repository:
                 " VALUES (?,?,?,?,'transcribed')",
                 (filename, wav_path, duration_s, language),
             )
+            # sqlite always reports the row it just inserted; the check narrows
+            # the type for everything downstream that treats this as an id
+            assert cur.lastrowid is not None
             memo_id = cur.lastrowid
             self.con.executemany(
                 "INSERT INTO segments (memo_id, t0_ms, t1_ms, text, speaker)"
@@ -213,7 +217,7 @@ class Repository:
 
     # --- extractions ---------------------------------------------------
 
-    def save_extraction(self, memo_id: int, backend: str, data: dict) -> None:
+    def save_extraction(self, memo_id: int, backend: str, data: NotesPayload) -> None:
         """Files notes against a memo, replacing any earlier attempt."""
         with self.con:
             self.con.execute("DELETE FROM extractions WHERE memo_id=?", (memo_id,))
@@ -231,7 +235,9 @@ class Repository:
         ).fetchone()
         if not row:
             return None
-        return Extraction(row["backend"], json.loads(row["json"]), row["created_at"])
+        # only parse_notes writes here, so the stored JSON already passed its check
+        data = cast(NotesPayload, json.loads(row["json"]))
+        return Extraction(row["backend"], data, row["created_at"])
 
 
 def _memo(row: sqlite3.Row) -> Memo:

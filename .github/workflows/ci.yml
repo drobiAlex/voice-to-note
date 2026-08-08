@@ -25,5 +25,10 @@ jobs:
       - name: Lint
         run: uvx ruff@0.16.2 check src tests
 
+      # unlike ruff, mypy has to see the project's dependencies to resolve
+      # imports, so it runs inside the synced environment rather than via uvx
+      - name: Types
+        run: uv run mypy src
+
       - name: Test
         run: uv run pytest -q

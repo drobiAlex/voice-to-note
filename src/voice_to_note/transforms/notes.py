@@ -1,6 +1,7 @@
 import json
+from typing import cast
 
-from ..domain import Extraction
+from ..domain import Extraction, NotesPayload
 
 SCHEMA = {
     "type": "object",
@@ -42,7 +43,7 @@ SCHEMA = {
 }
 
 
-def parse_notes(text: str) -> dict:
+def parse_notes(text: str) -> NotesPayload:
     """Rescues the notes from whatever wrapping an LLM put around them, and
     refuses anything missing a section the reader expects."""
     text = text.strip()
@@ -55,7 +56,8 @@ def parse_notes(text: str) -> dict:
     missing = [k for k in SCHEMA["required"] if k not in data]
     if missing:
         raise ValueError(f"missing keys: {missing}")
-    return data
+    # the check above is what makes this true — json.loads promises nothing
+    return cast(NotesPayload, data)
 
 
 def render_notes(extraction: Extraction) -> str:
@@ -74,14 +76,14 @@ def render_notes(extraction: Extraction) -> str:
             extra = ", ".join(x for x in (a.get("owner"), a.get("deadline")) if x)
             lines.append(f"  [ ] {a['task']}" + (f"  ({extra})" if extra else ""))
         lines.append("")
-    for key, header in (
-        ("decisions", "DECISIONS"),
-        ("key_insights", "KEY INSIGHTS"),
-        ("open_questions", "OPEN QUESTIONS"),
+    for items, header in (
+        (d["decisions"], "DECISIONS"),
+        (d["key_insights"], "KEY INSIGHTS"),
+        (d["open_questions"], "OPEN QUESTIONS"),
     ):
-        if d[key]:
+        if items:
             lines.append(header)
-            lines.extend(f"  - {item}" for item in d[key])
+            lines.extend(f"  - {item}" for item in items)
             lines.append("")
     if d["dates"]:
         lines.append("DATES")

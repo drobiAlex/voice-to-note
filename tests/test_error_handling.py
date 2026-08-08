@@ -179,6 +179,15 @@ def test_an_ollama_reply_of_the_wrong_json_type_demotes_the_backend(monkeypatch)
         llm.ollama_complete("summarise this")
 
 
+def test_an_ollama_reply_whose_content_is_not_text_demotes_the_backend(monkeypatch):
+    # handed back as-is, a number would travel through a str-typed return and
+    # only surface much later, far from the backend that produced it
+    fake_ollama(monkeypatch, json.dumps({"message": {"content": 123}}).encode())
+
+    with pytest.raises(llm.BackendError):
+        llm.ollama_complete("summarise this")
+
+
 # --- whisper output ----------------------------------------------------
 
 

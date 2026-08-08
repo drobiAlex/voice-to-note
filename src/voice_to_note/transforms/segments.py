@@ -1,7 +1,31 @@
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Mapping, Sequence
+from typing import Any, TypedDict
 
 from ..domain import Segment
+
+# What whisper.cpp documents its JSON to contain. It describes the output we
+# expect, not output we are guaranteed, which is why reading it still checks.
+WhisperOffsets = TypedDict("WhisperOffsets", {"from": int, "to": int})
+
+
+class WhisperSegment(TypedDict):
+    """One line of speech as the transcriber reports it, with its bounds."""
+
+    text: str
+    offsets: WhisperOffsets
+
+
+class WhisperResult(TypedDict, total=False):
+    """What the transcriber concluded about the recording as a whole."""
+
+    language: str
+
+
+class WhisperTranscription(TypedDict, total=False):
+    """A whole transcription file: the lines, and what was detected overall."""
+
+    transcription: list[WhisperSegment]
+    result: WhisperResult
 
 
 def fmt_ts(ms: int) -> str:
@@ -11,11 +35,14 @@ def fmt_ts(ms: int) -> str:
 
 
 def display_name(speaker: str | None, names: dict[str, str]) -> str:
-    """How a speaker is written wherever a transcript is shown."""
+    """How a speaker is written wherever a transcript is shown. A segment the
+    diarizer never attributed has no label at all, and reads as Unknown."""
+    if speaker is None:
+        return "Unknown"
     return names.get(speaker, speaker) or "Unknown"
 
 
-def _field(source: dict, key: str, index: int) -> Any:
+def _field(source: Mapping[str, Any], key: str, index: int) -> Any:
     """Reads one field of a transcription, naming what a changed whisper output
     left out — the JSON it came from lives in a temp dir the user never sees."""
     try:
@@ -25,7 +52,7 @@ def _field(source: dict, key: str, index: int) -> Any:
         raise ValueError(f"whisper segment {index} has no {key!r}") from e
 
 
-def segments_from_whisper(raw: dict) -> list[Segment]:
+def segments_from_whisper(raw: WhisperTranscription) -> list[Segment]:
     """Takes the usable speech out of a transcription, dropping silent stretches."""
     segs = []
     for i, s in enumerate(raw.get("transcription", [])):
@@ -55,7 +82,9 @@ def transcript_text(segments: Sequence[Segment], names: dict[str, str]) -> str:
     decides who gets credited with action items in the notes."""
     # consecutive segments from the same person become one timestamped line
     lines: list[str] = []
-    speaker, start_ms, buf = None, 0, []
+    buf: list[str] = []
+    speaker: str | None = None
+    start_ms = 0
     for s in segments:
         who = display_name(s.speaker, names)
         if who != speaker:

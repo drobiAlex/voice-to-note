@@ -123,7 +123,12 @@ def ollama_complete(prompt: str, schema: dict | None = None) -> str:
     except urllib.error.URLError as e:
         raise BackendError(str(e)) from e
     try:
-        return json.loads(reply)["message"]["content"]
+        content = json.loads(reply)["message"]["content"]
+        if not isinstance(content, str):
+            # onto the same failure path: anything else would be handed back
+            # through a str return and only break somewhere far from here
+            raise TypeError(type(content).__name__)
     except (ValueError, KeyError, TypeError) as e:
         # ollama answers 200 with an error body when the model was never pulled
         raise BackendError(f"unexpected reply from ollama: {reply[:500]!r}") from e
+    return content

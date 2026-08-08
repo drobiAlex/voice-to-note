@@ -1,6 +1,36 @@
 from dataclasses import dataclass
+from typing import TypedDict
 
 import numpy as np
+
+
+class ActionItem(TypedDict):
+    """Something a speaker committed to doing, with whoever owns it."""
+
+    task: str
+    owner: str | None
+    deadline: str | None
+
+
+class DateMention(TypedDict):
+    """A date or time that came up, and what it was about."""
+
+    date: str
+    context: str
+
+
+class NotesPayload(TypedDict):
+    """The notes an LLM produces for one memo. Every section is required: the
+    reader shows them all, so a backend that omits one has not done the job."""
+
+    title: str
+    summary: str
+    action_items: list[ActionItem]
+    decisions: list[str]
+    key_insights: list[str]
+    open_questions: list[str]
+    dates: list[DateMention]
+    tags: list[str]
 
 
 @dataclass(frozen=True)
@@ -58,5 +88,5 @@ class Extraction:
     """The structured notes an LLM produced for a memo."""
 
     backend: str
-    data: dict
+    data: NotesPayload
     created_at: str

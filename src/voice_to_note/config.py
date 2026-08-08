@@ -41,17 +41,19 @@ def resolve(
 _SETTINGS = read_config_file(CONFIG_PATH)
 
 
-def _setting(key: str, default: T, cast: Callable[[Any], T] = str) -> T:
-    """One setting, resolved against this machine's environment and config."""
+def _setting(key: str, default: T, cast: Callable[[Any], T]) -> T:
+    """One setting, resolved against this machine's environment and config.
+    Every setting states how to read it, so a default and its parser cannot
+    drift apart."""
     return resolve(key, default, cast, os.environ, _SETTINGS)
 
 
-WHISPER_MODEL = _setting("whisper_model", "large-v3-turbo")
+WHISPER_MODEL = _setting("whisper_model", "large-v3-turbo", str)
 WHISPER_MODEL_PATH = MODELS_DIR / f"ggml-{WHISPER_MODEL}.bin"
 VAD_MODEL_PATH = MODELS_DIR / "ggml-silero-v5.1.2.bin"
 
 SEG_MODEL_PATH = MODELS_DIR / "sherpa-onnx-pyannote-segmentation-3-0" / "model.onnx"
-EMB_MODEL = _setting("emb_model", "nemo_en_titanet_large.onnx")
+EMB_MODEL = _setting("emb_model", "nemo_en_titanet_large.onnx", str)
 EMB_MODEL_PATH = MODELS_DIR / EMB_MODEL
 
 NUM_SPEAKERS = _setting("num_speakers", -1, int)
@@ -59,6 +61,6 @@ DIAR_THRESHOLD = _setting("diar_threshold", 0.5, float)
 
 MATCH_THRESHOLD = _setting("match_threshold", 0.5, float)
 
-CLAUDE_MODEL = _setting("claude_model", "sonnet")
-OLLAMA_URL = _setting("ollama_url", "http://localhost:11434")
-OLLAMA_MODEL = _setting("ollama_model", "qwen3:8b")
+CLAUDE_MODEL = _setting("claude_model", "sonnet", str)
+OLLAMA_URL = _setting("ollama_url", "http://localhost:11434", str)
+OLLAMA_MODEL = _setting("ollama_model", "qwen3:8b", str)
