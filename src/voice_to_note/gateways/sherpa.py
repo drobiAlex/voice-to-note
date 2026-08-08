@@ -16,6 +16,13 @@ from ..transforms.speakers import (
 from . import GatewayError
 
 SAMPLE_RATE = 16000
+SAMPLE_WIDTH_BYTES = 2
+# the onnx models are small enough that more threads stop paying for themselves
+MODEL_THREADS = 4
+# speech shorter than this is noise, and a pause shorter than this is not a
+# speaker change; together they stop one utterance being split into several
+MIN_SPEECH_S = 0.3
+MIN_SILENCE_S = 0.5
 
 
 def load_wav(path: Path) -> np.ndarray:
@@ -23,6 +30,10 @@ def load_wav(path: Path) -> np.ndarray:
     with wave.open(str(path), "rb") as w:
         if w.getframerate() != SAMPLE_RATE or w.getnchannels() != 1:
             raise ValueError(f"{path} is not 16kHz mono")
+        if w.getsampwidth() != SAMPLE_WIDTH_BYTES:
+            # any other width reinterpreted as 16-bit reads as plausible noise
+            # rather than failing, and the diarizer would believe it
+            raise ValueError(f"{path} is not 16-bit")
         data = w.readframes(w.getnframes())
     return np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
 
@@ -30,7 +41,7 @@ def load_wav(path: Path) -> np.ndarray:
 def _embedding_config() -> sherpa_onnx.SpeakerEmbeddingExtractorConfig:
     """The voice-fingerprint model settings, shared by both passes over audio."""
     return sherpa_onnx.SpeakerEmbeddingExtractorConfig(
-        model=str(config.EMB_MODEL_PATH), num_threads=4
+        model=str(config.EMB_MODEL_PATH), num_threads=MODEL_THREADS
     )
 
 
@@ -43,14 +54,14 @@ def diarize(wav: Path) -> list[Turn]:
             pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(
                 model=str(config.SEG_MODEL_PATH)
             ),
-            num_threads=4,
+            num_threads=MODEL_THREADS,
         ),
         embedding=_embedding_config(),
         clustering=sherpa_onnx.FastClusteringConfig(
             num_clusters=config.NUM_SPEAKERS, threshold=config.DIAR_THRESHOLD
         ),
-        min_duration_on=0.3,
-        min_duration_off=0.5,
+        min_duration_on=MIN_SPEECH_S,
+        min_duration_off=MIN_SILENCE_S,
     )
     sd = sherpa_onnx.OfflineSpeakerDiarization(cfg)
     result = sd.process(load_wav(wav)).sort_by_start_time()

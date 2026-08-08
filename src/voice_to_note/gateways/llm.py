@@ -7,6 +7,14 @@ import urllib.request
 from .. import config
 from . import GatewayError
 
+# an availability check runs ahead of every extraction, so it gives up quickly
+# rather than making the user wait on a backend that is not there
+AVAILABILITY_TIMEOUT_S = 3
+# stuck-call guards, not latency targets: a long transcript legitimately takes
+# minutes, and the local model is the slower of the two
+CLAUDE_TIMEOUT_S = 600
+OLLAMA_TIMEOUT_S = 1800
+
 NOTES_PROMPT = """Extract structured notes from this voice-memo transcript.
 
 Return ONLY a JSON object, no markdown fences, exactly this shape:
@@ -63,10 +71,15 @@ def claude_available() -> bool:
 def ollama_available() -> bool:
     """Whether the local fallback is running and has the model pulled."""
     try:
-        with urllib.request.urlopen(f"{config.OLLAMA_URL}/api/tags", timeout=3) as r:
+        with urllib.request.urlopen(
+            f"{config.OLLAMA_URL}/api/tags", timeout=AVAILABILITY_TIMEOUT_S
+        ) as r:
             models = [m["name"] for m in json.loads(r.read()).get("models", [])]
         return any(m.startswith(config.OLLAMA_MODEL) for m in models)
-    except (urllib.error.URLError, OSError):
+    except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError, AttributeError):
+        # this answers a yes/no question, so anything unreadable means "no";
+        # it must never be the thing that ends a run. The comparison stays inside
+        # the guard too: a name that is not a string fails there, not at the fetch
         return False
 
 
@@ -75,8 +88,11 @@ def claude_complete(prompt: str) -> str:
     try:
         proc = subprocess.run(
             ["claude", "-p", "--model", config.CLAUDE_MODEL],
-            input=prompt, capture_output=True, text=True, timeout=600,
+            input=prompt, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT_S,
         )
+    except FileNotFoundError as e:
+        # claude_available() passed moments ago; it can still be gone by now
+        raise BackendError(f"claude could not be run: {e}") from e
     except subprocess.TimeoutExpired as e:
         raise BackendError(str(e)) from e
     if proc.returncode != 0:
@@ -102,7 +118,7 @@ def ollama_complete(prompt: str, schema: dict | None = None) -> str:
         headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=1800) as r:
+        with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT_S) as r:
             reply = r.read()
     except urllib.error.URLError as e:
         raise BackendError(str(e)) from e
