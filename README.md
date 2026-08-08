@@ -25,8 +25,12 @@ and their voice is recognised in later memos.
 | `vtn notes <id>` | print the extracted notes |
 | `vtn extract <id>` | (re)run note extraction |
 | `vtn diarize <id>` | (re)run diarization on a stored memo |
+| `vtn refine <id>` | repair transcription errors; `--diff` shows them without storing |
 | `vtn ask <id> <question…>` | ask a question about one memo |
 | `vtn rename <id> <label> <name>` | name a speaker; later memos match by voice |
+
+Once a memo has been refined, every reader shows the repaired wording; `vtn show
+<id> --raw` prints the transcription as it was first heard.
 
 Progress goes to stderr and results to stdout, so redirecting a command captures
 only its output. `list`, `show` and `notes` also take `--json`:
