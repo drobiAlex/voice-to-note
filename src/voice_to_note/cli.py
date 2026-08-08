@@ -68,10 +68,10 @@ def cmd_show(args: argparse.Namespace) -> None:
         if args.json:
             # scripts get an error for an unknown id, never an empty transcript
             services.require_memo(repo, args.id)
-            print(services.transcript_json(repo, args.id))
+            print(services.transcript_json(repo, args.id, raw=args.raw))
             return
         status(services.memo_heading(repo, args.id) + "\n")
-        lines = services.transcript_lines(repo, args.id)
+        lines = services.transcript_lines(repo, args.id, raw=args.raw)
         if lines:
             print(lines)
 
@@ -151,6 +151,9 @@ def main() -> None:
     sp = sub.add_parser("show", help="show a memo transcript")
     sp.add_argument("id", type=int)
     sp.add_argument("--json", action="store_true", help="print segments as JSON")
+    sp.add_argument(
+        "--raw", action="store_true", help="print the transcription before any repair"
+    )
     sp.set_defaults(fn=cmd_show)
 
     sp = sub.add_parser("diarize", help="(re)run diarization on an existing memo")

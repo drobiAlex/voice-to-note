@@ -323,3 +323,85 @@ def test_the_diff_reads_as_one_before_and_after_per_line():
     )
 
     assert services.refine_diff_text(result) == "[3] so their going\n      → So they're going"
+
+
+def add_refined(repo, wav, lines: list[tuple[str, str | None]]) -> int:
+    """A memo where some lines have been repaired and some have not."""
+    memo_id = add_memo(
+        repo,
+        wav,
+        segments=[
+            Segment(i * 1000, i * 1000 + 900, raw, speaker="S1")
+            for i, (raw, _refined) in enumerate(lines)
+        ],
+    )
+    stored = repo.segments(memo_id)
+    repo.update_refinements(
+        memo_id,
+        {s.id: refined for s, (_raw, refined) in zip(stored, lines, strict=True) if refined},
+    )
+    return memo_id
+
+
+def test_a_repaired_line_is_what_a_reader_is_shown(repo, wav):
+    memo_id = add_refined(
+        repo, wav, [("so their going to ship", "So they're going to ship."), ("yeah agreed", None)]
+    )
+
+    assert services.transcript_lines(repo, memo_id) == (
+        "00:00  S1: So they're going to ship.\n00:01  S1: yeah agreed"
+    )
+
+
+def test_the_transcription_as_heard_is_still_available(repo, wav):
+    memo_id = add_refined(repo, wav, [("so their going to ship", "So they're going to ship.")])
+
+    assert services.transcript_lines(repo, memo_id, raw=True) == "00:00  S1: so their going to ship"
+
+
+def test_extraction_is_given_the_repaired_words(repo, wav, monkeypatch):
+    # refine then extract is the whole point of the feature: better words in,
+    # better notes out
+    memo_id = add_refined(repo, wav, [("we ship on friyay", "We ship on Friday.")])
+    prompts = fake_llm(monkeypatch, claude=json.dumps(NOTES))
+
+    services.run_extraction(repo, memo_id)
+
+    assert "We ship on Friday." in prompts[0]
+    assert "friyay" not in prompts[0]
+
+
+def test_a_question_is_answered_against_the_repaired_words(repo, wav, monkeypatch):
+    memo_id = add_refined(repo, wav, [("we ship on friyay", "We ship on Friday.")])
+    prompts = fake_llm(monkeypatch, claude="Friday.")
+
+    services.ask(repo, memo_id, "When do they ship?")
+
+    assert "We ship on Friday." in prompts[0]
+
+
+def test_the_json_transcript_carries_the_repairs(repo, wav):
+    memo_id = add_refined(repo, wav, [("so their going", "So they're going.")])
+
+    assert json.loads(services.transcript_json(repo, memo_id))[0]["text"] == "So they're going."
+
+
+def test_the_json_transcript_can_be_asked_for_the_original(repo, wav):
+    memo_id = add_refined(repo, wav, [("so their going", "So they're going.")])
+
+    text = json.loads(services.transcript_json(repo, memo_id, raw=True))[0]["text"]
+    assert text == "so their going"
+
+
+def test_a_memo_nobody_refined_reads_exactly_as_it_did_before(repo, wav):
+    # the regression net: refinement must be invisible until someone runs it
+    memo_id = add_refined(repo, wav, [("first line", None), ("second line", None)])
+
+    assert services.transcript_lines(repo, memo_id) == (
+        "00:00  S1: first line\n00:01  S1: second line"
+    )
+    assert services.transcript(repo, memo_id) == "[00:00] S1: first line second line"
+    assert [d["text"] for d in json.loads(services.transcript_json(repo, memo_id))] == [
+        "first line",
+        "second line",
+    ]

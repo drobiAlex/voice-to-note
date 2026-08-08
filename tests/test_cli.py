@@ -145,7 +145,9 @@ def test_listing_prints_exactly_what_services_formatted(monkeypatch, capsys):
 
 def test_showing_prints_exactly_what_services_formatted(monkeypatch, capsys):
     monkeypatch.setattr(services, "memo_heading", lambda _repo, _id: "memo 1 — a.m4a (new)")
-    monkeypatch.setattr(services, "transcript_lines", lambda _repo, _id: "00:00  Alice: Hi")
+    monkeypatch.setattr(
+        services, "transcript_lines", lambda _repo, _id, raw=False: "00:00  Alice: Hi"
+    )
 
     run(monkeypatch, StubRepo(), "show", "1")
 
@@ -222,3 +224,36 @@ def test_a_diff_run_that_found_nothing_prints_nothing_at_all(monkeypatch, capsys
     run(monkeypatch, StubRepo(), "refine", "3", "--diff")
 
     assert capsys.readouterr().out == ""
+
+
+def test_showing_the_transcription_as_heard_asks_services_for_it(monkeypatch, capsys):
+    seen: dict = {}
+
+    def lines(_repo, _id, raw=False):
+        seen["raw"] = raw
+        return "00:00  Alice: as heard"
+
+    monkeypatch.setattr(services, "memo_heading", lambda _repo, _id: "memo 1 — a.m4a (new)")
+    monkeypatch.setattr(services, "transcript_lines", lines)
+
+    run(monkeypatch, StubRepo(), "show", "1", "--raw")
+
+    assert seen["raw"] is True
+    assert capsys.readouterr().out == "00:00  Alice: as heard\n"
+
+
+def test_the_raw_flag_reaches_the_json_output_too(monkeypatch, capsys):
+    # a script asking for the original should not have to parse the human form
+    seen: dict = {}
+
+    def as_json(_repo, _id, raw=False):
+        seen["raw"] = raw
+        return '[{"text": "as heard"}]'
+
+    monkeypatch.setattr(services, "require_memo", lambda _repo, _id: None)
+    monkeypatch.setattr(services, "transcript_json", as_json)
+
+    run(monkeypatch, StubRepo(), "show", "1", "--raw", "--json")
+
+    assert seen["raw"] is True
+    assert capsys.readouterr().out == '[{"text": "as heard"}]\n'

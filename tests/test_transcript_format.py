@@ -1,5 +1,10 @@
 from voice_to_note.domain import Segment
-from voice_to_note.transforms.segments import display_name, fmt_ts, transcript_text
+from voice_to_note.transforms.segments import (
+    display_name,
+    display_text,
+    fmt_ts,
+    transcript_text,
+)
 
 
 def test_display_name_prefers_the_assigned_name():
@@ -58,3 +63,35 @@ def test_missing_speaker_renders_as_unknown():
 
 def test_no_segments_gives_empty_transcript():
     assert transcript_text([], {}) == ""
+
+
+def test_the_line_to_read_is_the_repair_when_there_is_one():
+    heard = Segment(0, 1000, "so their going", refined_text="So they're going")
+
+    assert display_text(heard) == "So they're going"
+
+
+def test_the_line_to_read_falls_back_to_what_was_transcribed():
+    assert display_text(Segment(0, 1000, "as heard")) == "as heard"
+
+
+def test_the_original_wording_can_always_be_asked_for():
+    # the recording is the record: a repair never hides what was transcribed
+    heard = Segment(0, 1000, "so their going", refined_text="So they're going")
+
+    assert display_text(heard, raw=True) == "so their going"
+
+
+def test_a_transcript_reads_the_repairs_where_they_exist():
+    segs = [
+        Segment(0, 1000, "hi their", speaker="S1", refined_text="Hi there"),
+        Segment(1000, 2000, "ok", speaker="S1"),
+    ]
+
+    assert transcript_text(segs, {}) == "[00:00] S1: Hi there ok"
+
+
+def test_a_transcript_can_be_asked_for_the_original_wording():
+    segs = [Segment(0, 1000, "hi their", speaker="S1", refined_text="Hi there")]
+
+    assert transcript_text(segs, {}, raw=True) == "[00:00] S1: hi their"

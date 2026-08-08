@@ -20,6 +20,7 @@ from .transforms.refine import (
 )
 from .transforms.segments import (
     display_name,
+    display_text,
     fmt_ts,
     segments_as_dicts,
     segments_from_whisper,
@@ -161,12 +162,13 @@ def memo_heading(repo: Repository, memo_id: int) -> str:
     return f"memo {memo.id} — {memo.filename} ({memo.status})"
 
 
-def transcript_lines(repo: Repository, memo_id: int) -> str:
+def transcript_lines(repo: Repository, memo_id: int, *, raw: bool = False) -> str:
     """The transcript as a person reads it: one timestamp-led line per segment,
-    speakers under the names they were given. Empty when nothing was transcribed."""
+    speakers under the names they were given. Shows each line's repair where one
+    exists; raw shows the transcription instead. Empty when nothing was transcribed."""
     names = repo.display_names(memo_id)
     return "\n".join(
-        f"{fmt_ts(s.t0_ms)}  {display_name(s.speaker, names)}: {s.text}"
+        f"{fmt_ts(s.t0_ms)}  {display_name(s.speaker, names)}: {display_text(s, raw=raw)}"
         for s in repo.segments(memo_id)
     )
 
@@ -284,9 +286,12 @@ def notes_json(repo: Repository, memo_id: int) -> str:
     return json.dumps(_extraction(repo, memo_id).data, ensure_ascii=False)
 
 
-def transcript_json(repo: Repository, memo_id: int) -> str:
-    """The transcript as a script reads it, speakers already named."""
-    segments = segments_as_dicts(repo.segments(memo_id), repo.display_names(memo_id))
+def transcript_json(repo: Repository, memo_id: int, *, raw: bool = False) -> str:
+    """The transcript as a script reads it, speakers already named. Carries each
+    line's repair where one exists; raw carries the transcription instead."""
+    segments = segments_as_dicts(
+        repo.segments(memo_id), repo.display_names(memo_id), raw=raw
+    )
     return json.dumps(segments, ensure_ascii=False)
 
 

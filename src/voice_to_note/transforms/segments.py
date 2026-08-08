@@ -64,22 +64,37 @@ def segments_from_whisper(raw: WhisperTranscription) -> list[Segment]:
     return segs
 
 
-def segments_as_dicts(segments: Sequence[Segment], names: dict[str, str]) -> list[dict]:
-    """The transcript shaped for scripts to consume, speakers already named."""
+def display_text(segment: Segment, *, raw: bool = False) -> str:
+    """What a line reads as: the repair, once one has been accepted for it, and
+    otherwise the words as transcribed. Asking for raw gives back the recording's
+    own words whatever has been done to them since."""
+    if raw or segment.refined_text is None:
+        return segment.text
+    return segment.refined_text
+
+
+def segments_as_dicts(
+    segments: Sequence[Segment], names: dict[str, str], *, raw: bool = False
+) -> list[dict]:
+    """The transcript shaped for scripts to consume, speakers already named.
+    Each line reads as its repair where one exists, or as transcribed when raw."""
     return [
         {
             "t0_ms": s.t0_ms,
             "t1_ms": s.t1_ms,
             "speaker": display_name(s.speaker, names),
-            "text": s.text,
+            "text": display_text(s, raw=raw),
         }
         for s in segments
     ]
 
 
-def transcript_text(segments: Sequence[Segment], names: dict[str, str]) -> str:
+def transcript_text(
+    segments: Sequence[Segment], names: dict[str, str], *, raw: bool = False
+) -> str:
     """Builds the speaker-labeled transcript the LLM reads — naming quality here
-    decides who gets credited with action items in the notes."""
+    decides who gets credited with action items in the notes. Lines read as their
+    repair where one exists, or as transcribed when raw."""
     # consecutive segments from the same person become one timestamped line
     lines: list[str] = []
     buf: list[str] = []
@@ -91,7 +106,7 @@ def transcript_text(segments: Sequence[Segment], names: dict[str, str]) -> str:
             if buf:
                 lines.append(f"[{fmt_ts(start_ms)}] {speaker}: {' '.join(buf)}")
             speaker, start_ms, buf = who, s.t0_ms, []
-        buf.append(s.text)
+        buf.append(display_text(s, raw=raw))
     if buf:
         lines.append(f"[{fmt_ts(start_ms)}] {speaker}: {' '.join(buf)}")
     return "\n".join(lines)
