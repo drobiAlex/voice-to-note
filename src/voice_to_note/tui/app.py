@@ -438,6 +438,24 @@ class ConfirmRemove(ModalScreen[bool]):
         self.dismiss(False)
 
 
+# what an action needs before it can mean anything, and so before the footer
+# should be offering the key that runs it
+MEMO_ACTIONS = frozenset(
+    {
+        "edit_notes",
+        "memo_info",
+        "move_memo",
+        "rename_speaker",
+        "toggle_raw",
+        "extract",
+        "repair",
+        "diarize",
+        "ask",
+    }
+)
+PROJECT_ACTIONS = frozenset({"rename_project", "remove_project"})
+
+
 class MemoApp(App[None]):
     """One screen over the memo database: the projects down the side, the chosen
     project's recordings beside them, and what was said and made of the one
@@ -510,6 +528,27 @@ class MemoApp(App[None]):
         self.load_projects()
         self.query_one("#projects", ListView).focus()
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Which keys the footer offers, so that it never advertises one that
+        would do nothing. Returning False hides a binding and also stops the key
+        reaching its action; the no-op guards inside the actions stay all the
+        same, since a key that is merely hidden has to remain harmless for
+        anything that reaches it another way.
+
+        The two halves are gated differently on purpose. A memo action is offered
+        whenever a memo is open, whatever holds focus, because it acts on the
+        memo being read. A project action is offered only while the sidebar holds
+        the cursor, because the thing it acts on is the row the cursor rests on."""
+        if action in MEMO_ACTIONS:
+            return self.memo_id is not None
+        if action in PROJECT_ACTIONS:
+            # checked while the screen is still being built, before there is one
+            sidebar = self.query("#projects")
+            return bool(sidebar) and self.focused is sidebar.first()
+        if action == "clear_tag":
+            return self.tag is not None
+        return True
+
     def load_projects(self) -> None:
         """Draws the sidebar from what is in the database now, counts and all."""
         sidebar = self.query_one("#projects", ListView)
@@ -529,6 +568,7 @@ class MemoApp(App[None]):
         memos.clear()
         for memo in services.memos(self.repo, project=project):
             memos.append(ListItem(Label(memo.filename), name=str(memo.id)))
+        self.refresh_bindings()
 
     def show_tagged(self, tag: str) -> None:
         """Fills the memo list with everything carrying one tag, from whatever
@@ -541,6 +581,7 @@ class MemoApp(App[None]):
             memos.append(ListItem(Label(memo.filename), name=str(memo.id)))
         self.tag = tag
         self.sub_title = f"tag: {tag}"
+        self.refresh_bindings()
 
     def show_memo(self, memo_id: int) -> None:
         """Shows one recording's notes and what was actually said in it."""
@@ -552,6 +593,7 @@ class MemoApp(App[None]):
         self.query_one(TabbedContent).get_tab("transcript-tab").label = (
             "Transcript (raw)" if self.raw else "Transcript"
         )
+        self.refresh_bindings()
 
     def _reload(self, project: str | None) -> None:
         """Redraws the sidebar and, where one is being browsed, that project's
@@ -576,6 +618,7 @@ class MemoApp(App[None]):
         self.query_one("#notes", Markdown).update("*no memo shown*")
         self.query_one("#transcript", Static).update("")
         self.query_one(TabbedContent).get_tab("transcript-tab").label = "Transcript"
+        self.refresh_bindings()
 
     def action_toggle_raw(self) -> None:
         """Swaps the transcript between the repaired reading and the words as
@@ -760,6 +803,7 @@ class MemoApp(App[None]):
             self.query_one("#memos", ListView).clear()
             self.tag = None
             self.sub_title = ""
+            self.refresh_bindings()
         else:
             self.show_project(self.project)
 

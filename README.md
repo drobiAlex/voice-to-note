@@ -48,6 +48,7 @@ Lower case acts on the memo you are reading, upper case on its project:
 `o` add a recording · `e` edit notes · `i` details · `x` extract · `p` repair ·
 `d` diarize · `a` ask · `m` move · `r` name a speaker · `t` raw transcript ·
 `R` rename project · `X` empty project · `/` find by tag · `esc` back · `q` quit.
+The footer offers only the keys that currently apply, so the ones it shows all work.
 
 Progress goes to stderr and results to stdout, so redirecting a command captures
 only its output. `list`, `show` and `notes` also take `--json`:

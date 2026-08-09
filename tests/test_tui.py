@@ -1653,3 +1653,167 @@ async def test_leaving_the_modal_brings_nothing_in(repo, tmp_path, monkeypatch):
 
         assert not showing(pilot.app, "#source-path")
         assert ran == []
+
+
+# --- a footer offering only what applies ----------------------------------
+
+# what each key needs before it means anything
+MEMO_KEYS = ["e", "i", "m", "r", "t", "x", "p", "d", "a"]
+PROJECT_KEYS = ["R", "X"]
+ALWAYS_KEYS = ["o", "slash", "q"]
+
+
+async def footer_keys(pilot) -> list[str]:
+    """The keys the footer is actually offering. Read off the rendered footer
+    rather than app.active_bindings, which recomputes on every read and so would
+    look right even when the footer on screen had gone stale. It pauses first
+    because the footer has drawn nothing the instant the app starts, and reading
+    it that early comes back empty — which would make every assertion that a key
+    is not offered true for the wrong reason."""
+    await pilot.pause()
+    return [key.key for key in pilot.app.query("FooterKey")]
+
+
+async def missing(pilot, keys: list[str]) -> list[str]:
+    """Which of these the footer is not offering."""
+    shown = await footer_keys(pilot)
+    return [key for key in keys if key not in shown]
+
+
+async def offered(pilot, keys: list[str]) -> list[str]:
+    """Which of these the footer is offering."""
+    shown = await footer_keys(pilot)
+    return [key for key in keys if key in shown]
+
+
+@pytest.mark.asyncio
+async def test_the_footer_offers_nothing_needing_a_memo_before_one_is_open(repo):
+    # a key that does nothing is a key that reads as broken
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        assert await offered(pilot, MEMO_KEYS) == []
+        assert await missing(pilot, ALWAYS_KEYS) == []
+
+
+@pytest.mark.asyncio
+async def test_opening_a_memo_offers_what_can_be_done_to_it(repo):
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+
+        assert await missing(pilot, MEMO_KEYS) == []
+
+
+@pytest.mark.asyncio
+async def test_the_memo_keys_stay_when_the_cursor_leaves_the_sidebar(repo):
+    # they act on the memo being read, not on whatever holds focus, so walking
+    # down into the memo list must not take them away
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        pilot.app.query_one("#memos", ListView).focus()
+        await pilot.pause()
+
+        assert await missing(pilot, MEMO_KEYS) == []
+
+
+@pytest.mark.asyncio
+async def test_the_project_keys_are_offered_only_while_the_sidebar_has_the_cursor(repo):
+    # the asymmetry with the memo keys is the point: these act on the row the
+    # cursor is resting on, and off the sidebar there is no such row
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        assert await missing(pilot, PROJECT_KEYS) == []
+
+        pilot.app.query_one("#memos", ListView).focus()
+        await pilot.pause()
+
+        assert await offered(pilot, PROJECT_KEYS) == []
+
+
+@pytest.mark.asyncio
+async def test_the_way_back_is_offered_only_while_a_tag_search_is_showing(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        assert "escape" not in await footer_keys(pilot)
+
+        await search_tag(pilot, "release")
+
+        assert "escape" in await footer_keys(pilot)
+
+
+@pytest.mark.asyncio
+async def test_leaving_a_tag_search_takes_the_way_back_off_the_footer(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("personal")
+        await pilot.pause()
+        await search_tag(pilot, "release")
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert "escape" not in await footer_keys(pilot)
+
+
+@pytest.mark.asyncio
+async def test_a_memo_going_out_of_view_takes_its_keys_off_the_footer(repo):
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await open_memo(pilot, work)
+        await pilot.press("m")
+        await pilot.pause()
+        pilot.app.screen.query_one("#project-name", Input).value = "side"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert await offered(pilot, MEMO_KEYS) == []
+
+
+# --- the guards behind the hidden keys ------------------------------------
+
+# Hiding a key stops the key reaching its action at all, so a test that presses
+# it proves nothing about the guard inside. These reach the actions directly,
+# which is the only way left to hold the case where one is reached anyway.
+
+MEMO_ACTIONS = [
+    "edit_notes", "memo_info", "move_memo", "rename_speaker", "toggle_raw",
+    "extract", "repair", "diarize", "ask",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", MEMO_ACTIONS)
+async def test_a_memo_action_reached_with_no_memo_open_does_nothing(repo, action):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        getattr(pilot.app, f"action_{action}")()
+        await pilot.pause()
+
+        assert len(pilot.app.screen_stack) == 1
+        assert pilot.app.jobs == set()
+        assert said(pilot) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["rename_project", "remove_project"])
+async def test_a_project_action_reached_off_the_sidebar_does_nothing(repo, action):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.query_one("#memos", ListView).focus()
+        await pilot.pause()
+
+        getattr(pilot.app, f"action_{action}")()
+        await pilot.pause()
+
+        assert len(pilot.app.screen_stack) == 1
+        assert said(pilot) == []
