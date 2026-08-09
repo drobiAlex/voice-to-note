@@ -380,3 +380,15 @@ def test_re_extracting_can_be_told_to_overwrite_an_edited_note(monkeypatch, caps
     run(monkeypatch, StubRepo(), "extract", "3", "--force")
 
     assert seen == {"memo_id": 3, "force": True}
+
+
+def test_naming_a_speaker_nothing_ends_the_command_with_a_message(monkeypatch, capsys):
+    def rename_speaker(_repo, _memo_id, _label, _name):
+        raise services.InvalidInput("a speaker needs a name")
+
+    monkeypatch.setattr(services, "rename_speaker", rename_speaker)
+
+    with pytest.raises(SystemExit) as err:
+        run(monkeypatch, StubRepo(), "rename", "3", "S1", "")
+
+    assert err.value.code == "a speaker needs a name"

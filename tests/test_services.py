@@ -616,3 +616,44 @@ def test_a_forced_re_extraction_clears_the_edit_in_the_same_breath(repo, wav, mo
 
     assert separate_clears == []
     assert repo.notes_md(memo_id) is None
+
+
+def test_a_memos_speakers_can_be_listed_for_a_screen_to_offer(repo, wav):
+    # a screen offering "rename who?" needs the labels and what they are called
+    memo_id = add_memo(
+        repo,
+        wav,
+        segments=[Segment(0, 1000, "Hi", speaker="S1")],
+        speakers=[Speaker("S1", "Alice"), Speaker("S2")],
+    )
+
+    assert services.speakers(repo, memo_id) == {"S1": "Alice", "S2": "S2"}
+
+
+def named_memo(repo, wav) -> int:
+    """A memo with one voice in it, still going by its label."""
+    return add_memo(
+        repo,
+        wav,
+        segments=[Segment(0, 1000, "Hi", speaker="S1")],
+        speakers=[Speaker("S1")],
+    )
+
+
+@pytest.mark.parametrize("name", ["", "   "])
+def test_naming_a_speaker_nothing_is_refused(repo, wav, name):
+    # a nameless speaker reads as Unknown everywhere and cannot be searched for
+    memo_id = named_memo(repo, wav)
+
+    with pytest.raises(services.InvalidInput):
+        services.rename_speaker(repo, memo_id, "S1", name)
+
+    assert services.speakers(repo, memo_id) == {"S1": "S1"}
+
+
+def test_a_speaker_name_is_tidied_before_it_is_stored(repo, wav):
+    memo_id = named_memo(repo, wav)
+
+    services.rename_speaker(repo, memo_id, "S1", "  Alice  ")
+
+    assert services.speakers(repo, memo_id) == {"S1": "Alice"}

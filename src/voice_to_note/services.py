@@ -376,6 +376,12 @@ def ask(repo: Repository, memo_id: int, question: str) -> tuple[str, str]:
     )
 
 
+def speakers(repo: Repository, memo_id: int) -> dict[str, str]:
+    """Each voice in a memo and what it is currently called, for a screen asking
+    which of them to put a name to."""
+    return repo.display_names(memo_id)
+
+
 def move_memo(repo: Repository, memo_id: int, project: str) -> None:
     """Files a memo under a different project, so it groups with its own work."""
     name = _project_name(project)
@@ -384,6 +390,12 @@ def move_memo(repo: Repository, memo_id: int, project: str) -> None:
 
 
 def rename_speaker(repo: Repository, memo_id: int, label: str, name: str) -> None:
-    """Puts a real name on a speaker so later memos recognise that voice."""
-    if not repo.rename_speaker(memo_id, label, name):
+    """Puts a real name on a speaker so later memos recognise that voice. A name
+    of nothing is refused: empty is not the same as unnamed to the database, so
+    a speaker called "" would count as named and join the pool of known voices
+    that later recordings are matched against."""
+    speaker = name.strip()
+    if not speaker:
+        raise InvalidInput("a speaker needs a name")
+    if not repo.rename_speaker(memo_id, label, speaker):
         raise NotFound(f"no speaker {label} in memo {memo_id}")
