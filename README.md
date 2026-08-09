@@ -1,12 +1,12 @@
-# voice-to-note
+# Voice to note
 
-Turns a voice memo into structured notes without your audio leaving the machine:
-ffmpeg normalises the recording, whisper.cpp transcribes it, sherpa-onnx works
-out who spoke when, and an LLM pulls out a summary, action items and decisions
-into SQLite. Everything is local except extraction, which uses the `claude` CLI
-when you have one and otherwise a local Ollama model — with neither, transcription
-and diarization still work and `vtn extract` can run later. Name a speaker once
-and their voice is recognised in later memos.
+You sit in meetings across a lot of projects, and each one ends with its own decisions
+and its own things to do. voice-to-note gives them one home: record a voice memo, feed it
+in, and get back a transcript with named speakers, a summary, action items and decisions.
+
+Your audio never leaves the machine: ffmpeg normalises it, whisper.cpp transcribes, and
+sherpa-onnx separates the speakers, all into a local SQLite file. Only the notes need an
+LLM — `claude` if you have it, or a local Ollama model; the transcript needs neither.
 
 ## Quickstart
 
