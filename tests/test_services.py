@@ -405,3 +405,82 @@ def test_a_memo_nobody_refined_reads_exactly_as_it_did_before(repo, wav):
         "first line",
         "second line",
     ]
+
+
+def add_project_memo(repo, wav, filename: str, project: str) -> int:
+    """A stored memo filed under one project."""
+    return repo.create_memo(
+        filename=filename, wav_path=str(wav), duration_s=1.0,
+        language="en", segments=[], project=project,
+    )
+
+
+def test_the_listing_can_be_narrowed_to_one_project(repo, wav):
+    add_project_memo(repo, wav, "work.m4a", "work")
+    add_project_memo(repo, wav, "home.m4a", "personal")
+
+    listing = services.memos_text(repo, project="work")
+
+    assert "work.m4a" in listing
+    assert "home.m4a" not in listing
+
+
+def test_the_json_listing_can_be_narrowed_too(repo, wav):
+    add_project_memo(repo, wav, "work.m4a", "work")
+    add_project_memo(repo, wav, "home.m4a", "personal")
+
+    listed = json.loads(services.memos_json(repo, project="work"))
+
+    assert [m["filename"] for m in listed] == ["work.m4a"]
+
+
+def test_the_json_listing_says_which_project_a_memo_is_in(repo, wav):
+    add_project_memo(repo, wav, "work.m4a", "work")
+
+    assert json.loads(services.memos_json(repo))[0]["project"] == "work"
+
+
+def test_moving_a_memo_files_it_under_the_new_project(repo, wav):
+    memo_id = add_project_memo(repo, wav, "work.m4a", "work")
+
+    services.move_memo(repo, memo_id, "side")
+
+    assert repo.memo(memo_id).project == "side"
+
+
+def test_moving_a_memo_that_was_never_stored_is_refused(repo):
+    with pytest.raises(services.NotFound):
+        services.move_memo(repo, 999, "side")
+
+
+@pytest.mark.parametrize("project", ["", "   "])
+def test_moving_a_memo_into_a_nameless_project_is_refused(repo, wav, project):
+    # a blank name would show as an empty column and an empty sidebar row
+    memo_id = add_project_memo(repo, wav, "work.m4a", "work")
+
+    with pytest.raises(services.InvalidInput):
+        services.move_memo(repo, memo_id, project)
+
+    assert repo.memo(memo_id).project == "work"
+
+
+def test_a_project_name_is_tidied_before_it_is_stored(repo, wav):
+    memo_id = add_project_memo(repo, wav, "work.m4a", "other")
+
+    services.move_memo(repo, memo_id, "  work  ")
+
+    assert repo.memo(memo_id).project == "work"
+
+
+def test_processing_into_a_nameless_project_is_refused_before_any_work(repo, tmp_path, monkeypatch):
+    # the recording is converted and transcribed before it is stored; a name we
+    # will refuse at the end must be refused at the start
+    src = tmp_path / "standup.m4a"
+    src.write_bytes(b"fake audio")
+    converted: list = []
+    monkeypatch.setattr(services.audio, "to_wav16k", lambda *a: converted.append(a))
+
+    with pytest.raises(services.InvalidInput):
+        services.process_memo(repo, src, project="   ")
+
+    assert converted == []

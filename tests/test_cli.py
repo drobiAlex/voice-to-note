@@ -33,7 +33,7 @@ def listing_line(memo, dur: str) -> str:
     """The one memo-per-line shape `vtn list` has always printed."""
     return (
         f"{memo.id:>4}  {memo.created_at}  {dur:>6}  {memo.language or '?':<3}"
-        f"  {memo.status:<12} {memo.filename}"
+        f"  {memo.status:<12} {memo.project:<8} {memo.filename}"
     )
 
 
@@ -136,7 +136,9 @@ def test_showing_a_memo_that_was_never_stored_prints_no_json(repo, monkeypatch, 
 
 
 def test_listing_prints_exactly_what_services_formatted(monkeypatch, capsys):
-    monkeypatch.setattr(services, "memos_text", lambda _repo: "  12  a listing line")
+    monkeypatch.setattr(
+        services, "memos_text", lambda _repo, project=None: "  12  a listing line"
+    )
 
     run(monkeypatch, StubRepo(), "list")
 
@@ -257,3 +259,85 @@ def test_the_raw_flag_reaches_the_json_output_too(monkeypatch, capsys):
 
     assert seen["raw"] is True
     assert capsys.readouterr().out == '[{"text": "as heard"}]\n'
+
+
+# --- projects ------------------------------------------------------------
+
+
+def test_processing_files_the_new_memo_under_a_project(tmp_path, monkeypatch, capsys):
+    src = tmp_path / "standup.m4a"
+    src.write_bytes(b"fake audio")
+    seen: dict = {}
+
+    def process_memo(_repo, _src, project="other", log=None):
+        seen["project"] = project
+        return services.ProcessResult(1, 0, [], "en")
+
+    monkeypatch.setattr(services, "process_memo", process_memo)
+    monkeypatch.setattr(services, "run_extraction", lambda *a, **k: "claude")
+    monkeypatch.setattr(services, "notes", lambda *a, **k: "the notes")
+
+    run(monkeypatch, StubRepo(), "process", str(src), "--project", "work")
+
+    assert seen["project"] == "work"
+
+
+def test_processing_without_a_project_files_it_under_other(tmp_path, monkeypatch, capsys):
+    src = tmp_path / "standup.m4a"
+    src.write_bytes(b"fake audio")
+    seen: dict = {}
+
+    def process_memo(_repo, _src, project="other", log=None):
+        seen["project"] = project
+        return services.ProcessResult(1, 0, [], "en")
+
+    monkeypatch.setattr(services, "process_memo", process_memo)
+    monkeypatch.setattr(services, "run_extraction", lambda *a, **k: "claude")
+    monkeypatch.setattr(services, "notes", lambda *a, **k: "the notes")
+
+    run(monkeypatch, StubRepo(), "process", str(src))
+
+    assert seen["project"] == "other"
+
+
+def test_listing_can_be_narrowed_to_one_project(monkeypatch, capsys):
+    seen: dict = {}
+
+    def memos_text(_repo, project=None):
+        seen["project"] = project
+        return "   1  2026-01-01  1s  en  transcribed  work     a.m4a"
+
+    monkeypatch.setattr(services, "memos_text", memos_text)
+
+    run(monkeypatch, StubRepo(), "list", "--project", "work")
+
+    assert seen["project"] == "work"
+    assert "a.m4a" in capsys.readouterr().out
+
+
+def test_moving_a_memo_says_where_it_went(monkeypatch, capsys):
+    seen: dict = {}
+
+    def move_memo(_repo, memo_id, project):
+        seen["memo_id"], seen["project"] = memo_id, project
+
+    monkeypatch.setattr(services, "move_memo", move_memo)
+
+    run(monkeypatch, StubRepo(), "move", "3", "side")
+
+    captured = capsys.readouterr()
+    assert seen == {"memo_id": 3, "project": "side"}
+    assert captured.out == ""
+    assert captured.err == "memo 3 moved to side\n"
+
+
+def test_a_nameless_project_ends_the_command_with_a_message(monkeypatch, capsys):
+    def move_memo(_repo, _id, _project):
+        raise services.InvalidInput("a project needs a name")
+
+    monkeypatch.setattr(services, "move_memo", move_memo)
+
+    with pytest.raises(SystemExit) as err:
+        run(monkeypatch, StubRepo(), "move", "3", "")
+
+    assert err.value.code == "a project needs a name"

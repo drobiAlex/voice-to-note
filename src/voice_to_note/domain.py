@@ -83,6 +83,8 @@ class Memo:
     language: str | None
     status: str
     created_at: str
+    # free text, not an enum: the sidebar lists whatever projects exist
+    project: str = "other"
 
 
 @dataclass(frozen=True)

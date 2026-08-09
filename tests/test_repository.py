@@ -32,7 +32,20 @@ CREATE TABLE segments (
 """
 
 
-def make_memo(repo, *, segments=(), speakers=(), filename="memo.m4a"):
+PRE_PROJECT_SCHEMA = """
+CREATE TABLE memos (
+  id INTEGER PRIMARY KEY, filename TEXT NOT NULL, wav_path TEXT NOT NULL,
+  duration_s REAL, language TEXT, status TEXT NOT NULL DEFAULT 'new',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE segments (
+  id INTEGER PRIMARY KEY, memo_id INTEGER NOT NULL, t0_ms INTEGER NOT NULL,
+  t1_ms INTEGER NOT NULL, text TEXT NOT NULL, speaker TEXT, refined_text TEXT
+);
+"""
+
+
+def make_memo(repo, *, segments=(), speakers=(), filename="memo.m4a", **kwargs):
     return repo.create_memo(
         filename=filename,
         wav_path=f"/tmp/{filename}.wav",
@@ -40,6 +53,7 @@ def make_memo(repo, *, segments=(), speakers=(), filename="memo.m4a"):
         language="en",
         segments=list(segments),
         speakers=list(speakers),
+        **kwargs,
     )
 
 
@@ -247,4 +261,59 @@ def test_a_database_from_before_refinement_gains_the_column(tmp_path):
 
     repo.update_refinements(1, {stored[0].id: "As first transcribed."})
     assert repo.segments(1)[0].refined_text == "As first transcribed."
+    repo.close()
+
+
+def test_a_memo_is_filed_under_the_project_it_was_given(repo):
+    memo_id = repo.create_memo(
+        filename="standup.m4a", wav_path="/tmp/a.wav", duration_s=1.0,
+        language="en", segments=[], project="work",
+    )
+
+    assert repo.memo(memo_id).project == "work"
+
+
+def test_a_memo_filed_nowhere_lands_in_other(repo):
+    # every memo belongs somewhere, so there is always a project to group by
+    assert repo.memo(make_memo(repo)).project == "other"
+
+
+def test_memos_can_be_listed_one_project_at_a_time(repo):
+    make_memo(repo, filename="a.m4a", project="work")
+    make_memo(repo, filename="b.m4a", project="personal")
+    make_memo(repo, filename="c.m4a", project="work")
+
+    assert [m.filename for m in repo.memos(project="work")] == ["c.m4a", "a.m4a"]
+    assert [m.filename for m in repo.memos()] == ["c.m4a", "b.m4a", "a.m4a"]
+
+
+def test_the_project_list_counts_what_is_in_each(repo):
+    # the sidebar needs the names and how much is in them, in one query
+    make_memo(repo, filename="a.m4a", project="work")
+    make_memo(repo, filename="b.m4a", project="personal")
+    make_memo(repo, filename="c.m4a", project="work")
+
+    assert repo.projects() == [("personal", 1), ("work", 2)]
+
+
+def test_a_memo_can_be_moved_to_another_project(repo):
+    memo_id = make_memo(repo, project="work")
+
+    repo.set_project(memo_id, "side")
+
+    assert repo.memo(memo_id).project == "side"
+
+
+def test_a_database_from_before_projects_files_its_memos_under_other(tmp_path):
+    path = tmp_path / "legacy.db"
+    con = sqlite3.connect(path)
+    con.executescript(PRE_PROJECT_SCHEMA)
+    con.execute("INSERT INTO memos (filename, wav_path) VALUES ('old.m4a', '/tmp/old.wav')")
+    con.commit()
+    con.close()
+
+    repo = Repository(path)
+    memo = repo.memo(1)
+    assert (memo.filename, memo.project) == ("old.m4a", "other")
+    assert repo.projects() == [("other", 1)]
     repo.close()

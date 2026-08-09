@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS memos (
   duration_s REAL,
   language TEXT,
   status TEXT NOT NULL DEFAULT 'new',
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  project TEXT NOT NULL DEFAULT 'other'
 );
 CREATE TABLE IF NOT EXISTS segments (
   id INTEGER PRIMARY KEY,
@@ -44,7 +45,7 @@ CREATE TABLE IF NOT EXISTS speakers (
 );
 """
 
-MEMO_COLUMNS = "id, filename, wav_path, duration_s, language, status, created_at"
+MEMO_COLUMNS = "id, filename, wav_path, duration_s, language, status, created_at, project"
 
 
 class Repository:
@@ -62,14 +63,20 @@ class Repository:
         self._migrate()
 
     def _migrate(self) -> None:
-        """Lets a database made before voice matching store fingerprints, and one
-        made before transcript repair store the repaired wording."""
+        """Brings an older database up to the current shape: fingerprints for one
+        made before voice matching, repaired wording for one made before
+        transcript repair, and a project for one made before memos had them."""
         cols = {r["name"] for r in self.con.execute("PRAGMA table_info(speakers)")}
         if "embedding" not in cols:
             self.con.execute("ALTER TABLE speakers ADD COLUMN embedding BLOB")
         cols = {r["name"] for r in self.con.execute("PRAGMA table_info(segments)")}
         if "refined_text" not in cols:
             self.con.execute("ALTER TABLE segments ADD COLUMN refined_text TEXT")
+        cols = {r["name"] for r in self.con.execute("PRAGMA table_info(memos)")}
+        if "project" not in cols:
+            self.con.execute(
+                "ALTER TABLE memos ADD COLUMN project TEXT NOT NULL DEFAULT 'other'"
+            )
 
     def close(self) -> None:
         """Closes the memo database."""
@@ -97,13 +104,14 @@ class Repository:
         language: str,
         segments: Sequence[Segment],
         speakers: Sequence[Speaker] = (),
+        project: str = "other",
     ) -> int:
         """Stores a finished transcription: memo, segments and speakers together."""
         with self.con:
             cur = self.con.execute(
-                "INSERT INTO memos (filename, wav_path, duration_s, language, status)"
-                " VALUES (?,?,?,?,'transcribed')",
-                (filename, wav_path, duration_s, language),
+                "INSERT INTO memos (filename, wav_path, duration_s, language, status,"
+                " project) VALUES (?,?,?,?,'transcribed',?)",
+                (filename, wav_path, duration_s, language, project),
             )
             # sqlite always reports the row it just inserted; the check narrows
             # the type for everything downstream that treats this as an id
@@ -117,12 +125,29 @@ class Repository:
             self._write_speakers(memo_id, speakers)
         return memo_id
 
-    def memos(self) -> list[Memo]:
-        """Every memo, newest first."""
+    def memos(self, project: str | None = None) -> list[Memo]:
+        """Every memo, newest first, or only the ones filed under one project."""
+        sql = f"SELECT {MEMO_COLUMNS} FROM memos"
+        params: tuple = ()
+        if project is not None:
+            sql += " WHERE project=?"
+            params = (project,)
+        return [_memo(r) for r in self.con.execute(sql + " ORDER BY id DESC", params)]
+
+    def projects(self) -> list[tuple[str, int]]:
+        """Every project that has memos in it and how many, for a sidebar to
+        show without a second query per project."""
         return [
-            _memo(r)
-            for r in self.con.execute(f"SELECT {MEMO_COLUMNS} FROM memos ORDER BY id DESC")
+            (r["project"], r["n"])
+            for r in self.con.execute(
+                "SELECT project, count(*) AS n FROM memos GROUP BY project ORDER BY project"
+            )
         ]
+
+    def set_project(self, memo_id: int, project: str) -> None:
+        """Files a memo under a different project."""
+        with self.con:
+            self.con.execute("UPDATE memos SET project=? WHERE id=?", (project, memo_id))
 
     def memo(self, memo_id: int) -> Memo | None:
         """One memo's details, or nothing when that id was never stored."""
@@ -270,4 +295,5 @@ def _memo(row: sqlite3.Row) -> Memo:
         row["language"],
         row["status"],
         row["created_at"],
+        row["project"],
     )

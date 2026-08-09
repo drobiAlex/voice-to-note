@@ -34,7 +34,7 @@ def cmd_process(args: argparse.Namespace) -> None:
     if not src.exists():
         sys.exit(f"no such file: {src}")
     with Repository() as repo:
-        result = services.process_memo(repo, src, log=status)
+        result = services.process_memo(repo, src, project=args.project, log=status)
         status(
             f"memo {result.memo_id} — {result.segment_count} segments,"
             f" {len(result.labels)} speakers, language={result.language}"
@@ -53,13 +53,20 @@ def cmd_list(args: argparse.Namespace) -> None:
     """Shows what has been processed so far."""
     with Repository() as repo:
         if args.json:
-            print(services.memos_json(repo))
+            print(services.memos_json(repo, project=args.project))
             return
-        listing = services.memos_text(repo)
+        listing = services.memos_text(repo, project=args.project)
         if listing:
             print(listing)
         else:
             status("no memos yet")
+
+
+def cmd_move(args: argparse.Namespace) -> None:
+    """Files a memo under a different project."""
+    with Repository() as repo:
+        services.move_memo(repo, args.id, args.project)
+    status(f"memo {args.id} moved to {args.project}")
 
 
 def cmd_show(args: argparse.Namespace) -> None:
@@ -142,11 +149,18 @@ def main() -> None:
 
     sp = sub.add_parser("process", help="transcribe an audio file")
     sp.add_argument("file")
+    sp.add_argument("--project", default="other", help="file the memo under a project")
     sp.set_defaults(fn=cmd_process)
 
     sp = sub.add_parser("list", help="list memos")
     sp.add_argument("--json", action="store_true", help="print memos as JSON")
+    sp.add_argument("--project", help="only the memos filed under this project")
     sp.set_defaults(fn=cmd_list)
+
+    sp = sub.add_parser("move", help="file a memo under a project: move <id> <project>")
+    sp.add_argument("id", type=int)
+    sp.add_argument("project")
+    sp.set_defaults(fn=cmd_move)
 
     sp = sub.add_parser("show", help="show a memo transcript")
     sp.add_argument("id", type=int)
@@ -188,7 +202,12 @@ def main() -> None:
     args = p.parse_args()
     try:
         args.fn(args)
-    except (services.NotFound, services.ExtractionError, GatewayError) as e:
+    except (
+        services.NotFound,
+        services.ExtractionError,
+        services.InvalidInput,
+        GatewayError,
+    ) as e:
         # a missing binary, model or unreadable recording is something the user
         # can fix, so it gets one line; anything else is a bug and keeps its
         # traceback, which is the only thing that locates it

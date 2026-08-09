@@ -45,6 +45,11 @@ class ExtractionError(Exception):
     """No LLM backend produced a usable result."""
 
 
+class InvalidInput(Exception):
+    """Something the user typed cannot be used as given. Theirs to correct, so
+    it earns one line of explanation rather than a traceback."""
+
+
 @dataclass
 class ProcessResult:
     """What `vtn process` reports back once a memo is safely stored."""
@@ -68,8 +73,22 @@ def require_memo(repo: Repository, memo_id: int) -> Memo:
     return memo
 
 
-def process_memo(repo: Repository, src: Path, log: Log = _silent) -> ProcessResult:
+def _project_name(project: str) -> str:
+    """A project name with its spacing tidied, refusing one that is really empty:
+    a nameless project would show as a blank column and a blank sidebar row that
+    nobody could search for or move a memo out of."""
+    name = project.strip()
+    if not name:
+        raise InvalidInput("a project needs a name")
+    return name
+
+
+def process_memo(
+    repo: Repository, src: Path, project: str = "other", log: Log = _silent
+) -> ProcessResult:
     """The whole pipeline for a new recording: audio in, stored memo out."""
+    # before the minutes of converting and transcribing, not after
+    project = _project_name(project)
     wav = config.UPLOADS_DIR / f"{src.stem}-{uuid.uuid4().hex[:8]}.wav"
     log(f"converting {src.name} …")
     audio.to_wav16k(src, wav)
@@ -89,6 +108,7 @@ def process_memo(repo: Repository, src: Path, log: Log = _silent) -> ProcessResu
         language=language,
         segments=segs,
         speakers=speakers,
+        project=project,
     )
     _report_matches(log, matches, keep_names={})
     return ProcessResult(memo_id, len(segs), labels, language)
@@ -145,13 +165,14 @@ def _duration(duration_s: float | None) -> str:
     return f"{duration_s:.0f}s" if duration_s else "?"
 
 
-def memos_text(repo: Repository) -> str:
+def memos_text(repo: Repository, project: str | None = None) -> str:
     """The memo list as a person reads it, newest first and column-aligned so the
-    ids, dates and states line up down the screen. Empty when nothing is stored."""
+    ids, dates and states line up down the screen. One project at a time when
+    asked for. Empty when nothing is stored."""
     return "\n".join(
         f"{m.id:>4}  {m.created_at}  {_duration(m.duration_s):>6}  {m.language or '?':<3}"
-        f"  {m.status:<12} {m.filename}"
-        for m in repo.memos()
+        f"  {m.status:<12} {m.project:<8} {m.filename}"
+        for m in repo.memos(project)
     )
 
 
@@ -295,9 +316,9 @@ def transcript_json(repo: Repository, memo_id: int, *, raw: bool = False) -> str
     return json.dumps(segments, ensure_ascii=False)
 
 
-def memos_json(repo: Repository) -> str:
-    """The memo list as a script reads it."""
-    return json.dumps([asdict(m) for m in repo.memos()], ensure_ascii=False)
+def memos_json(repo: Repository, project: str | None = None) -> str:
+    """The memo list as a script reads it, one project at a time when asked."""
+    return json.dumps([asdict(m) for m in repo.memos(project)], ensure_ascii=False)
 
 
 def ask(repo: Repository, memo_id: int, question: str) -> tuple[str, str]:
@@ -310,6 +331,13 @@ def ask(repo: Repository, memo_id: int, question: str) -> tuple[str, str]:
         failure="ask failed",
         unavailable="no backend",
     )
+
+
+def move_memo(repo: Repository, memo_id: int, project: str) -> None:
+    """Files a memo under a different project, so it groups with its own work."""
+    name = _project_name(project)
+    require_memo(repo, memo_id)
+    repo.set_project(memo_id, name)
 
 
 def rename_speaker(repo: Repository, memo_id: int, label: str, name: str) -> None:
