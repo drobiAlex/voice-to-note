@@ -27,18 +27,27 @@ LLM — `claude` if you have it, or a local Ollama model; the transcript needs n
 | `vtn diarize <id>` | (re)run diarization on a stored memo |
 | `vtn refine <id>` | repair transcription errors; `--diff` shows them without storing |
 | `vtn ask <id> <question…>` | ask a question about one memo |
+| `vtn info <id>` | what state a memo is in, and when it last changed |
 | `vtn rename <id> <label> <name>` | name a speaker; later memos match by voice |
 | `vtn move <id> <project>` | file a memo under another project |
-| `vtn tui` | browse and edit memos on one screen |
+| `vtn project rename <old> <new>` | rename a project, carrying every memo in it |
+| `vtn project remove <name>` | empty a project; its memos go back to `other` |
+| `vtn tui` | browse, edit and process memos on one screen |
 
 Once a memo has been refined, every reader shows the repaired wording; `vtn show
 <id> --raw` prints the transcription as it was first heard.
 
 Every memo belongs to a project — `--project work` when processing, `vtn move` after
-the fact — and `vtn list --project work` narrows the list to one. `vtn tui` opens the
-lot on a single screen, where `e` edits a memo's notes as Markdown. The screen shows
-your wording from then on, while `vtn notes` and `--json` keep printing the model's, and
-only `vtn extract --force` will overwrite what you wrote.
+the fact — and `vtn list --project work` narrows the list to one, as does `vtn list
+--tag release` for a tag the notes carry. `vtn tui` opens the lot on a single screen,
+where `e` edits a memo's notes as Markdown. The screen shows your wording from then on,
+while `vtn notes` and `--json` keep printing the model's; `vtn notes --edited` prints
+what the screen shows, and only `vtn extract --force` overwrites what you wrote.
+
+Lower case acts on the memo you are reading, upper case on its project:
+`o` add a recording · `e` edit notes · `i` details · `x` extract · `p` repair ·
+`d` diarize · `a` ask · `m` move · `r` name a speaker · `t` raw transcript ·
+`R` rename project · `X` empty project · `/` find by tag · `esc` back · `q` quit.
 
 Progress goes to stderr and results to stdout, so redirecting a command captures
 only its output. `list`, `show` and `notes` also take `--json`:

@@ -261,7 +261,9 @@ def main() -> None:
     sp.add_argument("question", nargs="+")
     sp.set_defaults(fn=cmd_ask)
 
-    sub.add_parser("tui", help="browse and edit memos on one screen").set_defaults(fn=cmd_tui)
+    sub.add_parser(
+        "tui", help="browse, edit and process memos on one screen"
+    ).set_defaults(fn=cmd_tui)
 
     sp = sub.add_parser("rename", help="name a speaker: rename <memo_id> <label> <name>")
     sp.add_argument("id", type=int)
