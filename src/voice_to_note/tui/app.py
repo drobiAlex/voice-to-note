@@ -1,5 +1,5 @@
 from collections.abc import Callable, Hashable, Iterable
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -14,6 +14,7 @@ from textual.widgets import (
     ListItem,
     ListView,
     Markdown,
+    MarkdownViewer,
     Static,
     TabbedContent,
     TabPane,
@@ -469,6 +470,34 @@ class ConfirmRemove(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class NotesPane(MarkdownViewer):
+    """One memo's notes, with their headings listed beside them so a long note
+    can be jumped around rather than scrolled through.
+
+    Links are settled here because the notes live in a database and there is no
+    folder of documents around them: a bare anchor names a heading of the note
+    being read, and everything else is somewhere off this screen entirely. Left
+    to itself the viewer treats every link as a document to load and takes the
+    whole app down on the first plain web address a note happens to carry."""
+
+    def __init__(self, *, id: str) -> None:
+        """Opens empty, with the document below leaving every link to this pane:
+        two handlers on one click would send an anchor to the browser as well as
+        to the heading it names."""
+        super().__init__(id=id, open_links=False)
+
+    async def go(self, location: str | PurePath) -> None:
+        """Follows a link out of the notes: to the heading it names when it
+        names one of this note's, and otherwise to whatever opens links on this
+        machine, which is where every link went before there was a pane to
+        navigate inside."""
+        path, anchor = self.document.sanitize_location(str(location))
+        if path == Path(".") and anchor:
+            self.document.goto_anchor(anchor)
+        else:
+            self.app.open_url(str(location))
+
+
 # what an action needs before it can mean anything, and so before the footer
 # should be offering the key that runs it
 MEMO_ACTIONS = frozenset(
@@ -550,8 +579,9 @@ class MemoApp(App[None]):
             with Vertical():
                 yield ListView(id="memos")
                 with TabbedContent():
-                    with TabPane("Notes"), VerticalScroll():
-                        yield Markdown(id="notes")
+                    # the notes pane scrolls itself, headings and all
+                    with TabPane("Notes"):
+                        yield NotesPane(id="notes")
                     with TabPane("Transcript", id="transcript-tab"), VerticalScroll():
                         yield Static(id="transcript")
         yield Footer()
@@ -621,7 +651,9 @@ class MemoApp(App[None]):
     def show_memo(self, memo_id: int) -> None:
         """Shows one recording's notes and what was actually said in it."""
         self.memo_id = memo_id
-        self.query_one("#notes", Markdown).update(services.notes_markdown(self.repo, memo_id))
+        self.query_one("#notes", NotesPane).document.update(
+            services.notes_markdown(self.repo, memo_id)
+        )
         self.query_one("#transcript", Static).update(
             services.transcript_lines(self.repo, memo_id, raw=self.raw)
         )
@@ -650,7 +682,7 @@ class MemoApp(App[None]):
         drops its raw marking with the transcript it was describing, while the
         way of reading transcripts is kept for the next memo opened."""
         self.memo_id = None
-        self.query_one("#notes", Markdown).update("*no memo shown*")
+        self.query_one("#notes", NotesPane).document.update("*no memo shown*")
         self.query_one("#transcript", Static).update("")
         self.query_one(TabbedContent).get_tab("transcript-tab").label = "Transcript"
         self.refresh_bindings()

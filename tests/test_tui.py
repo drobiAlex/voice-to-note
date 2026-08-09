@@ -9,9 +9,11 @@ from textual.widgets import (
     Label,
     ListView,
     Markdown,
+    MarkdownViewer,
     Static,
     TabbedContent,
     TextArea,
+    Tree,
 )
 
 from voice_to_note import services
@@ -89,7 +91,7 @@ async def test_choosing_a_memo_shows_its_notes_and_its_transcript(repo):
         pilot.app.show_memo(work)
         await pilot.pause()
 
-        assert "Sprint sync" in pilot.app.query_one("#notes", Markdown).source
+        assert "Sprint sync" in notes_pane(pilot).document.source
         assert "we ship on friday" in str(pilot.app.query_one("#transcript", Static).content)
 
 
@@ -101,7 +103,7 @@ async def test_a_memo_nobody_extracted_says_so_instead_of_failing(repo):
         pilot.app.show_memo(home)
         await pilot.pause()
 
-        assert "no notes" in pilot.app.query_one("#notes", Markdown).source.lower()
+        assert "no notes" in notes_pane(pilot).document.source.lower()
         assert "buy milk" in str(pilot.app.query_one("#transcript", Static).content)
 
 
@@ -134,6 +136,123 @@ def test_the_tui_leaves_database_reads_and_formatting_to_services():
 
     assert "repo." not in source
     assert "from ..transforms" not in source
+
+
+# --- finding your way around a long note ----------------------------------
+
+LONG_NOTE = "\n\n".join(
+    [
+        "# Sprint sync",
+        "Jump to the [decisions](#decisions).",
+        *(f"We talked about item {i}." for i in range(40)),
+        "## Decisions",
+        "- Ship on Friday",
+    ]
+)
+
+
+def notes_pane(pilot) -> MarkdownViewer:
+    """The pane the notes are read in, which scrolls itself."""
+    return pilot.app.query_one("#notes", MarkdownViewer)
+
+
+def toc_entries(pilot) -> list[str]:
+    """The sections offered down the side of the notes, read the way a person
+    reads them: the tree draws a numeral in front of every entry, and that
+    numeral is decoration rather than part of the heading. A list that is not
+    on screen offers nothing, however well filled in it is."""
+    contents = notes_pane(pilot).table_of_contents
+    if not contents.display:
+        return []
+    tree = contents.query_one(Tree)
+    found: list[str] = []
+
+    def under(node) -> None:
+        """Every section nested under this one, in the order they are shown."""
+        for child in node.children:
+            found.append(str(child.label).split(" ", 1)[1])
+            under(child)
+
+    under(tree.root)
+    return found
+
+
+async def click_link(pilot, href: str) -> None:
+    """Clicks a link in the notes the way a terminal click reaches it: through
+    the paragraph the link is written in."""
+    document = notes_pane(pilot).document
+    paragraph = document.get_block_class("paragraph_open")
+    await document.query(paragraph).first().action_link(href)
+    await pilot.pause()
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_the_notes_pane_lists_the_sections_of_the_note(repo):
+    # notes run to several sections, and a pane that only scrolls makes the
+    # reader hunt for the one they came for
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_memo(work)
+        await pilot.pause()
+
+        assert toc_entries(pilot) == ["Sprint sync", "Action items", "Decisions"]
+
+
+@pytest.mark.asyncio
+async def test_the_sections_listed_follow_the_memo_being_read(repo):
+    # the list beside the notes describes the notes: left behind on the last
+    # memo it is worse than none, since it points at sections that are not there
+    work, _home = seed(repo)
+    services.save_notes(repo, work, "# Standup\n\n## What went wrong\n\n- nothing")
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_memo(work)
+        await pilot.pause()
+
+        assert toc_entries(pilot) == ["Standup", "What went wrong"]
+
+
+@pytest.mark.asyncio
+async def test_a_link_to_a_section_jumps_to_it_inside_the_note(repo, monkeypatch):
+    # the section is off the bottom of a note this long
+    work, _home = seed(repo)
+    services.save_notes(repo, work, LONG_NOTE)
+    opened: list[str] = []
+    app = MemoApp(repo)
+    monkeypatch.setattr(app, "open_url", lambda url, **_: opened.append(url))
+
+    async with app.run_test() as pilot:
+        pilot.app.show_memo(work)
+        await pilot.pause()
+        assert notes_pane(pilot).scroll_offset.y == 0
+
+        await click_link(pilot, "#decisions")
+
+        assert notes_pane(pilot).scroll_offset.y > 0
+        assert opened == []
+
+
+@pytest.mark.asyncio
+async def test_a_link_out_to_the_web_still_opens_out_there(repo, monkeypatch):
+    # a note carries whatever the model wrote in it, plain http links included,
+    # and reading one as a section of this note goes looking for a file that
+    # was never there
+    work, _home = seed(repo)
+    services.save_notes(repo, work, "# Sprint sync\n\nSee [the plan](https://example.com/plan).")
+    opened: list[str] = []
+    app = MemoApp(repo)
+    monkeypatch.setattr(app, "open_url", lambda url, **_: opened.append(url))
+
+    async with app.run_test() as pilot:
+        pilot.app.show_memo(work)
+        await pilot.pause()
+
+        await click_link(pilot, "https://example.com/plan")
+
+        assert opened == ["https://example.com/plan"]
+        assert pilot.app.is_running
 
 
 # --- editing a note ------------------------------------------------------
@@ -178,7 +297,7 @@ async def test_saving_an_edit_stores_it_and_shows_it(repo):
         await pilot.pause()
 
         assert services.notes_markdown(repo, work) == "# In my own words"
-        assert "In my own words" in pilot.app.query_one("#notes", Markdown).source
+        assert "In my own words" in notes_pane(pilot).document.source
         assert not showing(pilot.app, "#editor")
 
 
@@ -1022,7 +1141,7 @@ async def test_pressing_x_extracts_notes_for_the_memo_on_screen(repo, monkeypatc
         await finish_jobs(pilot)
 
         assert said(pilot) == ["extracting memo 2 …", "memo 2 extracted via claude"]
-        assert "Shopping list" in pilot.app.query_one("#notes", Markdown).source
+        assert "Shopping list" in notes_pane(pilot).document.source
 
 
 @pytest.mark.asyncio
@@ -1240,7 +1359,7 @@ async def test_work_finishing_on_a_memo_you_have_left_does_not_redraw_it(repo, m
         # it ran and it landed; what it must not do is pull the panes back
         assert "Fresh off the model" in services.notes_markdown(repo, work)
         assert "buy milk" in transcript(pilot)
-        assert "Fresh off the model" not in pilot.app.query_one("#notes", Markdown).source
+        assert "Fresh off the model" not in notes_pane(pilot).document.source
 
 
 @pytest.mark.asyncio
