@@ -200,6 +200,7 @@ class MemoApp(App[None]):
         ("m", "move_memo", "Move"),
         # "r" rather than "n": n already means "no" in the discard dialog
         ("r", "rename_speaker", "Rename speaker"),
+        ("t", "toggle_raw", "Raw transcript"),
         ("q", "quit", "Quit"),
     ]
 
@@ -209,6 +210,9 @@ class MemoApp(App[None]):
         self.repo = repo
         self.memo_id: int | None = None
         self.project: str | None = None
+        # a way of reading transcripts rather than a property of any one memo:
+        # somebody checking a repair pass is checking all of it, memo after memo
+        self.raw = False
 
     def compose(self) -> ComposeResult:
         """Projects beside the memo list, the memo list above its detail."""
@@ -220,7 +224,7 @@ class MemoApp(App[None]):
                 with TabbedContent():
                     with TabPane("Notes"), VerticalScroll():
                         yield Markdown(id="notes")
-                    with TabPane("Transcript"), VerticalScroll():
+                    with TabPane("Transcript", id="transcript-tab"), VerticalScroll():
                         yield Static(id="transcript")
         yield Footer()
 
@@ -252,15 +256,30 @@ class MemoApp(App[None]):
         self.memo_id = memo_id
         self.query_one("#notes", Markdown).update(services.notes_markdown(self.repo, memo_id))
         self.query_one("#transcript", Static).update(
-            services.transcript_lines(self.repo, memo_id)
+            services.transcript_lines(self.repo, memo_id, raw=self.raw)
+        )
+        self.query_one(TabbedContent).get_tab("transcript-tab").label = (
+            "Transcript (raw)" if self.raw else "Transcript"
         )
 
     def clear_memo(self) -> None:
         """Empties the detail panes and forgets what they were showing, for when
-        the memo they describe is no longer one of the rows above them."""
+        the memo they describe is no longer one of the rows above them. The tab
+        drops its raw marking with the transcript it was describing, while the
+        way of reading transcripts is kept for the next memo opened."""
         self.memo_id = None
         self.query_one("#notes", Markdown).update("*no memo shown*")
         self.query_one("#transcript", Static).update("")
+        self.query_one(TabbedContent).get_tab("transcript-tab").label = "Transcript"
+
+    def action_toggle_raw(self) -> None:
+        """Swaps the transcript between the repaired reading and the words as
+        they were transcribed, which is how a repair pass gets checked. With no
+        memo on screen there is nothing under the tab to call raw."""
+        if self.memo_id is None:
+            return
+        self.raw = not self.raw
+        self.show_memo(self.memo_id)
 
     def action_edit_notes(self) -> None:
         """Opens the shown memo's notes for editing, if one is shown at all."""

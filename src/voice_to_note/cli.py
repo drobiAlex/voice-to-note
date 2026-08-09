@@ -116,9 +116,13 @@ def cmd_extract(args: argparse.Namespace) -> None:
 
 
 def cmd_notes(args: argparse.Namespace) -> None:
-    """Prints the notes already extracted for a memo."""
+    """Prints the notes already extracted for a memo, or the note as the screen
+    shows it: whatever somebody wrote by hand, falling back to the extraction."""
     with Repository() as repo:
-        print(services.notes_json(repo, args.id) if args.json else services.notes(repo, args.id))
+        if args.edited:
+            print(services.notes_markdown(repo, args.id))
+        else:
+            print(services.notes_json(repo, args.id) if args.json else services.notes(repo, args.id))
 
 
 def cmd_ask(args: argparse.Namespace) -> None:
@@ -198,7 +202,12 @@ def main() -> None:
 
     sp = sub.add_parser("notes", help="show extracted notes for a memo")
     sp.add_argument("id", type=int)
-    sp.add_argument("--json", action="store_true", help="print the stored extraction as JSON")
+    # an edit replaces the extraction --json prints, so there is no printing both
+    form = sp.add_mutually_exclusive_group()
+    form.add_argument("--json", action="store_true", help="print the stored extraction as JSON")
+    form.add_argument(
+        "--edited", action="store_true", help="print the note as the screen shows it"
+    )
     sp.set_defaults(fn=cmd_notes)
 
     sp = sub.add_parser("ask", help="ask a question about a memo: ask <id> <question...>")

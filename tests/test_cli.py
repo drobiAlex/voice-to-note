@@ -261,6 +261,37 @@ def test_the_raw_flag_reaches_the_json_output_too(monkeypatch, capsys):
     assert capsys.readouterr().out == '[{"text": "as heard"}]\n'
 
 
+# --- notes at the command line -------------------------------------------
+
+
+def test_the_notes_command_can_print_the_note_as_the_screen_shows_it(monkeypatch, capsys):
+    # the TUI note panel shows an edit where somebody made one and the generated
+    # notes otherwise; --edited is that same text without opening the screen
+    monkeypatch.setattr(services, "notes_markdown", lambda _repo, _id: "# In my own words")
+
+    run(monkeypatch, StubRepo(), "notes", "3", "--edited")
+
+    assert capsys.readouterr().out == "# In my own words\n"
+
+
+def test_asking_for_the_edited_note_as_json_is_refused(monkeypatch, capsys):
+    # --json prints the stored extraction, which is the thing an edit replaces;
+    # answering both at once would mean printing one and calling it the other
+    with pytest.raises(SystemExit) as err:
+        run(monkeypatch, StubRepo(), "notes", "3", "--edited", "--json")
+
+    assert err.value.code == 2
+    assert "not allowed with" in capsys.readouterr().err
+
+
+def test_the_notes_command_still_prints_the_extraction_by_default(monkeypatch, capsys):
+    monkeypatch.setattr(services, "notes", lambda _repo, _id: "the notes")
+
+    run(monkeypatch, StubRepo(), "notes", "3")
+
+    assert capsys.readouterr().out == "the notes\n"
+
+
 # --- projects ------------------------------------------------------------
 
 

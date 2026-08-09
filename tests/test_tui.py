@@ -2,7 +2,15 @@ import inspect
 from pathlib import Path
 
 import pytest
-from textual.widgets import Input, Label, ListView, Markdown, Static, TextArea
+from textual.widgets import (
+    Input,
+    Label,
+    ListView,
+    Markdown,
+    Static,
+    TabbedContent,
+    TextArea,
+)
 
 from voice_to_note import services
 from voice_to_note.domain import Segment, Speaker
@@ -492,3 +500,123 @@ async def test_moving_the_shown_memo_out_of_view_stops_showing_it(repo):
         assert "we ship on friday" not in str(
             pilot.app.query_one("#transcript", Static).content
         )
+
+
+# --- reading the transcript raw -------------------------------------------
+
+
+def repair(repo, memo_id: int, text: str) -> None:
+    """Puts a repair pass over a memo's one line: what the repaired view shows
+    and the raw view is there to see behind."""
+    (segment,) = repo.segments(memo_id)
+    repo.update_refinements(memo_id, {segment.id: text})
+
+
+def transcript(pilot) -> str:
+    """The transcript as it currently reads on screen."""
+    return str(pilot.app.query_one("#transcript", Static).content)
+
+
+def transcript_tab(pilot) -> str:
+    """What the tab strip calls the transcript, which is where the screen says
+    which of the two versions is under it."""
+    return str(pilot.app.query_one(TabbedContent).get_tab("transcript-tab").label)
+
+
+@pytest.mark.asyncio
+async def test_pressing_t_shows_the_words_as_they_were_actually_transcribed(repo):
+    # a repair can drop or reword what was said; raw is how you check it
+    work, _home = seed(repo)
+    repair(repo, work, "We ship on Friday.")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        assert "We ship on Friday." in transcript(pilot)
+
+        await pilot.press("t")
+        await pilot.pause()
+
+        assert "we ship on friday" in transcript(pilot)
+        assert "We ship on Friday." not in transcript(pilot)
+
+
+@pytest.mark.asyncio
+async def test_pressing_t_again_puts_the_repaired_transcript_back(repo):
+    work, _home = seed(repo)
+    repair(repo, work, "We ship on Friday.")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("t")
+        await pilot.pause()
+        await pilot.press("t")
+        await pilot.pause()
+
+        assert "We ship on Friday." in transcript(pilot)
+        assert transcript_tab(pilot) == "Transcript"
+
+
+@pytest.mark.asyncio
+async def test_the_transcript_tab_says_which_version_is_under_it(repo):
+    # the two versions can differ by one word, so the screen has to say which
+    work, _home = seed(repo)
+    repair(repo, work, "We ship on Friday.")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        assert transcript_tab(pilot) == "Transcript"
+
+        await pilot.press("t")
+        await pilot.pause()
+
+        assert transcript_tab(pilot) == "Transcript (raw)"
+
+
+@pytest.mark.asyncio
+async def test_reading_raw_holds_when_the_next_memo_is_opened(repo):
+    # somebody checking the repairs is checking all of them, not re-pressing t
+    work, home = seed(repo)
+    repair(repo, work, "We ship on Friday.")
+    repair(repo, home, "Buy milk.")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("t")
+        await pilot.pause()
+        await open_memo(pilot, home)
+
+        assert "buy milk" in transcript(pilot)
+        assert "Buy milk." not in transcript(pilot)
+
+
+@pytest.mark.asyncio
+async def test_a_memo_moved_out_of_view_takes_the_raw_claim_with_it(repo):
+    # the panes go empty, so there is no longer a transcript under the tab for
+    # the word raw to be describing
+    work, _home = seed(repo)
+    repair(repo, work, "We ship on Friday.")
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await open_memo(pilot, work)
+        await pilot.press("t")
+        await pilot.pause()
+        await pilot.press("m")
+        await pilot.pause()
+        pilot.app.screen.query_one("#project-name", Input).value = "side"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert transcript_tab(pilot) == "Transcript"
+
+
+@pytest.mark.asyncio
+async def test_pressing_t_before_choosing_a_memo_does_nothing(repo):
+    # there is no transcript under the tab yet, so calling it raw would be a lie
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("t")
+        await pilot.pause()
+
+        assert transcript_tab(pilot) == "Transcript"
