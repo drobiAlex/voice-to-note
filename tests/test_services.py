@@ -484,3 +484,44 @@ def test_processing_into_a_nameless_project_is_refused_before_any_work(repo, tmp
         services.process_memo(repo, src, project="   ")
 
     assert converted == []
+
+
+def test_the_project_list_is_available_to_a_screen(repo, wav):
+    # the sidebar needs names and counts without reaching past services
+    add_project_memo(repo, wav, "work.m4a", "work")
+    add_project_memo(repo, wav, "home.m4a", "personal")
+
+    assert services.projects(repo) == [("personal", 1), ("work", 1)]
+
+
+def test_memos_can_be_had_as_records_rather_than_a_printed_table(repo, wav):
+    # a screen builds its own rows; it should not have to parse memos_text
+    add_project_memo(repo, wav, "work.m4a", "work")
+    add_project_memo(repo, wav, "home.m4a", "personal")
+
+    listed = services.memos(repo, project="work")
+
+    assert [m.filename for m in listed] == ["work.m4a"]
+    assert listed[0].project == "work"
+
+
+def test_notes_come_as_markdown_for_a_reader_that_renders_it(repo, wav):
+    # the action items are the section the plain renderer loses to Markdown, so
+    # they are the section worth asserting on
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Hello", speaker="S1")])
+    committed = NOTES | {
+        "action_items": [{"task": "Cut the release", "owner": "Alice", "deadline": "Friday"}]
+    }
+    repo.save_extraction(memo_id, "claude", committed)
+
+    markdown = services.notes_markdown(repo, memo_id)
+
+    assert markdown.startswith("# Sprint sync")
+    assert "## Action items" in markdown
+    assert "- [ ] Cut the release — Alice, Friday" in markdown
+
+
+def test_a_memo_with_no_notes_yields_markdown_that_says_so(repo, wav):
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Hello", speaker="S1")])
+
+    assert "no notes" in services.notes_markdown(repo, memo_id).lower()

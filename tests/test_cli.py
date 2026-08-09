@@ -341,3 +341,26 @@ def test_a_nameless_project_ends_the_command_with_a_message(monkeypatch, capsys)
         run(monkeypatch, StubRepo(), "move", "3", "")
 
     assert err.value.code == "a project needs a name"
+
+
+def test_the_tui_command_opens_the_browser_on_the_memo_database(monkeypatch):
+    # the app is imported inside the command, so patching the module works and
+    # every other command still avoids paying for textual
+    from voice_to_note.tui import app as tui_app
+
+    opened: dict = {}
+
+    class FakeApp:
+        def __init__(self, repo):
+            opened["repo"] = repo
+
+        def run(self):
+            opened["ran"] = True
+
+    monkeypatch.setattr(tui_app, "MemoApp", FakeApp)
+    stub = StubRepo()
+
+    run(monkeypatch, stub, "tui")
+
+    assert opened["repo"] is stub
+    assert opened["ran"] is True

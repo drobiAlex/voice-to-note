@@ -1,5 +1,7 @@
+from markdown_it import MarkdownIt
+
 from voice_to_note.domain import Extraction
-from voice_to_note.transforms.notes import render_notes
+from voice_to_note.transforms.notes import render_notes, render_notes_markdown
 
 BLANK = {
     "title": "Sprint sync",
@@ -62,3 +64,19 @@ def test_dates_pair_the_date_with_its_context():
 
 def test_tags_render_as_a_single_trailing_line():
     assert render(tags=["release", "hiring"]).endswith("tags: release, hiring")
+
+
+def test_a_task_written_in_markdown_stays_one_item():
+    # models write asterisks and brackets into task text; whatever that renders
+    # as, it must not break one commitment into several list items or headings
+    awkward = {"task": "fix *urgent* [#123] bug", "owner": None, "deadline": None}
+    markdown = render_notes_markdown(
+        Extraction("claude", {**BLANK, "action_items": [awkward]}, "2026-08-07 12:00:00")
+    )
+
+    items = [line for line in markdown.splitlines() if line.startswith("- [ ]")]
+    assert items == ["- [ ] fix *urgent* [#123] bug"]
+    # parsed by the same library the Markdown widget uses: one list, one item
+    blocks = [t.type for t in MarkdownIt("gfm-like").parse(markdown)]
+    assert blocks.count("bullet_list_open") == 1
+    assert blocks.count("list_item_open") == 1

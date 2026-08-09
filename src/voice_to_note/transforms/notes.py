@@ -92,3 +92,40 @@ def render_notes(extraction: Extraction) -> str:
     if d["tags"]:
         lines.append("tags: " + ", ".join(d["tags"]))
     return "\n".join(lines)
+
+
+def render_notes_markdown(extraction: Extraction) -> str:
+    """The same notes as Markdown, for a screen that renders it rather than a
+    terminal that prints it. The plain form indents its sections, which Markdown
+    reads as one run-on paragraph — here every section is a real heading and
+    every action item a real list item."""
+    d = extraction.data
+    lines = [
+        f"# {d['title']}",
+        "",
+        f"*{extraction.backend} · {extraction.created_at}*",
+        "",
+        d["summary"],
+        "",
+    ]
+    if d["action_items"]:
+        # whatever the model wrote stays as it wrote it: escaping its asterisks
+        # would show them to a reader who meant emphasis, and a task is one line
+        # here regardless of what the markup renders as
+        lines += ["## Action items", ""]
+        for a in d["action_items"]:
+            extra = ", ".join(x for x in (a.get("owner"), a.get("deadline")) if x)
+            lines.append(f"- [ ] {a['task']}" + (f" — {extra}" if extra else ""))
+        lines.append("")
+    for items, header in (
+        (d["decisions"], "## Decisions"),
+        (d["key_insights"], "## Key insights"),
+        (d["open_questions"], "## Open questions"),
+    ):
+        if items:
+            lines += [header, "", *(f"- {item}" for item in items), ""]
+    if d["dates"]:
+        lines += ["## Dates", "", *(f"- **{x['date']}** — {x['context']}" for x in d["dates"]), ""]
+    if d["tags"]:
+        lines.append("Tags: " + ", ".join(f"`{t}`" for t in d["tags"]))
+    return "\n".join(lines).rstrip() + "\n"

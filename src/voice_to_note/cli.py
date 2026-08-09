@@ -129,6 +129,16 @@ def cmd_ask(args: argparse.Namespace) -> None:
     print(answer)
 
 
+def cmd_tui(args: argparse.Namespace) -> None:
+    """Opens the memo browser."""
+    # textual costs about as much to import as the whole rest of the app, and
+    # every other command would pay it at the top of this file
+    from .tui.app import MemoApp
+
+    with Repository() as repo:
+        MemoApp(repo).run()
+
+
 def cmd_rename(args: argparse.Namespace) -> None:
     """Puts a name to a speaker, which later memos then recognise by voice."""
     with Repository() as repo:
@@ -192,6 +202,8 @@ def main() -> None:
     sp.add_argument("id", type=int)
     sp.add_argument("question", nargs="+")
     sp.set_defaults(fn=cmd_ask)
+
+    sub.add_parser("tui", help="browse memos on one screen").set_defaults(fn=cmd_tui)
 
     sp = sub.add_parser("rename", help="name a speaker: rename <memo_id> <label> <name>")
     sp.add_argument("id", type=int)

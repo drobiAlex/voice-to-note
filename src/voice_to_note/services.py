@@ -10,7 +10,7 @@ from . import config
 from .domain import Extraction, Memo, Speaker, SpeakerMatch, Turn
 from .gateways import audio, llm, sherpa, whisper
 from .storage.repository import Repository
-from .transforms.notes import SCHEMA, parse_notes, render_notes
+from .transforms.notes import SCHEMA, parse_notes, render_notes, render_notes_markdown
 from .transforms.refine import (
     REFINE_SCHEMA,
     accept_repairs,
@@ -302,6 +302,16 @@ def notes(repo: Repository, memo_id: int) -> str:
     return render_notes(_extraction(repo, memo_id))
 
 
+def notes_markdown(repo: Repository, memo_id: int) -> str:
+    """The notes as Markdown for a screen that renders them. A memo nobody has
+    extracted yet gets a line saying so: a screen has to show something, where a
+    command line can simply refuse."""
+    extraction = repo.extraction(memo_id)
+    if not extraction:
+        return "*no notes yet — run `vtn extract` on this memo*"
+    return render_notes_markdown(extraction)
+
+
 def notes_json(repo: Repository, memo_id: int) -> str:
     """The notes as a script reads them."""
     return json.dumps(_extraction(repo, memo_id).data, ensure_ascii=False)
@@ -314,6 +324,16 @@ def transcript_json(repo: Repository, memo_id: int, *, raw: bool = False) -> str
         repo.segments(memo_id), repo.display_names(memo_id), raw=raw
     )
     return json.dumps(segments, ensure_ascii=False)
+
+
+def projects(repo: Repository) -> list[tuple[str, int]]:
+    """Every project and how full it is, for a sidebar to list."""
+    return repo.projects()
+
+
+def memos(repo: Repository, project: str | None = None) -> list[Memo]:
+    """The stored memos as records, for a screen that lays out its own rows."""
+    return repo.memos(project)
 
 
 def memos_json(repo: Repository, project: str | None = None) -> str:
