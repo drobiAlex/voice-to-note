@@ -186,6 +186,28 @@ class RenameSpeaker(ModalScreen[None]):
         self.dismiss(None)
 
 
+class MemoDetails(ModalScreen[None]):
+    """What state one memo is in, for the questions the list and the panes do
+    not answer: how long it is, when it last changed, whether it has been
+    repaired or written over."""
+
+    BINDINGS = [("escape", "close", "Close")]
+
+    def __init__(self, facts: str) -> None:
+        """Opens on the lines services laid out. The screen adds no labels of its
+        own, so what it calls a memo's state cannot drift from the command line."""
+        super().__init__()
+        self.facts = facts
+
+    def compose(self) -> ComposeResult:
+        """The lines, and nothing to do to them."""
+        yield Static(self.facts, id="memo-info")
+
+    def action_close(self) -> None:
+        """Puts the memo back in front of them."""
+        self.dismiss(None)
+
+
 class RenameProject(ModalScreen[None]):
     """A project's name, open for correcting. It opens on the name the project
     has now, because renaming one is usually fixing it rather than replacing it."""
@@ -262,6 +284,7 @@ class MemoApp(App[None]):
     """
     BINDINGS = [
         ("e", "edit_notes", "Edit notes"),
+        ("i", "memo_info", "Info"),
         ("m", "move_memo", "Move"),
         # "r" rather than "n": n already means "no" in the discard dialog
         ("r", "rename_speaker", "Rename speaker"),
@@ -363,6 +386,12 @@ class MemoApp(App[None]):
             return
         self.raw = not self.raw
         self.show_memo(self.memo_id)
+
+    def action_memo_info(self) -> None:
+        """Says what state the memo on screen is in, if one is on screen at all."""
+        if self.memo_id is None:
+            return
+        self.push_screen(MemoDetails(services.memo_info_text(self.repo, self.memo_id)))
 
     def action_edit_notes(self) -> None:
         """Opens the shown memo's notes for editing, if one is shown at all."""

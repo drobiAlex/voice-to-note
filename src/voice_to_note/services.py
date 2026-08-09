@@ -389,6 +389,68 @@ def move_memo(repo: Repository, memo_id: int, project: str) -> None:
     repo.set_project(memo_id, name)
 
 
+@dataclass(frozen=True)
+class MemoInfo:
+    """What state one memo is in, for a screen or a command line to lay out."""
+
+    filename: str
+    project: str
+    duration: str
+    language: str
+    status: str
+    created: str
+    updated: str
+    speakers: int
+    refined: bool
+    edited: bool
+
+
+def memo_info(repo: Repository, memo_id: int) -> MemoInfo:
+    """What a reader asks about one memo: where it is filed, how far through the
+    pipeline it got, and whether anybody has repaired its transcript or written
+    its notes over. A memo nobody has changed reads as updated when it was made,
+    since a screen has to print something and "never" would misdescribe a
+    recording that has been sitting there correct since the day it arrived."""
+    memo = require_memo(repo, memo_id)
+    return MemoInfo(
+        filename=memo.filename,
+        project=memo.project,
+        duration=_duration(memo.duration_s),
+        language=memo.language or "?",
+        status=memo.status,
+        created=memo.created_at,
+        updated=memo.updated_at or memo.created_at,
+        speakers=len(repo.display_names(memo_id)),
+        refined=any(s.refined_text is not None for s in repo.segments(memo_id)),
+        edited=bool(repo.notes_md(memo_id)),
+    )
+
+
+def _yes_no(flag: bool) -> str:
+    """A plain answer where a reader would otherwise be shown True."""
+    return "yes" if flag else "no"
+
+
+def memo_info_text(repo: Repository, memo_id: int) -> str:
+    """The same as a person reads it, labels padded so the values line up. The
+    screen shows these lines rather than laying out its own, so the two cannot
+    come to disagree about what a memo's state is called."""
+    info = memo_info(repo, memo_id)
+    rows = [
+        ("file", info.filename),
+        ("project", info.project),
+        ("length", info.duration),
+        ("language", info.language),
+        ("status", info.status),
+        ("created", info.created),
+        ("updated", info.updated),
+        ("speakers", str(info.speakers)),
+        ("repaired", _yes_no(info.refined)),
+        ("edited", _yes_no(info.edited)),
+    ]
+    return "\n".join(f"{label + ':':<10}{value}" for label, value in rows)
+
+
 def project_name(name: str) -> str:
     """A project name as it will be stored, for a screen that has to go looking
     for what it just renamed under the name the rename actually used."""

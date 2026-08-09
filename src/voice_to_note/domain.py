@@ -85,6 +85,9 @@ class Memo:
     created_at: str
     # free text, not an enum: the sidebar lists whatever projects exist
     project: str = "other"
+    # nothing has changed the memo since it was stored, which is not the same as
+    # it having been changed at the moment it was made
+    updated_at: str | None = None
 
 
 @dataclass(frozen=True)

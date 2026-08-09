@@ -69,6 +69,12 @@ def cmd_move(args: argparse.Namespace) -> None:
     status(f"memo {args.id} moved to {args.project}")
 
 
+def cmd_info(args: argparse.Namespace) -> None:
+    """Prints what state one memo is in."""
+    with Repository() as repo:
+        print(services.memo_info_text(repo, args.id))
+
+
 def _refiled(moved: int, project: str) -> str:
     """How much a bulk refiling carried and where it went, in plain English."""
     return f"{moved} memo{'' if moved == 1 else 's'} moved to {project}"
@@ -195,6 +201,10 @@ def main() -> None:
     sp.add_argument("id", type=int)
     sp.add_argument("project")
     sp.set_defaults(fn=cmd_move)
+
+    sp = sub.add_parser("info", help="show what state a memo is in")
+    sp.add_argument("id", type=int)
+    sp.set_defaults(fn=cmd_info)
 
     # the one nested command in an otherwise flat set of verbs: a top-level
     # `rename` already names a speaker, and hyphenating would put two more verbs

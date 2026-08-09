@@ -567,6 +567,56 @@ def test_removing_a_project_nobody_has_used_is_refused(repo):
         services.remove_project(repo, "ghost")
 
 
+def test_the_info_for_a_memo_gathers_what_a_reader_would_ask(repo, wav):
+    memo_id = repo.create_memo(
+        filename="standup.m4a", wav_path=str(wav), duration_s=75.0, language="en",
+        segments=[Segment(0, 1000, "we ship friday", speaker="S1")],
+        speakers=[Speaker("S1")], project="work",
+    )
+
+    info = services.memo_info(repo, memo_id)
+
+    assert (info.filename, info.project, info.duration) == ("standup.m4a", "work", "75s")
+    assert (info.language, info.status) == ("en", "transcribed")
+    assert (info.speakers, info.refined, info.edited) == (1, False, False)
+
+
+def test_a_memo_nobody_has_changed_reads_as_updated_when_it_was_made(repo, wav):
+    # a screen has to print something, and "never" would be a lie about a memo
+    # that has been sitting there correct since the day it arrived
+    memo_id = add_memo(repo, wav)
+
+    info = services.memo_info(repo, memo_id)
+
+    assert info.updated == info.created
+
+
+def test_the_info_notices_a_repaired_transcript_and_an_edited_note(repo, wav):
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "helo")])
+    (stored,) = repo.segments(memo_id)
+    repo.update_refinements(memo_id, {stored.id: "hello"})
+    repo.save_notes_md(memo_id, "# My own words")
+
+    info = services.memo_info(repo, memo_id)
+
+    assert (info.refined, info.edited) == (True, True)
+
+
+def test_asking_after_a_memo_that_was_never_stored_is_refused(repo):
+    with pytest.raises(services.NotFound):
+        services.memo_info(repo, 999)
+
+
+def test_the_info_reads_as_labels_and_values_lined_up(repo, wav):
+    memo_id = add_memo(repo, wav, filename="standup.m4a")
+
+    text = services.memo_info_text(repo, memo_id)
+
+    assert "file:     standup.m4a" in text
+    assert "project:  other" in text
+    assert "repaired: no" in text
+
+
 def test_memos_can_be_had_as_records_rather_than_a_printed_table(repo, wav):
     # a screen builds its own rows; it should not have to parse memos_text
     add_project_memo(repo, wav, "work.m4a", "work")

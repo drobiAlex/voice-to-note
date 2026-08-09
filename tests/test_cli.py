@@ -261,6 +261,35 @@ def test_the_raw_flag_reaches_the_json_output_too(monkeypatch, capsys):
     assert capsys.readouterr().out == '[{"text": "as heard"}]\n'
 
 
+def test_the_info_command_prints_what_state_a_memo_is_in(monkeypatch, capsys):
+    seen: dict = {}
+
+    def memo_info_text(_repo, memo_id):
+        seen["id"] = memo_id
+        return "file:     standup.m4a"
+
+    monkeypatch.setattr(services, "memo_info_text", memo_info_text)
+
+    run(monkeypatch, StubRepo(), "info", "3")
+
+    assert seen == {"id": 3}
+    assert capsys.readouterr().out == "file:     standup.m4a\n"
+
+
+def test_asking_after_a_memo_that_is_not_there_ends_the_command_with_a_message(
+    monkeypatch, capsys
+):
+    def memo_info_text(_repo, _id):
+        raise services.NotFound("no memo with id 999")
+
+    monkeypatch.setattr(services, "memo_info_text", memo_info_text)
+
+    with pytest.raises(SystemExit) as err:
+        run(monkeypatch, StubRepo(), "info", "999")
+
+    assert err.value.code == "no memo with id 999"
+
+
 # --- notes at the command line -------------------------------------------
 
 

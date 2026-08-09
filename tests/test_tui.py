@@ -847,3 +847,48 @@ async def test_the_project_keys_do_nothing_while_the_memo_list_has_focus(repo):
         await pilot.press("X")
         await pilot.pause()
         assert not showing(pilot.app, "#confirm-remove")
+
+
+# --- what state a memo is in ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pressing_i_says_what_state_the_memo_is_in(repo):
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("i")
+        await pilot.pause()
+
+        shown = str(pilot.app.screen.query_one("#memo-info", Static).content)
+        assert "standup.m4a" in shown
+        assert "work" in shown
+
+
+@pytest.mark.asyncio
+async def test_leaving_the_info_puts_the_memo_back_in_front_of_you(repo):
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("i")
+        await pilot.pause()
+        assert showing(pilot.app, "#memo-info")
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert not showing(pilot.app, "#memo-info")
+        assert "we ship on friday" in transcript(pilot)
+
+
+@pytest.mark.asyncio
+async def test_pressing_i_before_choosing_a_memo_does_nothing(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("i")
+        await pilot.pause()
+
+        assert not showing(pilot.app, "#memo-info")

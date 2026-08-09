@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS memos (
   status TEXT NOT NULL DEFAULT 'new',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   project TEXT NOT NULL DEFAULT 'other',
-  notes_md TEXT
+  notes_md TEXT,
+  updated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS segments (
   id INTEGER PRIMARY KEY,
@@ -46,7 +47,9 @@ CREATE TABLE IF NOT EXISTS speakers (
 );
 """
 
-MEMO_COLUMNS = "id, filename, wav_path, duration_s, language, status, created_at, project"
+MEMO_COLUMNS = (
+    "id, filename, wav_path, duration_s, language, status, created_at, project, updated_at"
+)
 
 
 class Repository:
@@ -67,7 +70,8 @@ class Repository:
         """Brings an older database up to the current shape, a column at a time:
         `embedding` for one made before voice matching, `refined_text` for one
         made before transcript repair, `project` for one made before memos were
-        grouped, and `notes_md` for one made before notes could be edited."""
+        grouped, `notes_md` for one made before notes could be edited, and
+        `updated_at` for one made before memos recorded when they last changed."""
         cols = {r["name"] for r in self.con.execute("PRAGMA table_info(speakers)")}
         if "embedding" not in cols:
             self.con.execute("ALTER TABLE speakers ADD COLUMN embedding BLOB")
@@ -81,6 +85,8 @@ class Repository:
             )
         if "notes_md" not in cols:
             self.con.execute("ALTER TABLE memos ADD COLUMN notes_md TEXT")
+        if "updated_at" not in cols:
+            self.con.execute("ALTER TABLE memos ADD COLUMN updated_at TEXT")
 
     def close(self) -> None:
         """Closes the memo database."""
@@ -157,6 +163,14 @@ class Repository:
         ).fetchone()
         return row["notes_md"] if row else None
 
+    def _touch(self, memo_id: int) -> None:
+        """Marks a memo as changed just now. Every write that alters what a
+        reader would see calls this, so `updated_at` means the last change to the
+        memo as it reads rather than the last write to any row mentioning it."""
+        self.con.execute(
+            "UPDATE memos SET updated_at=datetime('now') WHERE id=?", (memo_id,)
+        )
+
     def save_notes_md(self, memo_id: int, markdown: str | None) -> None:
         """Stores a person's own version of a memo's notes, or clears it away
         again with None. The extraction it was written over is left alone."""
@@ -164,11 +178,13 @@ class Repository:
             self.con.execute(
                 "UPDATE memos SET notes_md=? WHERE id=?", (markdown, memo_id)
             )
+            self._touch(memo_id)
 
     def set_project(self, memo_id: int, project: str) -> None:
         """Files a memo under a different project."""
         with self.con:
             self.con.execute("UPDATE memos SET project=? WHERE id=?", (project, memo_id))
+            self._touch(memo_id)
 
     def refile_project(self, old: str, new: str) -> int:
         """Files everything under one project into another in a single statement,
@@ -176,8 +192,12 @@ class Repository:
         one are both this: a project is only a value on its memos, so there is
         nothing else anywhere to rename or delete."""
         with self.con:
+            # the stamp _touch makes, written in here rather than called: this is
+            # one statement over a whole project by contract, and folding it in
+            # keeps the rowcount the count of memos carried
             cur = self.con.execute(
-                "UPDATE memos SET project=? WHERE project=?", (new, old)
+                "UPDATE memos SET project=?, updated_at=datetime('now') WHERE project=?",
+                (new, old),
             )
         return cur.rowcount
 
@@ -213,6 +233,7 @@ class Repository:
                 [(s.speaker, s.id) for s in segments],
             )
             self._write_speakers(memo_id, speakers)
+            self._touch(memo_id)
 
     def update_refinements(self, memo_id: int, refinements: Mapping[int, str]) -> None:
         """Records a repair pass over a memo. This becomes the whole set of
@@ -226,6 +247,7 @@ class Repository:
                 "UPDATE segments SET refined_text=? WHERE memo_id=? AND id=?",
                 [(text, memo_id, seg_id) for seg_id, text in refinements.items()],
             )
+            self._touch(memo_id)
 
     # --- speakers ------------------------------------------------------
 
@@ -290,6 +312,9 @@ class Repository:
                 "UPDATE speakers SET name=? WHERE memo_id=? AND label=?",
                 (name, memo_id, label),
             )
+            # a label that was not there changed nothing anybody reads
+            if cur.rowcount:
+                self._touch(memo_id)
         return cur.rowcount > 0
 
     # --- extractions ---------------------------------------------------
@@ -312,6 +337,7 @@ class Repository:
             self.con.execute("UPDATE memos SET status='extracted' WHERE id=?", (memo_id,))
             if clear_edited:
                 self.con.execute("UPDATE memos SET notes_md=NULL WHERE id=?", (memo_id,))
+            self._touch(memo_id)
 
     def extraction(self, memo_id: int) -> Extraction | None:
         """A memo's stored notes, if extraction has run for it."""
@@ -337,4 +363,5 @@ def _memo(row: sqlite3.Row) -> Memo:
         row["status"],
         row["created_at"],
         row["project"],
+        row["updated_at"],
     )

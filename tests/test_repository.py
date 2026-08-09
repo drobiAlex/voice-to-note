@@ -47,6 +47,16 @@ CREATE TABLE segments (
 """
 
 
+PRE_UPDATED_SCHEMA = """
+CREATE TABLE memos (
+  id INTEGER PRIMARY KEY, filename TEXT NOT NULL, wav_path TEXT NOT NULL,
+  duration_s REAL, language TEXT, status TEXT NOT NULL DEFAULT 'new',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  project TEXT NOT NULL DEFAULT 'other', notes_md TEXT
+);
+"""
+
+
 PRE_NOTES_SCHEMA = """
 CREATE TABLE memos (
   id INTEGER PRIMARY KEY, filename TEXT NOT NULL, wav_path TEXT NOT NULL,
@@ -410,3 +420,100 @@ def test_the_migration_accounts_for_every_column_it_adds(repo):
     documented = Repository._migrate.__doc__ or ""
 
     assert [c for c in re.findall(r"ADD COLUMN (\w+)", source) if c not in documented] == []
+
+
+# --- when a memo was last changed -----------------------------------------
+
+
+def test_a_memo_nobody_has_changed_has_no_update_time(repo):
+    # NULL is not "changed when it was made": it says nothing has happened since
+    memo_id = make_memo(repo)
+
+    assert repo.memo(memo_id).updated_at is None
+
+
+def test_moving_a_memo_marks_when_it_changed(repo):
+    memo_id = make_memo(repo)
+
+    repo.set_project(memo_id, "work")
+
+    assert repo.memo(memo_id).updated_at is not None
+
+
+def test_refiling_a_whole_project_marks_every_memo_it_carried(repo):
+    first = make_memo(repo, filename="a.m4a", project="work")
+    second = make_memo(repo, filename="b.m4a", project="work")
+
+    repo.refile_project("work", "client")
+
+    assert repo.memo(first).updated_at is not None
+    assert repo.memo(second).updated_at is not None
+
+
+def test_editing_the_notes_marks_when_the_memo_changed(repo):
+    memo_id = make_memo(repo)
+
+    repo.save_notes_md(memo_id, "# My own words")
+
+    assert repo.memo(memo_id).updated_at is not None
+
+
+def test_storing_an_extraction_marks_when_the_memo_changed(repo):
+    memo_id = make_memo(repo)
+
+    repo.save_extraction(memo_id, "claude", {"title": "Sprint sync"})
+
+    assert repo.memo(memo_id).updated_at is not None
+
+
+def test_naming_a_speaker_marks_when_the_memo_changed(repo):
+    memo_id = make_memo(repo, speakers=[Speaker("S1")])
+
+    repo.rename_speaker(memo_id, "S1", "Alice")
+
+    assert repo.memo(memo_id).updated_at is not None
+
+
+def test_repairing_the_transcript_marks_when_the_memo_changed(repo):
+    memo_id = make_memo(repo, segments=[Segment(0, 900, "helo")])
+    (stored,) = repo.segments(memo_id)
+
+    repo.update_refinements(memo_id, {stored.id: "hello"})
+
+    assert repo.memo(memo_id).updated_at is not None
+
+
+def test_a_rename_that_found_no_such_speaker_marks_nothing(repo):
+    # the memo reads exactly as it did, so recording a change would be a lie
+    memo_id = make_memo(repo, speakers=[Speaker("S1")])
+
+    repo.rename_speaker(memo_id, "S9", "Nobody")
+
+    assert repo.memo(memo_id).updated_at is None
+
+
+def test_a_database_from_before_change_times_gains_the_column(tmp_path):
+    path = tmp_path / "legacy.db"
+    con = sqlite3.connect(path)
+    con.executescript(PRE_UPDATED_SCHEMA)
+    con.execute("INSERT INTO memos (filename, wav_path) VALUES ('old.m4a', '/tmp/old.wav')")
+    con.commit()
+    con.close()
+
+    repo = Repository(path)
+    assert repo.memo(1).updated_at is None
+
+    repo.set_project(1, "work")
+    assert repo.memo(1).updated_at is not None
+    repo.close()
+
+
+def test_running_speaker_detection_again_marks_when_the_memo_changed(repo):
+    memo_id = make_memo(repo, segments=[Segment(0, 900, "hi")], speakers=[Speaker("S1")])
+    (stored,) = repo.segments(memo_id)
+
+    repo.save_diarization(
+        memo_id, [Segment(0, 900, "hi", "S2", stored.id)], [Speaker("S2")]
+    )
+
+    assert repo.memo(memo_id).updated_at is not None
