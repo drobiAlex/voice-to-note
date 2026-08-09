@@ -393,11 +393,24 @@ def memos_json(
     )
 
 
-def ask(repo: Repository, memo_id: int, question: str) -> tuple[str, str]:
-    """Answers a question about one memo, grounded only in what was said."""
+def question(text: str) -> str:
+    """A question with its spacing tidied, refusing one that is really empty: an
+    empty question still costs a call to a model, which then answers whatever it
+    makes of being asked nothing. Public so a screen can refuse one while its
+    modal is still open, rather than after it has closed on the typing."""
+    asked = text.strip()
+    if not asked:
+        raise InvalidInput("a question needs something in it")
+    return asked
+
+
+def ask(repo: Repository, memo_id: int, asked: str) -> tuple[str, str]:
+    """Answers a question about one memo, grounded only in what was said. The
+    answer is stored nowhere: it is read once and gone."""
+    text = question(asked)
     require_memo(repo, memo_id)
     return _complete(
-        llm.ask_prompt(transcript(repo, memo_id), question),
+        llm.ask_prompt(transcript(repo, memo_id), text),
         schema=None,
         parse=str.strip,
         failure="ask failed",

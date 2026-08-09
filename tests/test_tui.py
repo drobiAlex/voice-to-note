@@ -1246,3 +1246,157 @@ async def test_pressing_x_before_choosing_a_memo_does_nothing(repo, monkeypatch)
         await finish_jobs(pilot)
 
         assert said(pilot) == []
+
+
+# --- asking a memo a question ---------------------------------------------
+
+
+async def ask_question(pilot, question: str) -> None:
+    """Puts a question to the memo on screen, the way a person does."""
+    await pilot.press("a")
+    await pilot.pause()
+    pilot.app.screen.query_one("#ask-question", Input).value = question
+    await pilot.press("enter")
+
+
+def answer_shown(pilot) -> str:
+    """The answer as it reads on screen."""
+    return pilot.app.screen.query_one("#answer", Markdown).source
+
+
+@pytest.mark.asyncio
+async def test_pressing_a_asks_what_you_want_to_know(repo):
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("a")
+        await pilot.pause()
+
+        assert showing(pilot.app, "#ask-question")
+
+
+@pytest.mark.asyncio
+async def test_the_answer_comes_back_on_screen(repo, monkeypatch):
+    work, _home = seed(repo)
+    monkeypatch.setattr(services, "ask", lambda _r, _i, q: ("claude", f"You asked: {q}"))
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await ask_question(pilot, "When do they ship?")
+        await finish_jobs(pilot)
+
+        assert "You asked: When do they ship?" in answer_shown(pilot)
+        assert said(pilot) == ["answering memo 1 …", "memo 1 answered via claude"]
+
+
+@pytest.mark.asyncio
+async def test_the_answer_says_which_memo_and_which_question_it_answers(repo, monkeypatch):
+    # it arrives after a wait and outlives the modal that asked, so an answer
+    # with no question on it is a paragraph nobody can place
+    work, _home = seed(repo)
+    monkeypatch.setattr(services, "ask", lambda _r, _i, _q: ("claude", "On Friday."))
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await ask_question(pilot, "When do they ship?")
+        await finish_jobs(pilot)
+
+        shown = answer_shown(pilot)
+        assert "memo 1" in shown
+        assert "When do they ship?" in shown
+
+
+@pytest.mark.asyncio
+async def test_leaving_the_answer_puts_the_memo_back_in_front_of_you(repo, monkeypatch):
+    work, _home = seed(repo)
+    monkeypatch.setattr(services, "ask", lambda _r, _i, _q: ("claude", "On Friday."))
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await ask_question(pilot, "When do they ship?")
+        await finish_jobs(pilot)
+        assert showing(pilot.app, "#answer")
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert not showing(pilot.app, "#answer")
+        assert "we ship on friday" in transcript(pilot)
+
+
+@pytest.mark.asyncio
+async def test_a_question_of_nothing_is_refused_without_losing_the_modal(repo, monkeypatch):
+    # refused while the modal is still open, like every other thing typed into
+    # one: finding out after it closed would mean typing the question again
+    work, _home = seed(repo)
+    asked: list = []
+    monkeypatch.setattr(
+        services, "ask", lambda _r, _i, q: asked.append(q) or ("claude", "…")
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await ask_question(pilot, "   ")
+        await finish_jobs(pilot)
+
+        assert showing(pilot.app, "#ask-question")
+        assert said(pilot) == ["a question needs something in it"]
+        assert asked == []
+
+
+@pytest.mark.asyncio
+async def test_leaving_the_question_unasked_asks_nothing(repo, monkeypatch):
+    work, _home = seed(repo)
+    asked: list = []
+    monkeypatch.setattr(
+        services, "ask", lambda _r, _i, q: asked.append(q) or ("claude", "…")
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("a")
+        await pilot.pause()
+        assert showing(pilot.app, "#ask-question")
+
+        await pilot.press("escape")
+        await finish_jobs(pilot)
+
+        assert not showing(pilot.app, "#ask-question")
+        assert asked == []
+
+
+@pytest.mark.asyncio
+async def test_an_answer_arrives_even_once_you_have_moved_on(repo, monkeypatch):
+    # unlike a repair, an answer is kept nowhere: not showing it loses it, so it
+    # arrives labelled rather than being dropped for being late
+    work, home = seed(repo)
+    holding = threading.Event()
+
+    def slow_answer(_repo, _memo_id, _question):
+        holding.wait(timeout=5)
+        return ("claude", "On Friday.")
+
+    monkeypatch.setattr(services, "ask", slow_answer)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await ask_question(pilot, "When do they ship?")
+        await pilot.pause()
+        await open_memo(pilot, home)
+
+        holding.set()
+        await finish_jobs(pilot)
+
+        assert "memo 1" in answer_shown(pilot)
+
+
+@pytest.mark.asyncio
+async def test_pressing_a_before_choosing_a_memo_does_nothing(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("a")
+        await pilot.pause()
+
+        assert not showing(pilot.app, "#ask-question")

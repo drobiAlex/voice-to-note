@@ -188,6 +188,66 @@ class RenameSpeaker(ModalScreen[None]):
         self.dismiss(None)
 
 
+class AskQuestion(ModalScreen[None]):
+    """A question to put to one recording. The answer is read once and kept
+    nowhere, the same as `vtn ask` at the command line."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, store: Callable[[str], None]) -> None:
+        """Opens on the way to put a question."""
+        super().__init__()
+        self.store = store
+
+    def compose(self) -> ComposeResult:
+        """A line to type a question into."""
+        yield Input(placeholder="question", id="ask-question")
+
+    def on_mount(self) -> None:
+        """Puts the cursor where the question goes."""
+        self.query_one("#ask-question", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Puts whatever they typed to the recording."""
+        self._ask(event.value)
+
+    def _ask(self, asked: str) -> None:
+        """Closes only once the question has actually gone off. A blank one is
+        refused here, while the modal is still open with the typing in it."""
+        try:
+            self.store(asked)
+        except services.InvalidInput as refused:
+            self.notify(str(refused), severity="warning")
+            return
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        """Asks nothing at all."""
+        self.dismiss(None)
+
+
+class Answer(ModalScreen[None]):
+    """What one recording had to say to one question."""
+
+    BINDINGS = [("escape", "close", "Close")]
+
+    def __init__(self, memo_id: int, asked: str, answer: str) -> None:
+        """Opens on the answer, carrying the question it answers: an answer
+        arrives after a wait and outlives the modal that asked for it, so an
+        unlabelled paragraph is one nobody can place."""
+        super().__init__()
+        self.text = f"**memo {memo_id} — {asked}**\n\n{answer}"
+
+    def compose(self) -> ComposeResult:
+        """The question and its answer, with room to scroll a long one."""
+        with VerticalScroll():
+            yield Markdown(self.text, id="answer")
+
+    def action_close(self) -> None:
+        """Puts the memo back in front of them."""
+        self.dismiss(None)
+
+
 class ConfirmForce(ModalScreen[bool]):
     """Stands between one keypress and an afternoon of somebody's writing. The
     model's notes would go straight over a note written by hand."""
@@ -353,6 +413,7 @@ class MemoApp(App[None]):
         # the domain calls refinement a repair pass, and r already renames
         ("p", "repair", "Repair"),
         ("d", "diarize", "Diarize"),
+        ("a", "ask", "Ask"),
         # lower case acts on the one memo, upper case on the whole project the
         # sidebar cursor is resting on
         ("R", "rename_project", "Rename project"),
@@ -566,6 +627,32 @@ class MemoApp(App[None]):
         """The speaker pass itself, and what to say once it has been stored."""
         services.rediarize(repo, memo_id)
         return f"memo {memo_id} diarized"
+
+    def action_ask(self) -> None:
+        """Offers to put a question to the memo on screen."""
+        memo_id = self.memo_id
+        if memo_id is None:
+            return
+        self.push_screen(AskQuestion(lambda asked: self._ask(memo_id, asked)))
+
+    def _ask(self, memo_id: int, asked: str) -> None:
+        """Refuses a blank question here and now, so the modal keeps what was
+        typed, and sends anything else off to a thread."""
+        text = services.question(asked)
+        self._start_job(
+            memo_id, "answering", lambda repo, mid: self._answer(repo, mid, text)
+        )
+
+    def _answer(self, repo: Repository, memo_id: int, asked: str) -> str:
+        """Puts the question, then opens the answer — even when the reader has
+        moved on to another memo. Work like extracting or repairing writes its
+        result to the database, so a screen that does not redraw loses nothing
+        and the change is there on the way back. An answer is stored nowhere, so
+        this screen is the only copy of it: dropping it for arriving late would
+        destroy the one thing that was asked for and waited on."""
+        backend, answer = services.ask(repo, memo_id, asked)
+        self.call_from_thread(self.push_screen, Answer(memo_id, asked, answer))
+        return f"memo {memo_id} answered via {backend}"
 
     def action_find_tag(self) -> None:
         """Offers to look for a tag across every project at once."""

@@ -205,6 +205,40 @@ def test_ask_returns_the_first_working_backend(repo, wav, monkeypatch):
     assert "[00:00] S1: Ship it" in prompts[0]
 
 
+@pytest.mark.parametrize("question", ["", "   "])
+def test_asking_nothing_at_all_is_refused_before_a_backend_is_called(
+    repo, wav, question, monkeypatch
+):
+    # an empty question still costs a model call and comes back with whatever the
+    # model makes of being asked nothing
+    memo_id = add_memo(repo, wav)
+    prompts = fake_llm(monkeypatch, claude="anything")
+
+    with pytest.raises(services.InvalidInput):
+        services.ask(repo, memo_id, question)
+
+    assert prompts == []
+
+
+def test_a_question_is_tidied_before_it_is_put_to_a_backend(repo, wav, monkeypatch):
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Ship it", speaker="S1")])
+    prompts = fake_llm(monkeypatch, claude="Friday.")
+
+    services.ask(repo, memo_id, "  When do they ship?  ")
+
+    assert "  When do they ship?  " not in prompts[0]
+    assert "When do they ship?" in prompts[0]
+
+
+def test_a_question_can_be_tidied_for_a_screen_that_asks_first(repo):
+    # the screen refuses a blank question while its modal is still open, which
+    # means asking the same question the store would ask, in the same words
+    assert services.question("  When do they ship?  ") == "When do they ship?"
+
+    with pytest.raises(services.InvalidInput):
+        services.question("   ")
+
+
 def test_ask_about_a_missing_memo_is_rejected_before_calling_a_backend(repo, monkeypatch):
     prompts = fake_llm(monkeypatch, claude="anything")
     with pytest.raises(services.NotFound):
