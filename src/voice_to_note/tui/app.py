@@ -1,5 +1,6 @@
 from collections.abc import Callable
 
+from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
@@ -18,6 +19,7 @@ from textual.widgets import (
 )
 
 from .. import services
+from ..gateways import GatewayError
 from ..storage.repository import Repository
 
 
@@ -186,6 +188,27 @@ class RenameSpeaker(ModalScreen[None]):
         self.dismiss(None)
 
 
+class ConfirmForce(ModalScreen[bool]):
+    """Stands between one keypress and an afternoon of somebody's writing. The
+    model's notes would go straight over a note written by hand."""
+
+    BINDINGS = [("y,enter", "force", "Overwrite"), ("n,escape", "keep", "Keep the note")]
+
+    def compose(self) -> ComposeResult:
+        """Says what would be lost, then asks."""
+        yield Static(
+            "Extracting again replaces the note you wrote.  (y / n)", id="confirm-force"
+        )
+
+    def action_force(self) -> None:
+        """Lets the extraction go over the edit."""
+        self.dismiss(True)
+
+    def action_keep(self) -> None:
+        """Leaves the note as they wrote it, and runs nothing."""
+        self.dismiss(False)
+
+
 class TagSearch(ModalScreen[None]):
     """A tag to go looking for. Tags come from the notes an extraction wrote, so
     this reaches across every project at once, which the sidebar cannot."""
@@ -326,6 +349,10 @@ class MemoApp(App[None]):
         # "r" rather than "n": n already means "no" in the discard dialog
         ("r", "rename_speaker", "Rename speaker"),
         ("t", "toggle_raw", "Raw transcript"),
+        ("x", "extract", "Extract"),
+        # the domain calls refinement a repair pass, and r already renames
+        ("p", "repair", "Repair"),
+        ("d", "diarize", "Diarize"),
         # lower case acts on the one memo, upper case on the whole project the
         # sidebar cursor is resting on
         ("R", "rename_project", "Rename project"),
@@ -344,6 +371,9 @@ class MemoApp(App[None]):
         # the tag whose answers are in the memo list, when they are not a
         # project's: the two fill the same list and only one can be showing
         self.tag: str | None = None
+        # the memos with work running on them, one job each: two passes over one
+        # recording would race each other's writes
+        self.jobs: set[int] = set()
         # a way of reading transcripts rather than a property of any one memo:
         # somebody checking a repair pass is checking all of it, memo after memo
         self.raw = False
@@ -444,6 +474,98 @@ class MemoApp(App[None]):
             return
         self.raw = not self.raw
         self.show_memo(self.memo_id)
+
+    def _start_job(
+        self, memo_id: int, doing: str, run: Callable[[Repository, int], str]
+    ) -> None:
+        """Sends one piece of slow work off to a thread. A memo already being
+        worked on is refused rather than queued: the second pass would be writing
+        over what the first is still deciding. Two different memos are free to
+        run at once."""
+        if memo_id in self.jobs:
+            self.notify(f"memo {memo_id} is already busy", severity="warning")
+            return
+        self.jobs.add(memo_id)
+        self.notify(f"{doing} memo {memo_id} …")
+        self._run_job(memo_id, run)
+
+    @work(thread=True)
+    def _run_job(self, memo_id: int, run: Callable[[Repository, int], str]) -> None:
+        """The slow part, off the main thread because it waits on a subprocess or
+        a model. It opens its own connection, since sqlite refuses one belonging
+        to another thread. Only the failures a person can act on are caught: a
+        worker that raises takes the whole app down with it, so a missing model
+        or a stopped server has to come back as a message, while a bug keeps its
+        traceback rather than being swallowed here."""
+        try:
+            with services.open_repo(self.repo) as worker:
+                done = run(worker, memo_id)
+        except (GatewayError, services.ExtractionError, services.InvalidInput) as failed:
+            self.call_from_thread(self._job_ended, memo_id, str(failed), True)
+            return
+        self.call_from_thread(self._job_ended, memo_id, done, False)
+
+    def _job_ended(self, memo_id: int, message: str, failed: bool) -> None:
+        """Back on the main thread: frees the memo, says how it went, and redraws
+        what the work changed — but only while that memo is still the one on
+        screen, since pulling somebody back to a memo they have left is worse
+        than letting them find it changed when they return."""
+        self.jobs.discard(memo_id)
+        self.notify(message, severity="error" if failed else "information")
+        if not failed and self.memo_id == memo_id:
+            self.show_memo(memo_id)
+
+    def action_extract(self) -> None:
+        """Turns the memo on screen into notes, asking first when that would go
+        over a note somebody wrote by hand."""
+        memo_id = self.memo_id
+        if memo_id is None:
+            return
+        if services.memo_info(self.repo, memo_id).edited:
+            self.push_screen(
+                ConfirmForce(), lambda agreed: self._extract_over_edit(memo_id, agreed)
+            )
+        else:
+            self._extract(memo_id, force=False)
+
+    def _extract_over_edit(self, memo_id: int, agreed: bool | None) -> None:
+        """Extracts only once they have said the edit can go."""
+        if agreed:
+            self._extract(memo_id, force=True)
+
+    def _extract(self, memo_id: int, *, force: bool) -> None:
+        """Sends the extraction off, naming the backend that answered."""
+        self._start_job(
+            memo_id,
+            "extracting",
+            lambda repo, mid: (
+                f"memo {mid} extracted via {services.run_extraction(repo, mid, force=force)}"
+            ),
+        )
+
+    def action_repair(self) -> None:
+        """Repairs transcription errors in the memo on screen."""
+        memo_id = self.memo_id
+        if memo_id is None:
+            return
+        self._start_job(memo_id, "repairing", self._repair)
+
+    def _repair(self, repo: Repository, memo_id: int) -> str:
+        """The repair pass itself, and what to say once it has been stored."""
+        services.refine_transcript(repo, memo_id)
+        return f"memo {memo_id} repaired"
+
+    def action_diarize(self) -> None:
+        """Runs speaker detection over the memo on screen again."""
+        memo_id = self.memo_id
+        if memo_id is None:
+            return
+        self._start_job(memo_id, "diarizing", self._diarize)
+
+    def _diarize(self, repo: Repository, memo_id: int) -> str:
+        """The speaker pass itself, and what to say once it has been stored."""
+        services.rediarize(repo, memo_id)
+        return f"memo {memo_id} diarized"
 
     def action_find_tag(self) -> None:
         """Offers to look for a tag across every project at once."""

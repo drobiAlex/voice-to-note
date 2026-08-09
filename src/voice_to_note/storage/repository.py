@@ -59,6 +59,9 @@ class Repository:
         """Opens the memo database, creating or upgrading it as needed."""
         path = Path(path) if path is not None else config.DB_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
+        # kept so work happening off the main thread can open the same database
+        # again: sqlite refuses a connection used from a thread that did not make it
+        self.path = path
         self.con = sqlite3.connect(path)
         self.con.row_factory = sqlite3.Row
         self.con.execute("PRAGMA journal_mode=WAL")

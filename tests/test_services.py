@@ -1,4 +1,5 @@
 import json
+import threading
 
 import numpy as np
 import pytest
@@ -565,6 +566,27 @@ def test_removing_the_other_project_is_refused(repo, wav):
 def test_removing_a_project_nobody_has_used_is_refused(repo):
     with pytest.raises(services.NotFound, match="no project ghost"):
         services.remove_project(repo, "ghost")
+
+
+def test_work_off_the_main_thread_gets_its_own_connection(repo, wav):
+    # sqlite refuses a connection used from a thread that did not make it, so a
+    # background job cannot borrow the screen's
+    memo_id = add_memo(repo, wav)
+    failure: list[str] = []
+
+    def in_another_thread() -> None:
+        try:
+            with services.open_repo(repo) as own:
+                services.move_memo(own, memo_id, "work")
+        except Exception as e:  # noqa: BLE001 - the test is what it reports
+            failure.append(f"{type(e).__name__}: {e}")
+
+    worker = threading.Thread(target=in_another_thread)
+    worker.start()
+    worker.join()
+
+    assert failure == []
+    assert repo.memo(memo_id).project == "work"
 
 
 @pytest.mark.parametrize("tag", ["", "   "])

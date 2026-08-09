@@ -1,4 +1,5 @@
 import inspect
+import threading
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from textual.widgets import (
 
 from voice_to_note import services
 from voice_to_note.domain import Segment, Speaker
+from voice_to_note.gateways import GatewayError
 from voice_to_note.tui import app as tui_app
 from voice_to_note.tui.app import MemoApp
 
@@ -979,3 +981,268 @@ async def test_a_tag_of_nothing_is_refused_without_losing_the_modal(repo):
 
         assert showing(pilot.app, "#tag-search")
         assert [str(n.message) for n in pilot.app._notifications] == ["a tag needs some text"]
+
+
+# --- work that takes long enough to happen off the main thread ------------
+
+
+async def finish_jobs(pilot) -> None:
+    """Waits for the background work to finish and the screen to catch up."""
+    await pilot.app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+def said(pilot) -> list[str]:
+    """Everything the screen has told the user so far."""
+    return [str(n.message) for n in pilot.app._notifications]
+
+
+@pytest.mark.asyncio
+async def test_pressing_x_extracts_notes_for_the_memo_on_screen(repo, monkeypatch):
+    # the fake writes through the connection the worker opened, so this exercises
+    # the real cross-thread path and not just the key binding
+    _work, home = seed(repo)
+
+    def extract(worker_repo, memo_id, force=False):
+        worker_repo.save_extraction(memo_id, "claude", {**NOTES, "title": "Shopping list"})
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", extract)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, home)
+        await pilot.press("x")
+        await finish_jobs(pilot)
+
+        assert said(pilot) == ["extracting memo 2 …", "memo 2 extracted via claude"]
+        assert "Shopping list" in pilot.app.query_one("#notes", Markdown).source
+
+
+@pytest.mark.asyncio
+async def test_pressing_p_repairs_the_transcript(repo, monkeypatch):
+    work, _home = seed(repo)
+
+    def refine(worker_repo, memo_id, dry_run=False):
+        (stored,) = worker_repo.segments(memo_id)
+        worker_repo.update_refinements(memo_id, {stored.id: "We ship on Friday."})
+        return services.RefineResult(changes=[], flagged=[], untouched=0)
+
+    monkeypatch.setattr(services, "refine_transcript", refine)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("p")
+        await finish_jobs(pilot)
+
+        assert said(pilot) == ["repairing memo 1 …", "memo 1 repaired"]
+        assert "We ship on Friday." in transcript(pilot)
+
+
+@pytest.mark.asyncio
+async def test_pressing_d_runs_speaker_detection_again(repo, monkeypatch):
+    work, _home = seed(repo)
+    monkeypatch.setattr(services, "rediarize", lambda _repo, _id, log=None: ["S1", "S2"])
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("d")
+        await finish_jobs(pilot)
+
+        assert said(pilot) == ["diarizing memo 1 …", "memo 1 diarized"]
+
+
+@pytest.mark.asyncio
+async def test_a_second_job_on_one_memo_is_refused_rather_than_queued(repo, monkeypatch):
+    # two passes over the same memo would race each other's writes
+    work, _home = seed(repo)
+    holding = threading.Event()
+
+    def slow(_repo, _memo_id, force=False):
+        holding.wait(timeout=5)
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", slow)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("x")
+        await pilot.pause()
+        await pilot.press("x")
+        await pilot.pause()
+
+        assert said(pilot) == ["extracting memo 1 …", "memo 1 is already busy"]
+
+        holding.set()
+        await finish_jobs(pilot)
+
+
+@pytest.mark.asyncio
+async def test_two_memos_can_be_worked_on_at_the_same_time(repo, monkeypatch):
+    # one job per memo is the rule, not one job at a time
+    work, home = seed(repo)
+    holding = threading.Event()
+
+    def slow(_repo, _memo_id, force=False):
+        holding.wait(timeout=5)
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", slow)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("x")
+        await pilot.pause()
+        await open_memo(pilot, home)
+        await pilot.press("x")
+        await pilot.pause()
+
+        assert pilot.app.jobs == {work, home}
+        assert "memo 2 is already busy" not in said(pilot)
+
+        holding.set()
+        await finish_jobs(pilot)
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_that_is_down_says_so_instead_of_taking_the_app_down(repo, monkeypatch):
+    # a worker that raises kills the whole app, so the known failures are caught
+    work, _home = seed(repo)
+
+    def unavailable(_repo, _memo_id, force=False):
+        raise GatewayError("ollama is not running")
+
+    monkeypatch.setattr(services, "run_extraction", unavailable)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("x")
+        await finish_jobs(pilot)
+
+        assert said(pilot) == ["extracting memo 1 …", "ollama is not running"]
+        assert pilot.app.jobs == set()
+
+
+@pytest.mark.asyncio
+async def test_a_memo_can_be_worked_on_again_once_its_job_has_finished(repo, monkeypatch):
+    work, _home = seed(repo)
+    runs: list[int] = []
+
+    def extract(_repo, memo_id, force=False):
+        runs.append(memo_id)
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", extract)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("x")
+        await finish_jobs(pilot)
+        await pilot.press("x")
+        await finish_jobs(pilot)
+
+        assert runs == [work, work]
+        assert "memo 1 is already busy" not in said(pilot)
+
+
+@pytest.mark.asyncio
+async def test_extracting_over_a_note_somebody_wrote_asks_first(repo, monkeypatch):
+    # an afternoon of editing must not go under a keypress
+    work, _home = seed(repo)
+    repo.save_notes_md(work, "# My own words")
+    monkeypatch.setattr(services, "run_extraction", lambda _r, _i, force=False: "claude")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("x")
+        await pilot.pause()
+
+        assert showing(pilot.app, "#confirm-force")
+        assert pilot.app.jobs == set()
+
+
+@pytest.mark.asyncio
+async def test_agreeing_to_overwrite_extracts_over_the_edit(repo, monkeypatch):
+    work, _home = seed(repo)
+    repo.save_notes_md(work, "# My own words")
+    seen: dict = {}
+
+    def extract(_repo, _memo_id, force=False):
+        seen["force"] = force
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", extract)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("x")
+        await pilot.pause()
+        await pilot.press("y")
+        await finish_jobs(pilot)
+
+        assert seen == {"force": True}
+
+
+@pytest.mark.asyncio
+async def test_declining_to_overwrite_runs_nothing_at_all(repo, monkeypatch):
+    work, _home = seed(repo)
+    repo.save_notes_md(work, "# My own words")
+    ran = []
+    monkeypatch.setattr(
+        services, "run_extraction", lambda _r, _i, force=False: ran.append(force)
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("x")
+        await pilot.pause()
+        assert showing(pilot.app, "#confirm-force")
+
+        await pilot.press("n")
+        await finish_jobs(pilot)
+
+        assert ran == []
+        assert services.notes_markdown(repo, work) == "# My own words"
+
+
+@pytest.mark.asyncio
+async def test_work_finishing_on_a_memo_you_have_left_does_not_redraw_it(repo, monkeypatch):
+    # the panes are showing another memo by then; refreshing would yank it away
+    work, home = seed(repo)
+
+    # held open until the memo has been left, or the job finishes first and the
+    # test proves nothing about what happens to somebody who walked away
+    holding = threading.Event()
+
+    def extract(worker_repo, memo_id, force=False):
+        holding.wait(timeout=5)
+        # a title the seeded notes do not already carry, or this proves nothing
+        worker_repo.save_extraction(memo_id, "claude", {**NOTES, "title": "Fresh off the model"})
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", extract)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("x")
+        await pilot.pause()
+        await open_memo(pilot, home)
+
+        holding.set()
+        await finish_jobs(pilot)
+
+        # it ran and it landed; what it must not do is pull the panes back
+        assert "Fresh off the model" in services.notes_markdown(repo, work)
+        assert "buy milk" in transcript(pilot)
+        assert "Fresh off the model" not in pilot.app.query_one("#notes", Markdown).source
+
+
+@pytest.mark.asyncio
+async def test_pressing_x_before_choosing_a_memo_does_nothing(repo, monkeypatch):
+    seed(repo)
+    monkeypatch.setattr(services, "run_extraction", lambda _r, _i, force=False: "claude")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("x")
+        await finish_jobs(pilot)
+
+        assert said(pilot) == []

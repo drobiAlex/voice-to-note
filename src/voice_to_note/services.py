@@ -83,6 +83,14 @@ def _project_name(project: str) -> str:
     return name
 
 
+def open_repo(repo: Repository) -> Repository:
+    """A second connection to the same database, for work happening off the main
+    thread. Sqlite refuses a connection used from a thread that did not open it,
+    so a background job cannot borrow the one a screen is reading through; the
+    database is in WAL mode, so the two do not block each other."""
+    return Repository(repo.path)
+
+
 def _tag(tag: str | None) -> str | None:
     """A tag with its spacing tidied, refusing one that is really empty: a blank
     tag matches nothing, and a search that was never really asked should not

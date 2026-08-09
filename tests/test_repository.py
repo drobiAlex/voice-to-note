@@ -114,6 +114,15 @@ def test_unknown_memo_is_none(repo):
     assert repo.memos() == []
 
 
+def test_a_repository_knows_which_database_it_opened(tmp_path):
+    # work happening off the main thread has to open its own connection to the
+    # same file, and it can only do that if the file is still known
+    repo = Repository(tmp_path / "memos.db")
+
+    assert repo.path == tmp_path / "memos.db"
+    repo.close()
+
+
 def test_a_repository_block_hands_back_the_repository(tmp_path):
     with Repository(tmp_path / "block.db") as repo:
         memo_id = make_memo(repo)
