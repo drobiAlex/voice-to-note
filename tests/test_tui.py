@@ -1400,3 +1400,256 @@ async def test_pressing_a_before_choosing_a_memo_does_nothing(repo):
         await pilot.pause()
 
         assert not showing(pilot.app, "#ask-question")
+
+
+# --- bringing a new recording in ------------------------------------------
+
+
+def recording(tmp_path, name: str = "standup.m4a"):
+    """An audio file sitting where somebody would have left it."""
+    src = tmp_path / name
+    src.write_bytes(b"fake audio")
+    return src
+
+
+def stores_a_memo(text: str = "hello there"):
+    """A stand-in pipeline that files a memo the way the real one would, through
+    whatever connection the worker handed it."""
+
+    def process(worker_repo, src, project="other", log=None):
+        memo_id = worker_repo.create_memo(
+            filename=src.name, wav_path=f"/tmp/{src.name}.wav", duration_s=1.0,
+            language="en", segments=[Segment(0, 1000, text, speaker="S1")],
+            speakers=[Speaker("S1")], project=project,
+        )
+        return services.ProcessResult(memo_id, 1, ["S1"], "en")
+
+    return process
+
+
+async def process_file(pilot, src, project: str | None = None) -> None:
+    """Brings a recording in the way a person does."""
+    await pilot.press("o")
+    await pilot.pause()
+    pilot.app.screen.query_one("#source-path", Input).value = str(src)
+    if project is not None:
+        pilot.app.screen.query_one("#source-project", Input).value = project
+    await pilot.press("enter")
+
+
+@pytest.mark.asyncio
+async def test_pressing_o_asks_for_a_recording_and_a_project(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("o")
+        await pilot.pause()
+
+        assert showing(pilot.app, "#source-path")
+        assert showing(pilot.app, "#source-project")
+
+
+@pytest.mark.asyncio
+async def test_the_project_starts_on_the_one_being_browsed(repo):
+    # a recording is usually another one of whatever you are already looking at
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        await pilot.press("o")
+        await pilot.pause()
+
+        assert pilot.app.screen.query_one("#source-project", Input).value == "work"
+
+
+@pytest.mark.asyncio
+async def test_the_project_falls_back_to_other_before_one_is_chosen(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("o")
+        await pilot.pause()
+
+        assert pilot.app.screen.query_one("#source-project", Input).value == "other"
+
+
+@pytest.mark.asyncio
+async def test_a_processed_recording_joins_the_project_on_screen(repo, tmp_path, monkeypatch):
+    seed(repo)
+    monkeypatch.setattr(services, "process_memo", stores_a_memo())
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        await process_file(pilot, recording(tmp_path), "work")
+        await finish_jobs(pilot)
+
+        assert not showing(pilot.app, "#source-path")
+        assert labels(pilot.app.query_one("#memos", ListView)) == [
+            "standup.m4a",
+            "standup.m4a",
+        ]
+        assert labels(pilot.app.query_one("#projects", ListView)) == [
+            "personal (1)",
+            "work (2)",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_processed_recording_does_not_pull_you_off_what_you_are_reading(
+    repo, tmp_path, monkeypatch
+):
+    # it is stored and will be there when they go looking; yanking the panes to
+    # it is the same rudeness a finished repair would be
+    work, _home = seed(repo)
+    monkeypatch.setattr(services, "process_memo", stores_a_memo())
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await open_memo(pilot, work)
+        await process_file(pilot, recording(tmp_path), "work")
+        await finish_jobs(pilot)
+
+        assert pilot.app.memo_id == work
+        assert "we ship on friday" in transcript(pilot)
+
+
+@pytest.mark.asyncio
+async def test_the_stages_of_a_long_job_are_said_as_they_happen(repo, tmp_path, monkeypatch):
+    # minutes of converting and transcribing with a silent screen reads as hung
+    seed(repo)
+
+    def process(worker_repo, src, project="other", log=None):
+        log(f"converting {src.name} …")
+        log("transcribing (12s audio) …")
+        return services.ProcessResult(1, 0, [], "en")
+
+    monkeypatch.setattr(services, "process_memo", process)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await process_file(pilot, recording(tmp_path))
+        await finish_jobs(pilot)
+
+        assert "converting standup.m4a …" in said(pilot)
+        assert "transcribing (12s audio) …" in said(pilot)
+
+
+@pytest.mark.asyncio
+async def test_a_recording_that_is_not_there_is_refused_without_losing_the_modal(
+    repo, tmp_path, monkeypatch
+):
+    seed(repo)
+    ran: list = []
+    monkeypatch.setattr(
+        services, "process_memo", lambda *a, **k: ran.append(a) or None
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await process_file(pilot, tmp_path / "nowhere.m4a")
+        await finish_jobs(pilot)
+
+        assert showing(pilot.app, "#source-path")
+        assert said(pilot) == ["no recording at that path"]
+        assert ran == []
+
+
+@pytest.mark.asyncio
+async def test_a_folder_is_refused_without_losing_the_modal(repo, tmp_path, monkeypatch):
+    # a directory is a path that exists, which is not the same as a recording
+    seed(repo)
+    ran: list = []
+    monkeypatch.setattr(
+        services, "process_memo", lambda *a, **k: ran.append(a) or None
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await process_file(pilot, tmp_path)
+        await finish_jobs(pilot)
+
+        assert showing(pilot.app, "#source-path")
+        assert said(pilot) == ["no recording at that path"]
+        assert ran == []
+
+
+@pytest.mark.asyncio
+async def test_a_project_of_nothing_is_refused_without_losing_the_modal(
+    repo, tmp_path, monkeypatch
+):
+    seed(repo)
+    ran: list = []
+    monkeypatch.setattr(
+        services, "process_memo", lambda *a, **k: ran.append(a) or None
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await process_file(pilot, recording(tmp_path), "   ")
+        await finish_jobs(pilot)
+
+        assert showing(pilot.app, "#source-path")
+        assert said(pilot) == ["a project needs a name"]
+        assert ran == []
+
+
+@pytest.mark.asyncio
+async def test_one_recording_is_not_brought_in_twice_at_once(repo, tmp_path, monkeypatch):
+    # the same file processed twice over would land as two memos of one recording
+    seed(repo)
+    holding = threading.Event()
+
+    def slow(worker_repo, src, project="other", log=None):
+        holding.wait(timeout=5)
+        return services.ProcessResult(1, 0, [], "en")
+
+    monkeypatch.setattr(services, "process_memo", slow)
+    src = recording(tmp_path)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await process_file(pilot, src)
+        await pilot.pause()
+        await process_file(pilot, src)
+        await pilot.pause()
+
+        assert "standup.m4a is already busy" in said(pilot)
+
+        holding.set()
+        await finish_jobs(pilot)
+
+
+@pytest.mark.asyncio
+async def test_a_recording_ffmpeg_cannot_read_says_so_instead_of_taking_the_app_down(
+    repo, tmp_path, monkeypatch
+):
+    seed(repo)
+
+    def unreadable(worker_repo, src, project="other", log=None):
+        raise GatewayError("ffmpeg could not read that file")
+
+    monkeypatch.setattr(services, "process_memo", unreadable)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await process_file(pilot, recording(tmp_path, "notes.txt"))
+        await finish_jobs(pilot)
+
+        assert "ffmpeg could not read that file" in said(pilot)
+        assert pilot.app.jobs == set()
+
+
+@pytest.mark.asyncio
+async def test_leaving_the_modal_brings_nothing_in(repo, tmp_path, monkeypatch):
+    seed(repo)
+    ran: list = []
+    monkeypatch.setattr(
+        services, "process_memo", lambda *a, **k: ran.append(a) or None
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("o")
+        await pilot.pause()
+        assert showing(pilot.app, "#source-path")
+
+        await pilot.press("escape")
+        await finish_jobs(pilot)
+
+        assert not showing(pilot.app, "#source-path")
+        assert ran == []

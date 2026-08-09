@@ -1,4 +1,5 @@
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
+from pathlib import Path
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -185,6 +186,50 @@ class RenameSpeaker(ModalScreen[None]):
 
     def action_cancel(self) -> None:
         """Leaves every voice named as it was."""
+        self.dismiss(None)
+
+
+class ProcessMemo(ModalScreen[None]):
+    """A recording to bring in, and the project to file it under. The path is
+    typed or pasted rather than browsed: there is no starting folder that is
+    right for both the recording just saved and the one from last month."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, project: str, store: Callable[[str, str], None]) -> None:
+        """Opens on the project being browsed and the way to bring a file in."""
+        super().__init__()
+        self.project = project
+        self.store = store
+
+    def compose(self) -> ComposeResult:
+        """Where the recording is, and what to file it under."""
+        yield Input(placeholder="path to a recording", id="source-path")
+        yield Input(self.project, id="source-project")
+
+    def on_mount(self) -> None:
+        """Cursor on the path, the one part nobody can guess for them."""
+        self.query_one("#source-path", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Enter from either line brings the recording in."""
+        self._process()
+
+    def _process(self) -> None:
+        """Closes only once the recording has actually been sent off, so a path
+        with a typo in it can be corrected where it was typed."""
+        try:
+            self.store(
+                self.query_one("#source-path", Input).value,
+                self.query_one("#source-project", Input).value,
+            )
+        except services.InvalidInput as refused:
+            self.notify(str(refused), severity="warning")
+            return
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        """Brings nothing in."""
         self.dismiss(None)
 
 
@@ -414,6 +459,9 @@ class MemoApp(App[None]):
         ("p", "repair", "Repair"),
         ("d", "diarize", "Diarize"),
         ("a", "ask", "Ask"),
+        # neither half of the case rule: this acts on no memo and on no project,
+        # it brings something new into the app
+        ("o", "process", "Add recording"),
         # lower case acts on the one memo, upper case on the whole project the
         # sidebar cursor is resting on
         ("R", "rename_project", "Rename project"),
@@ -432,9 +480,11 @@ class MemoApp(App[None]):
         # the tag whose answers are in the memo list, when they are not a
         # project's: the two fill the same list and only one can be showing
         self.tag: str | None = None
-        # the memos with work running on them, one job each: two passes over one
-        # recording would race each other's writes
-        self.jobs: set[int] = set()
+        # what has work running on it, one job each: two passes over the same
+        # thing would race each other's writes. A memo already stored is keyed by
+        # its id, a recording still being brought in by the path it came from,
+        # since its memo does not exist yet
+        self.jobs: set[Hashable] = set()
         # a way of reading transcripts rather than a property of any one memo:
         # somebody checking a repair pass is checking all of it, memo after memo
         self.raw = False
@@ -537,21 +587,29 @@ class MemoApp(App[None]):
         self.show_memo(self.memo_id)
 
     def _start_job(
-        self, memo_id: int, doing: str, run: Callable[[Repository, int], str]
+        self, key: Hashable, subject: str, doing: str, run: Callable[[Repository], str]
     ) -> None:
-        """Sends one piece of slow work off to a thread. A memo already being
-        worked on is refused rather than queued: the second pass would be writing
-        over what the first is still deciding. Two different memos are free to
-        run at once."""
-        if memo_id in self.jobs:
-            self.notify(f"memo {memo_id} is already busy", severity="warning")
+        """Sends one piece of slow work off to a thread. The key is whatever is
+        being worked on: a memo's id for work on one already stored, and the
+        source path for a recording being brought in, which has no memo yet.
+        Either way one job at a time on the same thing — a second pass would be
+        writing over what the first is still deciding — while two different
+        things are free to run at once."""
+        if key in self.jobs:
+            self.notify(f"{subject} is already busy", severity="warning")
             return
-        self.jobs.add(memo_id)
-        self.notify(f"{doing} memo {memo_id} …")
-        self._run_job(memo_id, run)
+        self.jobs.add(key)
+        self.notify(f"{doing} {subject} …")
+        self._run_job(key, run)
+
+    def _start_memo_job(
+        self, memo_id: int, doing: str, run: Callable[[Repository], str]
+    ) -> None:
+        """Slow work on a memo that already exists, keyed and named by its id."""
+        self._start_job(memo_id, f"memo {memo_id}", doing, run)
 
     @work(thread=True)
-    def _run_job(self, memo_id: int, run: Callable[[Repository, int], str]) -> None:
+    def _run_job(self, key: Hashable, run: Callable[[Repository], str]) -> None:
         """The slow part, off the main thread because it waits on a subprocess or
         a model. It opens its own connection, since sqlite refuses one belonging
         to another thread. Only the failures a person can act on are caught: a
@@ -560,20 +618,22 @@ class MemoApp(App[None]):
         traceback rather than being swallowed here."""
         try:
             with services.open_repo(self.repo) as worker:
-                done = run(worker, memo_id)
+                done = run(worker)
         except (GatewayError, services.ExtractionError, services.InvalidInput) as failed:
-            self.call_from_thread(self._job_ended, memo_id, str(failed), True)
+            self.call_from_thread(self._job_ended, key, str(failed), True)
             return
-        self.call_from_thread(self._job_ended, memo_id, done, False)
+        self.call_from_thread(self._job_ended, key, done, False)
 
-    def _job_ended(self, memo_id: int, message: str, failed: bool) -> None:
-        """Back on the main thread: frees the memo, says how it went, and redraws
-        what the work changed — but only while that memo is still the one on
-        screen, since pulling somebody back to a memo they have left is worse
-        than letting them find it changed when they return."""
-        self.jobs.discard(memo_id)
+    def _job_ended(self, key: Hashable, message: str, failed: bool) -> None:
+        """Back on the main thread: frees the thing that was worked on, says how
+        it went, and redraws what the work changed — but only while that memo is
+        still the one on screen, since pulling somebody back to a memo they have
+        left is worse than letting them find it changed when they return. A key
+        that is not a memo id simply never matches the memo on screen."""
+        self.jobs.discard(key)
         self.notify(message, severity="error" if failed else "information")
-        if not failed and self.memo_id == memo_id:
+        memo_id = self.memo_id
+        if not failed and memo_id is not None and memo_id == key:
             self.show_memo(memo_id)
 
     def action_extract(self) -> None:
@@ -596,11 +656,12 @@ class MemoApp(App[None]):
 
     def _extract(self, memo_id: int, *, force: bool) -> None:
         """Sends the extraction off, naming the backend that answered."""
-        self._start_job(
+        self._start_memo_job(
             memo_id,
             "extracting",
-            lambda repo, mid: (
-                f"memo {mid} extracted via {services.run_extraction(repo, mid, force=force)}"
+            lambda repo: (
+                f"memo {memo_id} extracted"
+                f" via {services.run_extraction(repo, memo_id, force=force)}"
             ),
         )
 
@@ -609,7 +670,7 @@ class MemoApp(App[None]):
         memo_id = self.memo_id
         if memo_id is None:
             return
-        self._start_job(memo_id, "repairing", self._repair)
+        self._start_memo_job(memo_id, "repairing", lambda repo: self._repair(repo, memo_id))
 
     def _repair(self, repo: Repository, memo_id: int) -> str:
         """The repair pass itself, and what to say once it has been stored."""
@@ -621,12 +682,43 @@ class MemoApp(App[None]):
         memo_id = self.memo_id
         if memo_id is None:
             return
-        self._start_job(memo_id, "diarizing", self._diarize)
+        self._start_memo_job(memo_id, "diarizing", lambda repo: self._diarize(repo, memo_id))
 
     def _diarize(self, repo: Repository, memo_id: int) -> str:
         """The speaker pass itself, and what to say once it has been stored."""
         services.rediarize(repo, memo_id)
         return f"memo {memo_id} diarized"
+
+    def action_process(self) -> None:
+        """Offers to bring a new recording in, filed where you are looking."""
+        self.push_screen(ProcessMemo(self.project or "other", self._process))
+
+    def _process(self, path: str, project: str) -> None:
+        """Refuses what is plainly not a recording, and a project with no name,
+        here and now so the modal keeps what was typed. Past that the pipeline
+        decides: a file ffmpeg cannot make sense of fails the way any gateway
+        does, and says what ffmpeg said."""
+        src = Path(path.strip())
+        if not src.is_file():
+            raise services.InvalidInput("no recording at that path")
+        name = services.project_name(project)
+        self._start_job(
+            src, src.name, "processing", lambda repo: self._processed(repo, src, name)
+        )
+
+    def _processed(self, repo: Repository, src: Path, project: str) -> str:
+        """Runs the whole pipeline, then draws the new memo into the lists it
+        belongs in without pulling the reader off whatever they were reading:
+        it is stored, so it will be there when they go looking."""
+        result = services.process_memo(repo, src, project, log=self._stage)
+        self.call_from_thread(self._reload, self.project)
+        return f"{src.name} is memo {result.memo_id}"
+
+    def _stage(self, message: str) -> None:
+        """One line of progress from the pipeline, said on the main thread.
+        Converting and transcribing take minutes between them, and a screen
+        that says nothing for that long reads as one that has hung."""
+        self.call_from_thread(self.notify, message)
 
     def action_ask(self) -> None:
         """Offers to put a question to the memo on screen."""
@@ -639,8 +731,8 @@ class MemoApp(App[None]):
         """Refuses a blank question here and now, so the modal keeps what was
         typed, and sends anything else off to a thread."""
         text = services.question(asked)
-        self._start_job(
-            memo_id, "answering", lambda repo, mid: self._answer(repo, mid, text)
+        self._start_memo_job(
+            memo_id, "answering", lambda repo: self._answer(repo, memo_id, text)
         )
 
     def _answer(self, repo: Repository, memo_id: int, asked: str) -> str:
