@@ -494,6 +494,79 @@ def test_the_project_list_is_available_to_a_screen(repo, wav):
     assert services.projects(repo) == [("personal", 1), ("work", 1)]
 
 
+def test_renaming_a_project_carries_every_memo_in_it(repo, wav):
+    add_project_memo(repo, wav, "a.m4a", "work")
+    add_project_memo(repo, wav, "b.m4a", "work")
+    add_project_memo(repo, wav, "c.m4a", "personal")
+
+    moved = services.rename_project(repo, "work", "client")
+
+    assert moved == 2
+    assert services.projects(repo) == [("client", 2), ("personal", 1)]
+
+
+def test_renaming_a_project_nobody_has_used_is_refused(repo, wav):
+    add_project_memo(repo, wav, "a.m4a", "work")
+
+    with pytest.raises(services.NotFound, match="no project ghost"):
+        services.rename_project(repo, "ghost", "client")
+
+
+@pytest.mark.parametrize("name", ["", "   "])
+def test_renaming_a_project_to_nothing_is_refused(repo, wav, name):
+    add_project_memo(repo, wav, "a.m4a", "work")
+
+    with pytest.raises(services.InvalidInput):
+        services.rename_project(repo, "work", name)
+
+    assert services.projects(repo) == [("work", 1)]
+
+
+def test_renaming_a_project_onto_one_that_exists_merges_them(repo, wav):
+    # projects have no table of their own, they are just a value on a memo, so a
+    # name already in use is not a clash to refuse but two piles becoming one
+    add_project_memo(repo, wav, "a.m4a", "work")
+    add_project_memo(repo, wav, "b.m4a", "personal")
+
+    moved = services.rename_project(repo, "work", "personal")
+
+    assert moved == 1
+    assert services.projects(repo) == [("personal", 2)]
+
+
+def test_a_project_renamed_with_stray_spacing_is_tidied_like_any_other(repo, wav):
+    add_project_memo(repo, wav, "a.m4a", "work")
+
+    services.rename_project(repo, "work", "  client  ")
+
+    assert services.projects(repo) == [("client", 1)]
+
+
+def test_removing_a_project_files_its_memos_under_other(repo, wav):
+    add_project_memo(repo, wav, "a.m4a", "work")
+    add_project_memo(repo, wav, "b.m4a", "work")
+
+    moved = services.remove_project(repo, "work")
+
+    assert moved == 2
+    assert services.projects(repo) == [("other", 2)]
+
+
+def test_removing_the_other_project_is_refused(repo, wav):
+    # it is where removing a project puts the memos, so it has nowhere to go
+    add_project_memo(repo, wav, "a.m4a", "other")
+
+    with pytest.raises(services.InvalidInput):
+        services.remove_project(repo, "other")
+
+    assert services.projects(repo) == [("other", 1)]
+
+
+def test_removing_a_project_nobody_has_used_is_refused(repo):
+    with pytest.raises(services.NotFound, match="no project ghost"):
+        services.remove_project(repo, "ghost")
+
+
 def test_memos_can_be_had_as_records_rather_than_a_printed_table(repo, wav):
     # a screen builds its own rows; it should not have to parse memos_text
     add_project_memo(repo, wav, "work.m4a", "work")

@@ -170,6 +170,17 @@ class Repository:
         with self.con:
             self.con.execute("UPDATE memos SET project=? WHERE id=?", (project, memo_id))
 
+    def refile_project(self, old: str, new: str) -> int:
+        """Files everything under one project into another in a single statement,
+        reporting how many memos that carried. Renaming a project and emptying
+        one are both this: a project is only a value on its memos, so there is
+        nothing else anywhere to rename or delete."""
+        with self.con:
+            cur = self.con.execute(
+                "UPDATE memos SET project=? WHERE project=?", (new, old)
+            )
+        return cur.rowcount
+
     def memo(self, memo_id: int) -> Memo | None:
         """One memo's details, or nothing when that id was never stored."""
         row = self.con.execute(

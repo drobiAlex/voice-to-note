@@ -389,6 +389,35 @@ def move_memo(repo: Repository, memo_id: int, project: str) -> None:
     repo.set_project(memo_id, name)
 
 
+def project_name(name: str) -> str:
+    """A project name as it will be stored, for a screen that has to go looking
+    for what it just renamed under the name the rename actually used."""
+    return _project_name(name)
+
+
+def rename_project(repo: Repository, old: str, new: str) -> int:
+    """Renames a project by refiling every memo in it, reporting how many moved.
+    A name already in use is a merge rather than a clash: projects are only a
+    value on a memo, so two piles answering to one name are one pile."""
+    name = _project_name(new)
+    moved = repo.refile_project(old, name)
+    if not moved:
+        raise NotFound(f"no project {old}")
+    return moved
+
+
+def remove_project(repo: Repository, name: str) -> int:
+    """Empties a project by filing everything in it under 'other', reporting how
+    many moved. A project with nothing in it has already stopped existing, so
+    removing one is that bulk refiling and nothing besides."""
+    if name == "other":
+        raise InvalidInput("other is where emptied projects go")
+    moved = repo.refile_project(name, "other")
+    if not moved:
+        raise NotFound(f"no project {name}")
+    return moved
+
+
 def rename_speaker(repo: Repository, memo_id: int, label: str, name: str) -> None:
     """Puts a real name on a speaker so later memos recognise that voice. A name
     of nothing is refused: empty is not the same as unnamed to the database, so

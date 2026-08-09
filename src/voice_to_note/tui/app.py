@@ -186,6 +186,71 @@ class RenameSpeaker(ModalScreen[None]):
         self.dismiss(None)
 
 
+class RenameProject(ModalScreen[None]):
+    """A project's name, open for correcting. It opens on the name the project
+    has now, because renaming one is usually fixing it rather than replacing it."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, project: str, store: Callable[[str, str], None]) -> None:
+        """Opens on the name in use and the way to change it."""
+        super().__init__()
+        self.project = project
+        self.store = store
+
+    def compose(self) -> ComposeResult:
+        """The name, ready to be typed over."""
+        yield Input(self.project, id="project-rename")
+
+    def on_mount(self) -> None:
+        """Puts the cursor in the name."""
+        self.query_one("#project-rename", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Renames the project to whatever they left on the line."""
+        self._rename(event.value)
+
+    def _rename(self, new: str) -> None:
+        """Closes only once the project has actually been renamed."""
+        try:
+            self.store(self.project, new)
+        except services.InvalidInput as refused:
+            self.notify(str(refused), severity="warning")
+            return
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        """Leaves the project named as it was."""
+        self.dismiss(None)
+
+
+class ConfirmRemove(ModalScreen[bool]):
+    """Stands between a stray keypress and every memo in a project moving at
+    once. Nothing is deleted, but a bulk move is still a lot to undo by hand."""
+
+    BINDINGS = [("y,enter", "remove", "Empty it"), ("n,escape", "keep", "Keep it")]
+
+    def __init__(self, project: str) -> None:
+        """Opens on the project about to be emptied."""
+        super().__init__()
+        self.project = project
+
+    def compose(self) -> ComposeResult:
+        """Says what moves and where to, then asks."""
+        yield Static(
+            f"Move every memo in {self.project} into other?  (y / n)",
+            id="confirm-remove",
+        )
+
+    def action_remove(self) -> None:
+        """Lets the refiling go ahead."""
+        self.dismiss(True)
+
+    def action_keep(self) -> None:
+        """Leaves the project with its memos in it."""
+        self.dismiss(False)
+
+
 class MemoApp(App[None]):
     """One screen over the memo database: the projects down the side, the chosen
     project's recordings beside them, and what was said and made of the one
@@ -201,6 +266,10 @@ class MemoApp(App[None]):
         # "r" rather than "n": n already means "no" in the discard dialog
         ("r", "rename_speaker", "Rename speaker"),
         ("t", "toggle_raw", "Raw transcript"),
+        # lower case acts on the one memo, upper case on the whole project the
+        # sidebar cursor is resting on
+        ("R", "rename_project", "Rename project"),
+        ("X", "remove_project", "Empty project"),
         ("q", "quit", "Quit"),
     ]
 
@@ -262,6 +331,20 @@ class MemoApp(App[None]):
             "Transcript (raw)" if self.raw else "Transcript"
         )
 
+    def _reload(self, project: str | None) -> None:
+        """Redraws the sidebar and, where one is being browsed, that project's
+        memo list, dropping the detail panes when the memo they describe is no
+        longer among its rows. Every bulk refiling ends here."""
+        self.load_projects()
+        if project is None:
+            return
+        self.show_project(project)
+        memo_id = self.memo_id
+        if memo_id is not None and all(
+            memo.id != memo_id for memo in services.memos(self.repo, project=project)
+        ):
+            self.clear_memo()
+
     def clear_memo(self) -> None:
         """Empties the detail panes and forgets what they were showing, for when
         the memo they describe is no longer one of the rows above them. The tab
@@ -311,12 +394,7 @@ class MemoApp(App[None]):
         if memo_id is None:
             return
         services.move_memo(self.repo, memo_id, project)
-        self.load_projects()
-        if self.project is not None:
-            self.show_project(self.project)
-            listed = services.memos(self.repo, project=self.project)
-            if all(memo.id != memo_id for memo in listed):
-                self.clear_memo()
+        self._reload(self.project)
 
     def action_rename_speaker(self) -> None:
         """Offers to name a voice in the memo on screen."""
@@ -333,6 +411,54 @@ class MemoApp(App[None]):
             return
         services.rename_speaker(self.repo, memo_id, label, name)
         self.show_memo(memo_id)
+
+    def _pointed_project(self) -> str | None:
+        """The project the sidebar cursor is resting on, and nothing at all once
+        the cursor is no longer what the person is pointing at: the project keys
+        read the sidebar, so they stay out of the way while the memos have focus."""
+        sidebar = self.query_one("#projects", ListView)
+        if self.focused is not sidebar:
+            return None
+        chosen = sidebar.highlighted_child
+        return chosen.name if chosen else None
+
+    def action_rename_project(self) -> None:
+        """Offers to rename the project the sidebar cursor is on."""
+        project = self._pointed_project()
+        if project is None:
+            return
+        self.push_screen(RenameProject(project, self._rename_project))
+
+    def _rename_project(self, old: str, new: str) -> None:
+        """Renames the project, then redraws the sidebar. Browsing the project
+        that was renamed, the memos stay in front of you under the new name:
+        nothing moved but the label they are filed under."""
+        services.rename_project(self.repo, old, new)
+        renamed = services.project_name(new)
+        self._reload(renamed if self.project == old else self.project)
+
+    def action_remove_project(self) -> None:
+        """Offers to empty the project the sidebar cursor is on, asking first."""
+        project = self._pointed_project()
+        if project is None:
+            return
+        self.push_screen(
+            ConfirmRemove(project),
+            lambda confirmed: self._remove_project(project, confirmed),
+        )
+
+    def _remove_project(self, project: str, confirmed: bool | None) -> None:
+        """Files the project's memos under other, once they have said to. The
+        one project that cannot go anywhere is other itself, and being told so
+        is better than the screen going down over it."""
+        if not confirmed:
+            return
+        try:
+            services.remove_project(self.repo, project)
+        except services.InvalidInput as refused:
+            self.notify(str(refused), severity="warning")
+            return
+        self._reload(self.project)
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """A project fills the memo list; a memo fills the detail below it."""

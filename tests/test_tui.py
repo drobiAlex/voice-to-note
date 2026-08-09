@@ -590,6 +590,29 @@ async def test_reading_raw_holds_when_the_next_memo_is_opened(repo):
 
 
 @pytest.mark.asyncio
+async def test_reading_raw_survives_the_memo_it_was_reading_going_away(repo):
+    # the mode is how somebody is reading, not something the vanished memo owned
+    work, home = seed(repo)
+    repair(repo, work, "We ship on Friday.")
+    repair(repo, home, "Buy milk.")
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await open_memo(pilot, work)
+        await pilot.press("t")
+        await pilot.pause()
+        await pilot.press("m")
+        await pilot.pause()
+        pilot.app.screen.query_one("#project-name", Input).value = "side"
+        await pilot.press("enter")
+        await pilot.pause()
+        await open_memo(pilot, home)
+
+        assert "buy milk" in transcript(pilot)
+        assert transcript_tab(pilot) == "Transcript (raw)"
+
+
+@pytest.mark.asyncio
 async def test_a_memo_moved_out_of_view_takes_the_raw_claim_with_it(repo):
     # the panes go empty, so there is no longer a transcript under the tab for
     # the word raw to be describing
@@ -620,3 +643,207 @@ async def test_pressing_t_before_choosing_a_memo_does_nothing(repo):
         await pilot.pause()
 
         assert transcript_tab(pilot) == "Transcript"
+
+
+# --- renaming and emptying projects ---------------------------------------
+
+
+async def point_at_project(pilot, index: int) -> None:
+    """Puts the sidebar cursor on one project, which is what the project keys
+    act on: the row you are pointing at, not the one whose memos are listed."""
+    sidebar = pilot.app.query_one("#projects", ListView)
+    sidebar.focus()
+    sidebar.index = index
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_shift_r_offers_to_rename_the_project_under_the_cursor(repo):
+    # prefilled, because renaming is usually fixing a name, not replacing it
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("R")
+        await pilot.pause()
+
+        assert pilot.app.screen.query_one("#project-rename", Input).value == "personal"
+
+
+@pytest.mark.asyncio
+async def test_renaming_a_project_renames_it_in_the_sidebar(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("R")
+        await pilot.pause()
+        pilot.app.screen.query_one("#project-rename", Input).value = "home"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert not showing(pilot.app, "#project-rename")
+        assert labels(pilot.app.query_one("#projects", ListView)) == ["home (1)", "work (1)"]
+
+
+@pytest.mark.asyncio
+async def test_renaming_a_project_to_nothing_is_refused_without_losing_the_modal(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("R")
+        await pilot.pause()
+        pilot.app.screen.query_one("#project-rename", Input).value = "   "
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert showing(pilot.app, "#project-rename")
+        assert [str(n.message) for n in pilot.app._notifications] == ["a project needs a name"]
+
+
+@pytest.mark.asyncio
+async def test_renaming_the_project_being_viewed_keeps_its_memos_in_front_of_you(repo):
+    # the memos did not go anywhere, so neither should the list of them
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await open_memo(pilot, work)
+        await point_at_project(pilot, 1)
+        await pilot.press("R")
+        await pilot.pause()
+        pilot.app.screen.query_one("#project-rename", Input).value = "client"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert labels(pilot.app.query_one("#memos", ListView)) == ["standup.m4a"]
+        assert "we ship on friday" in transcript(pilot)
+
+
+@pytest.mark.asyncio
+async def test_a_renamed_project_is_found_again_under_its_tidied_name(repo):
+    # the store tidies the name it is given, so a screen looking for what it
+    # just renamed has to look under the tidied one or find an empty list
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await open_memo(pilot, work)
+        await point_at_project(pilot, 1)
+        await pilot.press("R")
+        await pilot.pause()
+        pilot.app.screen.query_one("#project-rename", Input).value = "  client  "
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert labels(pilot.app.query_one("#projects", ListView)) == [
+            "client (1)",
+            "personal (1)",
+        ]
+        assert labels(pilot.app.query_one("#memos", ListView)) == ["standup.m4a"]
+
+
+@pytest.mark.asyncio
+async def test_emptying_the_other_project_is_refused_without_taking_the_app_down(repo):
+    # other is where emptying puts things, so it has nowhere to be emptied into
+    repo.create_memo(
+        filename="stray.m4a", wav_path="/tmp/s.wav", duration_s=1.0, language="en",
+        segments=[Segment(0, 1000, "hello", speaker="S1")],
+        speakers=[Speaker("S1")], project="other",
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("X")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+
+        assert labels(pilot.app.query_one("#projects", ListView)) == ["other (1)"]
+        assert [str(n.message) for n in pilot.app._notifications] == [
+            "other is where emptied projects go"
+        ]
+
+
+@pytest.mark.asyncio
+async def test_shift_x_asks_before_emptying_a_project(repo):
+    # every memo in it is refiled at once, which is not a stray-keypress action
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("X")
+        await pilot.pause()
+
+        assert showing(pilot.app, "#confirm-remove")
+        assert labels(pilot.app.query_one("#projects", ListView)) == [
+            "personal (1)",
+            "work (1)",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_agreeing_to_empty_a_project_files_its_memos_under_other(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("X")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+
+        assert not showing(pilot.app, "#confirm-remove")
+        assert labels(pilot.app.query_one("#projects", ListView)) == ["other (1)", "work (1)"]
+
+
+@pytest.mark.asyncio
+async def test_declining_to_empty_a_project_leaves_every_memo_where_it_was(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("X")
+        await pilot.pause()
+        assert showing(pilot.app, "#confirm-remove")
+
+        await pilot.press("n")
+        await pilot.pause()
+
+        assert not showing(pilot.app, "#confirm-remove")
+        assert labels(pilot.app.query_one("#projects", ListView)) == [
+            "personal (1)",
+            "work (1)",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_emptying_the_project_being_viewed_stops_showing_its_memos(repo):
+    # the project is gone from the sidebar, so the list and panes under it are
+    # describing something the screen no longer offers
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await open_memo(pilot, work)
+        await point_at_project(pilot, 1)
+        await pilot.press("X")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+
+        assert labels(pilot.app.query_one("#memos", ListView)) == []
+        assert "we ship on friday" not in transcript(pilot)
+
+
+@pytest.mark.asyncio
+async def test_the_project_keys_do_nothing_while_the_memo_list_has_focus(repo):
+    # they act on the sidebar cursor, which is not what you are pointing at once
+    # you have walked into the memos
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("enter")
+        await pilot.pause()
+
+        await pilot.press("R")
+        await pilot.pause()
+        assert not showing(pilot.app, "#project-rename")
+
+        await pilot.press("X")
+        await pilot.pause()
+        assert not showing(pilot.app, "#confirm-remove")

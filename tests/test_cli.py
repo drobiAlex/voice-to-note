@@ -362,6 +362,49 @@ def test_moving_a_memo_says_where_it_went(monkeypatch, capsys):
     assert captured.err == "memo 3 moved to side\n"
 
 
+def test_renaming_a_project_says_how_many_memos_it_carried(monkeypatch, capsys):
+    seen: dict = {}
+
+    def rename_project(_repo, old, new):
+        seen["old"], seen["new"] = old, new
+        return 3
+
+    monkeypatch.setattr(services, "rename_project", rename_project)
+
+    run(monkeypatch, StubRepo(), "project", "rename", "work", "client")
+
+    assert seen == {"old": "work", "new": "client"}
+    assert capsys.readouterr().err == "3 memos moved to client\n"
+
+
+def test_emptying_a_project_says_where_its_one_memo_went(monkeypatch, capsys):
+    # one memo is the common case for a project somebody is tidying away
+    seen: dict = {}
+
+    def remove_project(_repo, name):
+        seen["name"] = name
+        return 1
+
+    monkeypatch.setattr(services, "remove_project", remove_project)
+
+    run(monkeypatch, StubRepo(), "project", "remove", "work")
+
+    assert seen == {"name": "work"}
+    assert capsys.readouterr().err == "1 memo moved to other\n"
+
+
+def test_renaming_a_project_to_nothing_ends_the_command_with_a_message(monkeypatch, capsys):
+    def rename_project(_repo, _old, _new):
+        raise services.InvalidInput("a project needs a name")
+
+    monkeypatch.setattr(services, "rename_project", rename_project)
+
+    with pytest.raises(SystemExit) as err:
+        run(monkeypatch, StubRepo(), "project", "rename", "work", "")
+
+    assert err.value.code == "a project needs a name"
+
+
 def test_a_nameless_project_ends_the_command_with_a_message(monkeypatch, capsys):
     def move_memo(_repo, _id, _project):
         raise services.InvalidInput("a project needs a name")

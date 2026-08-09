@@ -69,6 +69,26 @@ def cmd_move(args: argparse.Namespace) -> None:
     status(f"memo {args.id} moved to {args.project}")
 
 
+def _refiled(moved: int, project: str) -> str:
+    """How much a bulk refiling carried and where it went, in plain English."""
+    return f"{moved} memo{'' if moved == 1 else 's'} moved to {project}"
+
+
+def cmd_project_rename(args: argparse.Namespace) -> None:
+    """Renames a project, carrying every memo filed under it."""
+    with Repository() as repo:
+        moved = services.rename_project(repo, args.old, args.new)
+    status(_refiled(moved, args.new))
+
+
+def cmd_project_remove(args: argparse.Namespace) -> None:
+    """Empties a project, which is the same thing as filing everything in it
+    under other: nothing is deleted, so nothing here asks twice."""
+    with Repository() as repo:
+        moved = services.remove_project(repo, args.name)
+    status(_refiled(moved, "other"))
+
+
 def cmd_show(args: argparse.Namespace) -> None:
     """Prints one memo's transcript."""
     with Repository() as repo:
@@ -175,6 +195,21 @@ def main() -> None:
     sp.add_argument("id", type=int)
     sp.add_argument("project")
     sp.set_defaults(fn=cmd_move)
+
+    # the one nested command in an otherwise flat set of verbs: a top-level
+    # `rename` already names a speaker, and hyphenating would put two more verbs
+    # in a list that is long enough to read through already
+    sp = sub.add_parser("project", help="rename or empty a project")
+    project_sub = sp.add_subparsers(dest="project_cmd", required=True)
+
+    psp = project_sub.add_parser("rename", help="rename a project: project rename <old> <new>")
+    psp.add_argument("old")
+    psp.add_argument("new")
+    psp.set_defaults(fn=cmd_project_rename)
+
+    psp = project_sub.add_parser("remove", help="file a project's memos under other")
+    psp.add_argument("name")
+    psp.set_defaults(fn=cmd_project_remove)
 
     sp = sub.add_parser("show", help="show a memo transcript")
     sp.add_argument("id", type=int)
