@@ -364,3 +364,19 @@ def test_the_tui_command_opens_the_browser_on_the_memo_database(monkeypatch):
 
     assert opened["repo"] is stub
     assert opened["ran"] is True
+
+
+def test_re_extracting_can_be_told_to_overwrite_an_edited_note(monkeypatch, capsys):
+    seen: dict = {}
+
+    def run_extraction(_repo, memo_id, force=False):
+        seen["memo_id"], seen["force"] = memo_id, force
+        return "claude"
+
+    monkeypatch.setattr(services, "require_memo", lambda _repo, _id: None)
+    monkeypatch.setattr(services, "run_extraction", run_extraction)
+    monkeypatch.setattr(services, "notes", lambda *a, **k: "the notes")
+
+    run(monkeypatch, StubRepo(), "extract", "3", "--force")
+
+    assert seen == {"memo_id": 3, "force": True}

@@ -222,8 +222,15 @@ def _complete(
     )
 
 
-def run_extraction(repo: Repository, memo_id: int) -> str:
-    """Turns a memo into structured notes and files them against it."""
+def run_extraction(repo: Repository, memo_id: int, force: bool = False) -> str:
+    """Turns a memo into structured notes and files them against it. A memo whose
+    notes somebody has since edited by hand is left alone unless the caller says
+    outright to overwrite: an afternoon of editing must not go under a rerun."""
+    if not force and repo.notes_md(memo_id):
+        raise InvalidInput(
+            f"memo {memo_id} has notes you edited by hand;"
+            " re-extract with --force to replace them"
+        )
     backend, data = _complete(
         llm.notes_prompt(transcript(repo, memo_id)),
         schema=SCHEMA,
@@ -231,7 +238,7 @@ def run_extraction(repo: Repository, memo_id: int) -> str:
         failure="extraction failed",
         unavailable="no extraction backend",
     )
-    repo.save_extraction(memo_id, backend, data)
+    repo.save_extraction(memo_id, backend, data, clear_edited=force)
     return backend
 
 
@@ -302,10 +309,26 @@ def notes(repo: Repository, memo_id: int) -> str:
     return render_notes(_extraction(repo, memo_id))
 
 
+def save_notes(repo: Repository, memo_id: int, markdown: str) -> None:
+    """Keeps somebody's own wording for a memo's notes, over the top of whatever
+    the model wrote. The extraction underneath is never touched, so `vtn notes
+    --json` still round-trips exactly what the model produced and a script
+    reading it cannot be fooled by an edit made for human eyes."""
+    text = markdown.strip()
+    if not text:
+        raise InvalidInput("a note needs something in it")
+    require_memo(repo, memo_id)
+    repo.save_notes_md(memo_id, text)
+
+
 def notes_markdown(repo: Repository, memo_id: int) -> str:
-    """The notes as Markdown for a screen that renders them. A memo nobody has
-    extracted yet gets a line saying so: a screen has to show something, where a
-    command line can simply refuse."""
+    """The notes as Markdown for a screen that renders them: what a person wrote
+    if they have written anything, otherwise what the model made. A memo nobody
+    has extracted yet gets a line saying so, since a screen has to show
+    something where a command line can simply refuse."""
+    edited = repo.notes_md(memo_id)
+    if edited:
+        return edited
     extraction = repo.extraction(memo_id)
     if not extraction:
         return "*no notes yet — run `vtn extract` on this memo*"

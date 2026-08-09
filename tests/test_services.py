@@ -525,3 +525,94 @@ def test_a_memo_with_no_notes_yields_markdown_that_says_so(repo, wav):
     memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Hello", speaker="S1")])
 
     assert "no notes" in services.notes_markdown(repo, memo_id).lower()
+
+
+def extracted_memo(repo, wav) -> int:
+    """A memo the model has already written notes for."""
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Ship it", speaker="S1")])
+    repo.save_extraction(memo_id, "claude", NOTES)
+    return memo_id
+
+
+def test_an_edited_note_is_what_a_reader_is_shown(repo, wav):
+    memo_id = extracted_memo(repo, wav)
+
+    services.save_notes(repo, memo_id, "# In my own words\n\nWhat actually mattered.")
+
+    assert services.notes_markdown(repo, memo_id).startswith("# In my own words")
+
+
+def test_a_memo_nobody_edited_still_reads_from_the_extraction(repo, wav):
+    # the regression net: editing must be invisible until someone edits
+    memo_id = extracted_memo(repo, wav)
+
+    assert services.notes_markdown(repo, memo_id).startswith("# Sprint sync")
+
+
+def test_the_printed_notes_stay_the_models_own_words(repo, wav):
+    # `vtn notes` prints the extraction; the edit is the on-screen note
+    memo_id = extracted_memo(repo, wav)
+    services.save_notes(repo, memo_id, "# In my own words")
+
+    assert services.notes(repo, memo_id).startswith("# Sprint sync")
+    assert json.loads(services.notes_json(repo, memo_id)) == NOTES
+
+
+def test_an_empty_note_is_refused_rather_than_stored(repo, wav):
+    memo_id = extracted_memo(repo, wav)
+
+    with pytest.raises(services.InvalidInput):
+        services.save_notes(repo, memo_id, "   \n  ")
+
+
+def test_a_note_is_tidied_at_the_edges_before_it_is_stored(repo, wav):
+    memo_id = extracted_memo(repo, wav)
+
+    services.save_notes(repo, memo_id, "\n\n# In my own words\n\n")
+
+    assert services.notes_markdown(repo, memo_id) == "# In my own words"
+
+
+def test_saving_a_note_on_a_memo_that_does_not_exist_is_refused(repo):
+    with pytest.raises(services.NotFound):
+        services.save_notes(repo, 999, "# Anything")
+
+
+def test_re_extracting_over_an_edited_note_is_refused(repo, wav, monkeypatch):
+    # hours of somebody's editing must not vanish because they retyped a command
+    memo_id = extracted_memo(repo, wav)
+    services.save_notes(repo, memo_id, "# In my own words")
+    prompts = fake_llm(monkeypatch, claude=json.dumps(NOTES))
+
+    with pytest.raises(services.InvalidInput, match="--force"):
+        services.run_extraction(repo, memo_id)
+
+    assert prompts == []
+    assert services.notes_markdown(repo, memo_id) == "# In my own words"
+
+
+def test_re_extracting_on_purpose_replaces_the_edited_note(repo, wav, monkeypatch):
+    memo_id = extracted_memo(repo, wav)
+    services.save_notes(repo, memo_id, "# In my own words")
+    fake_llm(monkeypatch, claude=json.dumps(NOTES | {"title": "Freshly extracted"}))
+
+    services.run_extraction(repo, memo_id, force=True)
+
+    assert services.notes_markdown(repo, memo_id).startswith("# Freshly extracted")
+
+
+def test_a_forced_re_extraction_clears_the_edit_in_the_same_breath(repo, wav, monkeypatch):
+    # a separate clearing step could fail on its own and leave the edit masking
+    # notes it was never written over
+    memo_id = extracted_memo(repo, wav)
+    services.save_notes(repo, memo_id, "# In my own words")
+    fake_llm(monkeypatch, claude=json.dumps(NOTES | {"title": "Freshly extracted"}))
+    separate_clears: list = []
+    monkeypatch.setattr(
+        type(repo), "save_notes_md", lambda _self, *args: separate_clears.append(args)
+    )
+
+    services.run_extraction(repo, memo_id, force=True)
+
+    assert separate_clears == []
+    assert repo.notes_md(memo_id) is None

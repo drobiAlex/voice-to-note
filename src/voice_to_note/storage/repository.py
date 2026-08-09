@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS memos (
   language TEXT,
   status TEXT NOT NULL DEFAULT 'new',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  project TEXT NOT NULL DEFAULT 'other'
+  project TEXT NOT NULL DEFAULT 'other',
+  notes_md TEXT
 );
 CREATE TABLE IF NOT EXISTS segments (
   id INTEGER PRIMARY KEY,
@@ -63,9 +64,10 @@ class Repository:
         self._migrate()
 
     def _migrate(self) -> None:
-        """Brings an older database up to the current shape: fingerprints for one
-        made before voice matching, repaired wording for one made before
-        transcript repair, and a project for one made before memos had them."""
+        """Brings an older database up to the current shape, a column at a time:
+        `embedding` for one made before voice matching, `refined_text` for one
+        made before transcript repair, `project` for one made before memos were
+        grouped, and `notes_md` for one made before notes could be edited."""
         cols = {r["name"] for r in self.con.execute("PRAGMA table_info(speakers)")}
         if "embedding" not in cols:
             self.con.execute("ALTER TABLE speakers ADD COLUMN embedding BLOB")
@@ -77,6 +79,8 @@ class Repository:
             self.con.execute(
                 "ALTER TABLE memos ADD COLUMN project TEXT NOT NULL DEFAULT 'other'"
             )
+        if "notes_md" not in cols:
+            self.con.execute("ALTER TABLE memos ADD COLUMN notes_md TEXT")
 
     def close(self) -> None:
         """Closes the memo database."""
@@ -143,6 +147,23 @@ class Repository:
                 "SELECT project, count(*) AS n FROM memos GROUP BY project ORDER BY project"
             )
         ]
+
+    def notes_md(self, memo_id: int) -> str | None:
+        """A memo's hand-edited notes, if anyone has written any. Kept out of the
+        listing projection so drawing a table of memos does not drag every note
+        along with it."""
+        row = self.con.execute(
+            "SELECT notes_md FROM memos WHERE id=?", (memo_id,)
+        ).fetchone()
+        return row["notes_md"] if row else None
+
+    def save_notes_md(self, memo_id: int, markdown: str | None) -> None:
+        """Stores a person's own version of a memo's notes, or clears it away
+        again with None. The extraction it was written over is left alone."""
+        with self.con:
+            self.con.execute(
+                "UPDATE memos SET notes_md=? WHERE id=?", (markdown, memo_id)
+            )
 
     def set_project(self, memo_id: int, project: str) -> None:
         """Files a memo under a different project."""
@@ -262,8 +283,15 @@ class Repository:
 
     # --- extractions ---------------------------------------------------
 
-    def save_extraction(self, memo_id: int, backend: str, data: NotesPayload) -> None:
-        """Files notes against a memo, replacing any earlier attempt."""
+    def save_extraction(
+        self, memo_id: int, backend: str, data: NotesPayload, *, clear_edited: bool = False
+    ) -> None:
+        """Files notes against a memo, replacing any earlier attempt. Clearing a
+        hand-edited note happens in this same transaction rather than after it:
+        a forced re-extraction either lands and takes the edit with it or does
+        neither, so an edit can never be left masking notes it was never written
+        over. The clearing follows the write on purpose — were it to go first, an
+        extraction that then failed would have destroyed somebody's writing."""
         with self.con:
             self.con.execute("DELETE FROM extractions WHERE memo_id=?", (memo_id,))
             self.con.execute(
@@ -271,6 +299,8 @@ class Repository:
                 (memo_id, backend, json.dumps(data, ensure_ascii=False)),
             )
             self.con.execute("UPDATE memos SET status='extracted' WHERE id=?", (memo_id,))
+            if clear_edited:
+                self.con.execute("UPDATE memos SET notes_md=NULL WHERE id=?", (memo_id,))
 
     def extraction(self, memo_id: int) -> Extraction | None:
         """A memo's stored notes, if extraction has run for it."""

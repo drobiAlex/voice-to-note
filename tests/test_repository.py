@@ -1,3 +1,5 @@
+import inspect
+import re
 import sqlite3
 
 import numpy as np
@@ -41,6 +43,20 @@ CREATE TABLE memos (
 CREATE TABLE segments (
   id INTEGER PRIMARY KEY, memo_id INTEGER NOT NULL, t0_ms INTEGER NOT NULL,
   t1_ms INTEGER NOT NULL, text TEXT NOT NULL, speaker TEXT, refined_text TEXT
+);
+"""
+
+
+PRE_NOTES_SCHEMA = """
+CREATE TABLE memos (
+  id INTEGER PRIMARY KEY, filename TEXT NOT NULL, wav_path TEXT NOT NULL,
+  duration_s REAL, language TEXT, status TEXT NOT NULL DEFAULT 'new',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  project TEXT NOT NULL DEFAULT 'other'
+);
+CREATE TABLE extractions (
+  id INTEGER PRIMARY KEY, memo_id INTEGER NOT NULL, backend TEXT NOT NULL,
+  json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
 
@@ -317,3 +333,80 @@ def test_a_database_from_before_projects_files_its_memos_under_other(tmp_path):
     assert (memo.filename, memo.project) == ("old.m4a", "other")
     assert repo.projects() == [("other", 1)]
     repo.close()
+
+
+def test_a_memo_starts_with_no_note_of_its_own(repo):
+    assert repo.notes_md(make_memo(repo)) is None
+
+
+def test_an_edited_note_is_stored_and_read_back(repo):
+    memo_id = make_memo(repo)
+
+    repo.save_notes_md(memo_id, "# My own words")
+
+    assert repo.notes_md(memo_id) == "# My own words"
+
+
+def test_editing_a_note_leaves_the_extraction_untouched(repo):
+    # the model's structured output is the record; the edit is a layer over it
+    memo_id = make_memo(repo)
+    repo.save_extraction(memo_id, "claude", {"title": "As extracted"})
+
+    repo.save_notes_md(memo_id, "# My own words")
+
+    assert repo.extraction(memo_id).data == {"title": "As extracted"}
+
+
+def test_an_edited_note_can_be_taken_back_off(repo):
+    memo_id = make_memo(repo)
+    repo.save_notes_md(memo_id, "# My own words")
+
+    repo.save_notes_md(memo_id, None)
+
+    assert repo.notes_md(memo_id) is None
+
+
+def test_a_database_from_before_note_editing_gains_the_column(tmp_path):
+    path = tmp_path / "legacy.db"
+    con = sqlite3.connect(path)
+    con.executescript(PRE_NOTES_SCHEMA)
+    con.execute("INSERT INTO memos (filename, wav_path) VALUES ('old.m4a', '/tmp/old.wav')")
+    con.commit()
+    con.close()
+
+    repo = Repository(path)
+    assert repo.memo(1).filename == "old.m4a"
+    assert repo.notes_md(1) is None
+
+    repo.save_notes_md(1, "# Written later")
+    assert repo.notes_md(1) == "# Written later"
+    repo.close()
+
+
+def test_a_forced_extraction_clears_the_edit_along_with_it(repo):
+    # one transaction: the new notes land and the old edit goes, or neither does
+    memo_id = make_memo(repo)
+    repo.save_notes_md(memo_id, "# My own words")
+
+    repo.save_extraction(memo_id, "claude", {"title": "Fresh"}, clear_edited=True)
+
+    assert repo.notes_md(memo_id) is None
+    assert repo.extraction(memo_id).data == {"title": "Fresh"}
+
+
+def test_an_ordinary_extraction_leaves_an_edit_where_it_is(repo):
+    memo_id = make_memo(repo)
+    repo.save_notes_md(memo_id, "# My own words")
+
+    repo.save_extraction(memo_id, "claude", {"title": "Fresh"})
+
+    assert repo.notes_md(memo_id) == "# My own words"
+
+
+def test_the_migration_accounts_for_every_column_it_adds(repo):
+    # four clauses have shipped and the docstring fell behind on the fourth;
+    # this fails the next time a column is added without a word about it
+    source = inspect.getsource(Repository._migrate)
+    documented = Repository._migrate.__doc__ or ""
+
+    assert [c for c in re.findall(r"ADD COLUMN (\w+)", source) if c not in documented] == []

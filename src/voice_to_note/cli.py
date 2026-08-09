@@ -110,7 +110,7 @@ def cmd_extract(args: argparse.Namespace) -> None:
     with Repository() as repo:
         services.require_memo(repo, args.id)
         status(f"extracting memo {args.id} …")
-        backend = services.run_extraction(repo, args.id)
+        backend = services.run_extraction(repo, args.id, force=args.force)
         status(f"done via {backend}\n")
         print(services.notes(repo, args.id))
 
@@ -191,6 +191,9 @@ def main() -> None:
 
     sp = sub.add_parser("extract", help="(re)extract structured notes for a memo")
     sp.add_argument("id", type=int)
+    sp.add_argument(
+        "--force", action="store_true", help="replace notes you have edited by hand"
+    )
     sp.set_defaults(fn=cmd_extract)
 
     sp = sub.add_parser("notes", help="show extracted notes for a memo")
@@ -203,7 +206,7 @@ def main() -> None:
     sp.add_argument("question", nargs="+")
     sp.set_defaults(fn=cmd_ask)
 
-    sub.add_parser("tui", help="browse memos on one screen").set_defaults(fn=cmd_tui)
+    sub.add_parser("tui", help="browse and edit memos on one screen").set_defaults(fn=cmd_tui)
 
     sp = sub.add_parser("rename", help="name a speaker: rename <memo_id> <label> <name>")
     sp.add_argument("id", type=int)
