@@ -1,4 +1,4 @@
-from collections.abc import Callable, Hashable
+from collections.abc import Callable, Hashable, Iterable
 from pathlib import Path
 
 from textual import work
@@ -6,6 +6,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
+    DirectoryTree,
     Footer,
     Header,
     Input,
@@ -189,26 +190,56 @@ class RenameSpeaker(ModalScreen[None]):
         self.dismiss(None)
 
 
+class AudioTree(DirectoryTree):
+    """A file tree with the noise taken out: folders to walk into, and the
+    recordings worth walking to. Filtering is for reading only — what may
+    actually be processed is settled when the path is submitted, so a format
+    missing from this list can still be typed in by hand."""
+
+    AUDIO_SUFFIXES = frozenset({".m4a", ".wav", ".mp3", ".opus", ".caf", ".aac", ".flac", ".ogg"})
+
+    def filter_paths(self, paths: Iterable[Path]) -> Iterable[Path]:
+        """Keeps the folders and the recordings, drops everything else."""
+        return [
+            path
+            for path in paths
+            if path.is_dir() or path.suffix.lower() in self.AUDIO_SUFFIXES
+        ]
+
+
 class ProcessMemo(ModalScreen[None]):
-    """A recording to bring in, and the project to file it under. The path is
-    typed or pasted rather than browsed: there is no starting folder that is
-    right for both the recording just saved and the one from last month."""
+    """A recording to bring in, and the project to file it under. There are two
+    ways to name the file because there are two ways people have it: pasted from
+    a file manager, or somewhere they would have to go and find. Both end up in
+    the same line, which is the only thing the modal reads when it submits."""
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
-    def __init__(self, project: str, store: Callable[[str, str], None]) -> None:
-        """Opens on the project being browsed and the way to bring a file in."""
+    def __init__(self, root: Path, project: str, store: Callable[[str, str], None]) -> None:
+        """Opens on the folder to browse from, the project being browsed, and
+        the way to bring a file in."""
         super().__init__()
+        self.root = root
         self.project = project
         self.store = store
 
     def compose(self) -> ComposeResult:
-        """Where the recording is, and what to file it under."""
+        """Where the recording is, what to file it under, and somewhere to go
+        looking if the path is not already to hand."""
         yield Input(placeholder="path to a recording", id="source-path")
         yield Input(self.project, id="source-project")
+        yield AudioTree(self.root, id="source-tree")
 
     def on_mount(self) -> None:
         """Cursor on the path, the one part nobody can guess for them."""
+        self.query_one("#source-path", Input).focus()
+
+    def on_directory_tree_file_selected(self, event: DirectoryTree.FileSelected) -> None:
+        """Writes the chosen recording into the line and hands the cursor back
+        to it. Picking is only half of it — the project is still there to check
+        — and going through the line means a browsed path meets exactly the same
+        refusals as a typed one."""
+        self.query_one("#source-path", Input).value = str(event.path)
         self.query_one("#source-path", Input).focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -464,6 +495,7 @@ class MemoApp(App[None]):
     CSS = """
     #projects { width: 26; border-right: solid $panel; }
     #memos { height: 40%; border-bottom: solid $panel; }
+    #source-tree { height: 1fr; }
     """
     BINDINGS = [
         ("e", "edit_notes", "Edit notes"),
@@ -503,6 +535,9 @@ class MemoApp(App[None]):
         # its id, a recording still being brought in by the path it came from,
         # since its memo does not exist yet
         self.jobs: set[Hashable] = set()
+        # where the add-recording tree starts looking. Home is where recordings
+        # tend to be; a VTN_BROWSE_ROOT setting would land here
+        self.browse_root = Path.home()
         # a way of reading transcripts rather than a property of any one memo:
         # somebody checking a repair pass is checking all of it, memo after memo
         self.raw = False
@@ -734,7 +769,9 @@ class MemoApp(App[None]):
 
     def action_process(self) -> None:
         """Offers to bring a new recording in, filed where you are looking."""
-        self.push_screen(ProcessMemo(self.project or "other", self._process))
+        self.push_screen(
+            ProcessMemo(self.browse_root, self.project or "other", self._process)
+        )
 
     def _process(self, path: str, project: str) -> None:
         """Refuses what is plainly not a recording, and a project with no name,

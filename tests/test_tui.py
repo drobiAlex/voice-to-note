@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from textual.widgets import (
+    DirectoryTree,
     Input,
     Label,
     ListView,
@@ -987,8 +988,14 @@ async def test_a_tag_of_nothing_is_refused_without_losing_the_modal(repo):
 
 
 async def finish_jobs(pilot) -> None:
-    """Waits for the background work to finish and the screen to catch up."""
-    await pilot.app.workers.wait_for_complete()
+    """Waits for the app's own background work to finish and the screen to catch
+    up. Only its own: a DirectoryTree reads folders in workers of its own, and
+    waiting on the whole pool while one is mounted either hangs or comes back
+    cancelled. Anything the app started is still waited for, so a job that should
+    not have run is still caught having run."""
+    jobs = [worker for worker in pilot.app.workers if worker.name == "_run_job"]
+    if jobs:
+        await pilot.app.workers.wait_for_complete(jobs)
     await pilot.pause()
 
 
@@ -1427,10 +1434,18 @@ def stores_a_memo(text: str = "hello there"):
     return process
 
 
-async def process_file(pilot, src, project: str | None = None) -> None:
-    """Brings a recording in the way a person does."""
+async def open_add_modal(pilot, root) -> None:
+    """Opens the add-recording modal with its file tree pointed somewhere the
+    test owns. Left at its default the tree would read the real home folder of
+    whatever machine is running the suite."""
+    pilot.app.browse_root = root
     await pilot.press("o")
     await pilot.pause()
+
+
+async def process_file(pilot, src, project: str | None = None) -> None:
+    """Brings a recording in the way a person does."""
+    await open_add_modal(pilot, src.parent)
     pilot.app.screen.query_one("#source-path", Input).value = str(src)
     if project is not None:
         pilot.app.screen.query_one("#source-project", Input).value = project
@@ -1438,38 +1453,35 @@ async def process_file(pilot, src, project: str | None = None) -> None:
 
 
 @pytest.mark.asyncio
-async def test_pressing_o_asks_for_a_recording_and_a_project(repo):
+async def test_pressing_o_asks_for_a_recording_and_a_project(repo, tmp_path):
     seed(repo)
 
     async with MemoApp(repo).run_test() as pilot:
-        await pilot.press("o")
-        await pilot.pause()
+        await open_add_modal(pilot, tmp_path)
 
         assert showing(pilot.app, "#source-path")
         assert showing(pilot.app, "#source-project")
 
 
 @pytest.mark.asyncio
-async def test_the_project_starts_on_the_one_being_browsed(repo):
+async def test_the_project_starts_on_the_one_being_browsed(repo, tmp_path):
     # a recording is usually another one of whatever you are already looking at
     seed(repo)
 
     async with MemoApp(repo).run_test() as pilot:
         pilot.app.show_project("work")
         await pilot.pause()
-        await pilot.press("o")
-        await pilot.pause()
+        await open_add_modal(pilot, tmp_path)
 
         assert pilot.app.screen.query_one("#source-project", Input).value == "work"
 
 
 @pytest.mark.asyncio
-async def test_the_project_falls_back_to_other_before_one_is_chosen(repo):
+async def test_the_project_falls_back_to_other_before_one_is_chosen(repo, tmp_path):
     seed(repo)
 
     async with MemoApp(repo).run_test() as pilot:
-        await pilot.press("o")
-        await pilot.pause()
+        await open_add_modal(pilot, tmp_path)
 
         assert pilot.app.screen.query_one("#source-project", Input).value == "other"
 
@@ -1644,8 +1656,7 @@ async def test_leaving_the_modal_brings_nothing_in(repo, tmp_path, monkeypatch):
     )
 
     async with MemoApp(repo).run_test() as pilot:
-        await pilot.press("o")
-        await pilot.pause()
+        await open_add_modal(pilot, tmp_path)
         assert showing(pilot.app, "#source-path")
 
         await pilot.press("escape")
@@ -1817,3 +1828,129 @@ async def test_a_project_action_reached_off_the_sidebar_does_nothing(repo, actio
 
         assert len(pilot.app.screen_stack) == 1
         assert said(pilot) == []
+
+
+# --- browsing for the recording -------------------------------------------
+
+
+def one_recording_among(tmp_path, *others: str):
+    """A folder holding exactly one recording, plus whatever else is named. One
+    recording means the tree has one file to walk to, so a test can reach it by
+    what is there rather than by counting rows."""
+    src = tmp_path / "standup.m4a"
+    src.write_bytes(b"fake audio")
+    for name in others:
+        (tmp_path / name).write_bytes(b"x")
+    return src
+
+
+def tree_labels(pilot) -> list[str]:
+    """What the tree is offering to pick from."""
+    tree = pilot.app.screen.query_one("#source-tree", DirectoryTree)
+    return [str(node.label) for node in tree.root.children]
+
+
+async def pick_the_recording(pilot) -> None:
+    """Walks to the one recording the tree shows and picks it."""
+    pilot.app.screen.query_one("#source-tree", DirectoryTree).focus()
+    await pilot.pause()
+    await pilot.press("down")
+    await pilot.press("enter")
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_the_add_modal_offers_somewhere_to_browse(repo, tmp_path):
+    seed(repo)
+    one_recording_among(tmp_path)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_add_modal(pilot, tmp_path)
+
+        assert showing(pilot.app, "#source-tree")
+
+
+@pytest.mark.asyncio
+async def test_the_tree_starts_in_the_home_folder(repo):
+    # where recordings actually are; the tests point it somewhere they own
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        assert pilot.app.browse_root == Path.home()
+
+
+@pytest.mark.asyncio
+async def test_the_tree_shows_recordings_and_folders_and_nothing_else(repo, tmp_path):
+    # a folder of holiday photos and receipts is not a list of recordings
+    seed(repo)
+    one_recording_among(tmp_path, "notes.txt", "photo.png")
+    (tmp_path / "last-month").mkdir()
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_add_modal(pilot, tmp_path)
+
+        assert tree_labels(pilot) == ["last-month", "standup.m4a"]
+
+
+@pytest.mark.asyncio
+async def test_the_tree_shows_a_recording_whatever_case_its_name_is_in(repo, tmp_path):
+    # phones and voice recorders hand back .M4A about as often as .m4a
+    seed(repo)
+    (tmp_path / "INTERVIEW.M4A").write_bytes(b"fake audio")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_add_modal(pilot, tmp_path)
+
+        assert tree_labels(pilot) == ["INTERVIEW.M4A"]
+
+
+@pytest.mark.asyncio
+async def test_picking_a_recording_from_the_tree_fills_the_path(repo, tmp_path):
+    # the typed line stays the one source of truth; the tree only writes to it
+    seed(repo)
+    src = one_recording_among(tmp_path)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_add_modal(pilot, tmp_path)
+        await pick_the_recording(pilot)
+
+        assert pilot.app.screen.query_one("#source-path", Input).value == str(src)
+
+
+@pytest.mark.asyncio
+async def test_picking_a_recording_moves_on_to_sending_it(repo, tmp_path):
+    # picking is half of it; the project is still there to check before enter
+    seed(repo)
+    one_recording_among(tmp_path)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_add_modal(pilot, tmp_path)
+        await pick_the_recording(pilot)
+
+        assert pilot.app.screen.focused is pilot.app.screen.query_one("#source-path", Input)
+
+
+@pytest.mark.asyncio
+async def test_a_recording_picked_from_the_tree_goes_the_same_way_as_a_typed_one(
+    repo, tmp_path, monkeypatch
+):
+    # one path in, one set of checks: picking must not skip the validation a
+    # typed path goes through
+    seed(repo)
+    one_recording_among(tmp_path)
+    monkeypatch.setattr(services, "process_memo", stores_a_memo())
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        await open_add_modal(pilot, tmp_path)
+        pilot.app.screen.query_one("#source-project", Input).value = "work"
+        await pick_the_recording(pilot)
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert not showing(pilot.app, "#source-path")
+        assert labels(pilot.app.query_one("#memos", ListView)) == [
+            "standup.m4a",
+            "standup.m4a",
+        ]
