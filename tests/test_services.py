@@ -567,6 +567,32 @@ def test_removing_a_project_nobody_has_used_is_refused(repo):
         services.remove_project(repo, "ghost")
 
 
+@pytest.mark.parametrize("tag", ["", "   "])
+def test_searching_for_a_tag_of_nothing_is_refused(repo, tag):
+    # a blank tag matches nothing, which would read as a search that ran and
+    # honestly found nothing rather than one that was never a search
+    with pytest.raises(services.InvalidInput):
+        services.memos(repo, tag=tag)
+
+
+def test_a_tag_is_tidied_before_it_is_searched_for(repo, wav):
+    memo_id = add_memo(repo, wav)
+    repo.save_extraction(memo_id, "claude", {"title": "A", "tags": ["release"]})
+
+    assert [m.id for m in services.memos(repo, tag="  release  ")] == [memo_id]
+
+
+def test_the_printed_listing_can_be_narrowed_to_one_tag(repo, wav):
+    tagged = add_memo(repo, wav, filename="tagged.m4a")
+    repo.save_extraction(tagged, "claude", {"title": "A", "tags": ["release"]})
+    add_memo(repo, wav, filename="plain.m4a")
+
+    listing = services.memos_text(repo, tag="release")
+
+    assert "tagged.m4a" in listing
+    assert "plain.m4a" not in listing
+
+
 def test_the_info_for_a_memo_gathers_what_a_reader_would_ask(repo, wav):
     memo_id = repo.create_memo(
         filename="standup.m4a", wav_path=str(wav), duration_s=75.0, language="en",

@@ -422,6 +422,71 @@ def test_the_migration_accounts_for_every_column_it_adds(repo):
     assert [c for c in re.findall(r"ADD COLUMN (\w+)", source) if c not in documented] == []
 
 
+# --- finding memos by the tags their notes carry --------------------------
+
+
+def tag_memo(repo, filename: str, tags: list[str], **kwargs) -> int:
+    """A stored memo whose extraction carries these tags."""
+    memo_id = make_memo(repo, filename=filename, **kwargs)
+    repo.save_extraction(memo_id, "claude", {"title": filename, "tags": tags})
+    return memo_id
+
+
+def test_memos_can_be_found_by_a_tag_their_notes_carry(repo):
+    wanted = tag_memo(repo, "a.m4a", ["release"])
+    tag_memo(repo, "b.m4a", ["hiring"])
+
+    assert [m.id for m in repo.memos(tag="release")] == [wanted]
+
+
+def test_a_tag_search_ignores_the_case_the_tag_was_written_in(repo):
+    memo_id = tag_memo(repo, "a.m4a", ["Release"])
+
+    assert [m.id for m in repo.memos(tag="RELEASE")] == [memo_id]
+
+
+def test_a_tag_search_matches_whole_tags_and_not_parts_of_them(repo):
+    # berlin and berlinale are two subjects, not one of them a prefix
+    tag_memo(repo, "a.m4a", ["berlinale"])
+
+    assert repo.memos(tag="berlin") == []
+
+
+def test_a_memo_nobody_extracted_carries_no_tags_to_be_found_by(repo):
+    make_memo(repo)
+
+    assert repo.memos(tag="release") == []
+
+
+def test_a_tag_search_can_be_narrowed_to_one_project(repo):
+    work = tag_memo(repo, "a.m4a", ["release"], project="work")
+    tag_memo(repo, "b.m4a", ["release"], project="personal")
+
+    assert [m.id for m in repo.memos(project="work", tag="release")] == [work]
+
+
+def test_tagged_memos_come_back_newest_first_like_every_other_listing(repo):
+    older = tag_memo(repo, "a.m4a", ["release"])
+    newer = tag_memo(repo, "b.m4a", ["release"])
+
+    assert [m.id for m in repo.memos(tag="release")] == [newer, older]
+
+
+def test_a_memo_carrying_one_tag_twice_is_still_one_memo(repo):
+    memo_id = tag_memo(repo, "a.m4a", ["release", "release"])
+
+    assert [m.id for m in repo.memos(tag="release")] == [memo_id]
+
+
+def test_writing_a_note_by_hand_leaves_the_tags_where_they_were(repo):
+    # tags are the extraction's; an edit replaces how a memo reads, not what it
+    # was filed under
+    memo_id = tag_memo(repo, "a.m4a", ["release"])
+    repo.save_notes_md(memo_id, "# My own words, no tags anywhere in them")
+
+    assert [m.id for m in repo.memos(tag="release")] == [memo_id]
+
+
 # --- when a memo was last changed -----------------------------------------
 
 

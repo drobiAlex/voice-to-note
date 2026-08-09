@@ -83,6 +83,18 @@ def _project_name(project: str) -> str:
     return name
 
 
+def _tag(tag: str | None) -> str | None:
+    """A tag with its spacing tidied, refusing one that is really empty: a blank
+    tag matches nothing, and a search that was never really asked should not
+    read the same as one that ran and honestly found nothing."""
+    if tag is None:
+        return None
+    text = tag.strip()
+    if not text:
+        raise InvalidInput("a tag needs some text")
+    return text
+
+
 def process_memo(
     repo: Repository, src: Path, project: str = "other", log: Log = _silent
 ) -> ProcessResult:
@@ -165,14 +177,15 @@ def _duration(duration_s: float | None) -> str:
     return f"{duration_s:.0f}s" if duration_s else "?"
 
 
-def memos_text(repo: Repository, project: str | None = None) -> str:
+def memos_text(repo: Repository, project: str | None = None, tag: str | None = None) -> str:
     """The memo list as a person reads it, newest first and column-aligned so the
-    ids, dates and states line up down the screen. One project at a time when
-    asked for. Empty when nothing is stored."""
+    ids, dates and states line up down the screen. One project or one tag at a
+    time when asked for, and both together when both are. Empty when nothing is
+    stored, and equally empty when nothing matches."""
     return "\n".join(
         f"{m.id:>4}  {m.created_at}  {_duration(m.duration_s):>6}  {m.language or '?':<3}"
         f"  {m.status:<12} {m.project:<8} {m.filename}"
-        for m in repo.memos(project)
+        for m in memos(repo, project, tag)
     )
 
 
@@ -354,14 +367,22 @@ def projects(repo: Repository) -> list[tuple[str, int]]:
     return repo.projects()
 
 
-def memos(repo: Repository, project: str | None = None) -> list[Memo]:
-    """The stored memos as records, for a screen that lays out its own rows."""
-    return repo.memos(project)
+def memos(
+    repo: Repository, project: str | None = None, tag: str | None = None
+) -> list[Memo]:
+    """The stored memos as records, for a screen that lays out its own rows.
+    Every listing goes through here, so a tag is tidied and refused in one place
+    however it was asked for."""
+    return repo.memos(project, _tag(tag))
 
 
-def memos_json(repo: Repository, project: str | None = None) -> str:
-    """The memo list as a script reads it, one project at a time when asked."""
-    return json.dumps([asdict(m) for m in repo.memos(project)], ensure_ascii=False)
+def memos_json(
+    repo: Repository, project: str | None = None, tag: str | None = None
+) -> str:
+    """The memo list as a script reads it, narrowed as the caller asked."""
+    return json.dumps(
+        [asdict(m) for m in memos(repo, project, tag)], ensure_ascii=False
+    )
 
 
 def ask(repo: Repository, memo_id: int, question: str) -> tuple[str, str]:

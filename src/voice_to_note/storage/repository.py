@@ -135,14 +135,30 @@ class Repository:
             self._write_speakers(memo_id, speakers)
         return memo_id
 
-    def memos(self, project: str | None = None) -> list[Memo]:
-        """Every memo, newest first, or only the ones filed under one project."""
+    def memos(self, project: str | None = None, tag: str | None = None) -> list[Memo]:
+        """Every memo, newest first, narrowed to a project, to a tag its notes
+        carry, or to both at once. Tags are matched whole and whatever case they
+        were written in; a memo nobody has extracted has no tags to be found by."""
         sql = f"SELECT {MEMO_COLUMNS} FROM memos"
-        params: tuple = ()
+        where = []
+        params: list = []
         if project is not None:
-            sql += " WHERE project=?"
-            params = (project,)
-        return [_memo(r) for r in self.con.execute(sql + " ORDER BY id DESC", params)]
+            where.append("project=?")
+            params.append(project)
+        if tag is not None:
+            # a subquery rather than a join: memos and extractions both have an
+            # id and a created_at, so joining would mean qualifying every column
+            # of the projection, and IN already yields one row per memo
+            where.append(
+                "id IN (SELECT e.memo_id FROM extractions e"
+                " JOIN json_each(e.json, '$.tags') t WHERE lower(t.value)=lower(?))"
+            )
+            params.append(tag)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        return [
+            _memo(r) for r in self.con.execute(sql + " ORDER BY id DESC", tuple(params))
+        ]
 
     def projects(self) -> list[tuple[str, int]]:
         """Every project that has memos in it and how many, for a sidebar to

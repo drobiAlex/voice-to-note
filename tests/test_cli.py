@@ -137,7 +137,7 @@ def test_showing_a_memo_that_was_never_stored_prints_no_json(repo, monkeypatch, 
 
 def test_listing_prints_exactly_what_services_formatted(monkeypatch, capsys):
     monkeypatch.setattr(
-        services, "memos_text", lambda _repo, project=None: "  12  a listing line"
+        services, "memos_text", lambda _repo, project=None, tag=None: "  12  a listing line"
     )
 
     run(monkeypatch, StubRepo(), "list")
@@ -363,7 +363,7 @@ def test_processing_without_a_project_files_it_under_other(tmp_path, monkeypatch
 def test_listing_can_be_narrowed_to_one_project(monkeypatch, capsys):
     seen: dict = {}
 
-    def memos_text(_repo, project=None):
+    def memos_text(_repo, project=None, tag=None):
         seen["project"] = project
         return "   1  2026-01-01  1s  en  transcribed  work     a.m4a"
 
@@ -373,6 +373,48 @@ def test_listing_can_be_narrowed_to_one_project(monkeypatch, capsys):
 
     assert seen["project"] == "work"
     assert "a.m4a" in capsys.readouterr().out
+
+
+def test_listing_can_be_narrowed_to_one_tag(monkeypatch, capsys):
+    seen: dict = {}
+
+    def memos_text(_repo, project=None, tag=None):
+        seen["project"], seen["tag"] = project, tag
+        return "   1  2026-01-01  1s  en  transcribed  work     a.m4a"
+
+    monkeypatch.setattr(services, "memos_text", memos_text)
+
+    run(monkeypatch, StubRepo(), "list", "--tag", "release")
+
+    assert seen == {"project": None, "tag": "release"}
+    assert "a.m4a" in capsys.readouterr().out
+
+
+def test_a_tag_and_a_project_narrow_the_listing_together(monkeypatch, capsys):
+    # both asked for means both applied, not whichever the code checked first
+    seen: dict = {}
+
+    def memos_text(_repo, project=None, tag=None):
+        seen["project"], seen["tag"] = project, tag
+        return ""
+
+    monkeypatch.setattr(services, "memos_text", memos_text)
+
+    run(monkeypatch, StubRepo(), "list", "--project", "work", "--tag", "release")
+
+    assert seen == {"project": "work", "tag": "release"}
+
+
+def test_a_tag_of_nothing_ends_the_listing_with_a_message(monkeypatch, capsys):
+    def memos_text(_repo, project=None, tag=None):
+        raise services.InvalidInput("a tag needs some text")
+
+    monkeypatch.setattr(services, "memos_text", memos_text)
+
+    with pytest.raises(SystemExit) as err:
+        run(monkeypatch, StubRepo(), "list", "--tag", "  ")
+
+    assert err.value.code == "a tag needs some text"
 
 
 def test_moving_a_memo_says_where_it_went(monkeypatch, capsys):

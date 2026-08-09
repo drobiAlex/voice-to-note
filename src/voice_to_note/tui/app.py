@@ -186,6 +186,43 @@ class RenameSpeaker(ModalScreen[None]):
         self.dismiss(None)
 
 
+class TagSearch(ModalScreen[None]):
+    """A tag to go looking for. Tags come from the notes an extraction wrote, so
+    this reaches across every project at once, which the sidebar cannot."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, store: Callable[[str], None]) -> None:
+        """Opens on the way to run a search."""
+        super().__init__()
+        self.store = store
+
+    def compose(self) -> ComposeResult:
+        """A line to type a tag into."""
+        yield Input(placeholder="tag", id="tag-search")
+
+    def on_mount(self) -> None:
+        """Puts the cursor where the tag goes."""
+        self.query_one("#tag-search", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Looks for whatever they typed."""
+        self._search(event.value)
+
+    def _search(self, tag: str) -> None:
+        """Closes only once the search has actually run."""
+        try:
+            self.store(tag)
+        except services.InvalidInput as refused:
+            self.notify(str(refused), severity="warning")
+            return
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        """Leaves the list showing whatever it was showing."""
+        self.dismiss(None)
+
+
 class MemoDetails(ModalScreen[None]):
     """What state one memo is in, for the questions the list and the panes do
     not answer: how long it is, when it last changed, whether it has been
@@ -293,6 +330,8 @@ class MemoApp(App[None]):
         # sidebar cursor is resting on
         ("R", "rename_project", "Rename project"),
         ("X", "remove_project", "Empty project"),
+        ("slash", "find_tag", "Find tag"),
+        ("escape", "clear_tag", "Back to project"),
         ("q", "quit", "Quit"),
     ]
 
@@ -302,6 +341,9 @@ class MemoApp(App[None]):
         self.repo = repo
         self.memo_id: int | None = None
         self.project: str | None = None
+        # the tag whose answers are in the memo list, when they are not a
+        # project's: the two fill the same list and only one can be showing
+        self.tag: str | None = None
         # a way of reading transcripts rather than a property of any one memo:
         # somebody checking a repair pass is checking all of it, memo after memo
         self.raw = False
@@ -336,12 +378,28 @@ class MemoApp(App[None]):
         sidebar.index = 0
 
     def show_project(self, project: str) -> None:
-        """Lists one project's recordings, newest first as everywhere else."""
+        """Lists one project's recordings, newest first as everywhere else. This
+        is also the way back from a tag search, so it takes the search down with
+        it rather than leaving the subtitle claiming a tag."""
         self.project = project
+        self.tag = None
+        self.sub_title = ""
         memos = self.query_one("#memos", ListView)
         memos.clear()
         for memo in services.memos(self.repo, project=project):
             memos.append(ListItem(Label(memo.filename), name=str(memo.id)))
+
+    def show_tagged(self, tag: str) -> None:
+        """Fills the memo list with everything carrying one tag, from whatever
+        project it is filed under. The subtitle says so: the list no longer
+        matches the highlighted project, and leaving that unsaid makes the
+        sidebar read as a lie."""
+        memos = self.query_one("#memos", ListView)
+        memos.clear()
+        for memo in services.memos(self.repo, tag=tag):
+            memos.append(ListItem(Label(memo.filename), name=str(memo.id)))
+        self.tag = tag
+        self.sub_title = f"tag: {tag}"
 
     def show_memo(self, memo_id: int) -> None:
         """Shows one recording's notes and what was actually said in it."""
@@ -386,6 +444,23 @@ class MemoApp(App[None]):
             return
         self.raw = not self.raw
         self.show_memo(self.memo_id)
+
+    def action_find_tag(self) -> None:
+        """Offers to look for a tag across every project at once."""
+        self.push_screen(TagSearch(self.show_tagged))
+
+    def action_clear_tag(self) -> None:
+        """Puts the project back in the list once a tag search has been read.
+        With no search showing there is nothing to come back from, so escape
+        stays out of the way of everything else."""
+        if self.tag is None:
+            return
+        if self.project is None:
+            self.query_one("#memos", ListView).clear()
+            self.tag = None
+            self.sub_title = ""
+        else:
+            self.show_project(self.project)
 
     def action_memo_info(self) -> None:
         """Says what state the memo on screen is in, if one is on screen at all."""

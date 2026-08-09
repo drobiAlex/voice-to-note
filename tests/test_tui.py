@@ -892,3 +892,90 @@ async def test_pressing_i_before_choosing_a_memo_does_nothing(repo):
         await pilot.pause()
 
         assert not showing(pilot.app, "#memo-info")
+
+
+# --- finding memos by tag -------------------------------------------------
+
+
+async def search_tag(pilot, tag: str) -> None:
+    """Runs a tag search the way a person does, from whatever is on screen."""
+    await pilot.press("/")
+    await pilot.pause()
+    pilot.app.screen.query_one("#tag-search", Input).value = tag
+    await pilot.press("enter")
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_pressing_slash_asks_which_tag_to_look_for(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("/")
+        await pilot.pause()
+
+        assert showing(pilot.app, "#tag-search")
+
+
+@pytest.mark.asyncio
+async def test_a_tag_search_reaches_across_every_project(repo):
+    # the whole point of it: the sidebar can only ever show you one project
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("personal")
+        await pilot.pause()
+        await search_tag(pilot, "release")
+
+        assert labels(pilot.app.query_one("#memos", ListView)) == ["standup.m4a"]
+
+
+@pytest.mark.asyncio
+async def test_the_screen_says_which_tag_it_is_showing(repo):
+    # the memo list no longer matches the highlighted project, so leaving the
+    # screen silent about it would make the sidebar a lie
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await search_tag(pilot, "release")
+
+        assert pilot.app.sub_title == "tag: release"
+
+
+@pytest.mark.asyncio
+async def test_leaving_a_tag_search_puts_the_project_back_in_the_list(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("personal")
+        await pilot.pause()
+        await search_tag(pilot, "release")
+        assert labels(pilot.app.query_one("#memos", ListView)) == ["standup.m4a"]
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert labels(pilot.app.query_one("#memos", ListView)) == ["shopping.m4a"]
+        assert pilot.app.sub_title == ""
+
+
+@pytest.mark.asyncio
+async def test_a_tag_nothing_carries_shows_an_empty_list_rather_than_everything(repo):
+    # finding nothing is an answer; falling back to the whole listing is not
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await search_tag(pilot, "nobody-used-this")
+
+        assert labels(pilot.app.query_one("#memos", ListView)) == []
+
+
+@pytest.mark.asyncio
+async def test_a_tag_of_nothing_is_refused_without_losing_the_modal(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await search_tag(pilot, "   ")
+
+        assert showing(pilot.app, "#tag-search")
+        assert [str(n.message) for n in pilot.app._notifications] == ["a tag needs some text"]

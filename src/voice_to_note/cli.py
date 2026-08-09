@@ -53,9 +53,9 @@ def cmd_list(args: argparse.Namespace) -> None:
     """Shows what has been processed so far."""
     with Repository() as repo:
         if args.json:
-            print(services.memos_json(repo, project=args.project))
+            print(services.memos_json(repo, project=args.project, tag=args.tag))
             return
-        listing = services.memos_text(repo, project=args.project)
+        listing = services.memos_text(repo, project=args.project, tag=args.tag)
         if listing:
             print(listing)
         else:
@@ -195,6 +195,7 @@ def main() -> None:
     sp = sub.add_parser("list", help="list memos")
     sp.add_argument("--json", action="store_true", help="print memos as JSON")
     sp.add_argument("--project", help="only the memos filed under this project")
+    sp.add_argument("--tag", help="only the memos whose notes carry this tag")
     sp.set_defaults(fn=cmd_list)
 
     sp = sub.add_parser("move", help="file a memo under a project: move <id> <project>")
