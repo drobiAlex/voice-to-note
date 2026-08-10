@@ -72,5 +72,6 @@ DIAR_THRESHOLD = _setting("diar_threshold", 0.5, float)
 MATCH_THRESHOLD = _setting("match_threshold", 0.5, float)
 
 CLAUDE_MODEL = _setting("claude_model", "sonnet", str)
+REFINE_MODEL = _setting("refine_model", "haiku", str)
 OLLAMA_URL = _setting("ollama_url", "http://localhost:11434", str)
 OLLAMA_MODEL = _setting("ollama_model", "qwen3:8b", str)

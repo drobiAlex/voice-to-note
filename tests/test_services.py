@@ -52,7 +52,7 @@ def fake_llm(monkeypatch, *, claude=None, ollama=None) -> list[str]:
     seen: list[str] = []
 
     def backend(reply):
-        def call(prompt, schema=None):
+        def call(prompt, schema=None, model=None):
             seen.append(prompt)
             if isinstance(reply, Exception):
                 raise reply
@@ -267,6 +267,24 @@ def test_unparseable_claude_output_falls_back_to_ollama(repo, wav, monkeypatch):
     assert "[00:00] Alice: Ship it" in prompts[0]
 
 
+def test_extraction_leaves_claude_to_pick_its_own_model(repo, wav, monkeypatch):
+    # extraction is the harder task and stays on the configured model; only
+    # repair is cheap enough to move to a smaller one
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Ship it", speaker="S1")])
+    seen: dict = {}
+
+    def claude(prompt, model=None):
+        seen["model"] = model
+        return json.dumps(NOTES)
+
+    monkeypatch.setattr(services.llm, "claude_available", lambda: True)
+    monkeypatch.setattr(services.llm, "claude_complete", claude)
+
+    services.run_extraction(repo, memo_id)
+
+    assert seen["model"] is None
+
+
 def test_notes_json_round_trips_the_stored_extraction(repo, wav):
     # the scripting contract: `vtn notes --json` parses back to what was stored
     memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Hello", speaker="S1")])
@@ -455,6 +473,24 @@ def test_the_local_backend_is_held_to_the_reply_shape(repo, wav, monkeypatch):
     services.refine_transcript(repo, memo_id)
 
     assert seen["schema"] == refine.REFINE_SCHEMA
+
+
+def test_refining_runs_on_the_cheaper_refine_model(repo, wav, monkeypatch):
+    # repair is typo-level work done once per window of a memo, so it is worth
+    # paying for on a smaller model than the one that reads the whole transcript
+    memo_id, only = add_transcript(repo, wav, ["so their going to ship on friday"])
+    seen: dict = {}
+
+    def claude(prompt, model=None):
+        seen["model"] = model
+        return refine_reply({only: "So they're going to ship on Friday."})
+
+    monkeypatch.setattr(services.llm, "claude_available", lambda: True)
+    monkeypatch.setattr(services.llm, "claude_complete", claude)
+
+    services.refine_transcript(repo, memo_id)
+
+    assert seen["model"] == config.REFINE_MODEL
 
 
 def test_the_diff_reads_as_one_before_and_after_per_line():

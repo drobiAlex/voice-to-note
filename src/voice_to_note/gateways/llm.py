@@ -119,11 +119,13 @@ def ollama_available() -> bool:
         return False
 
 
-def claude_complete(prompt: str) -> str:
-    """Asks Claude, through the CLI the user already signed in to."""
+def claude_complete(prompt: str, model: str | None = None) -> str:
+    """Asks Claude, through the CLI the user already signed in to. A caller
+    doing cheaper, higher-volume work can name a lighter model than the
+    default the app extracts notes with."""
     try:
         proc = subprocess.run(
-            ["claude", "-p", "--model", config.CLAUDE_MODEL],
+            ["claude", "-p", "--model", model or config.CLAUDE_MODEL],
             input=prompt, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT_S,
         )
     except FileNotFoundError as e:

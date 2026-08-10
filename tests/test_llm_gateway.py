@@ -149,6 +149,34 @@ def test_a_failing_claude_call_reports_what_it_printed(monkeypatch):
         llm.claude_complete("summarise this")
 
 
+def test_claude_complete_defaults_to_the_configured_model(monkeypatch):
+    seen: dict = {}
+
+    def run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return llm.subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr(llm.subprocess, "run", run)
+
+    llm.claude_complete("summarise this")
+
+    assert seen["cmd"][-1] == config.CLAUDE_MODEL
+
+
+def test_claude_complete_uses_the_model_it_is_given(monkeypatch):
+    seen: dict = {}
+
+    def run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return llm.subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr(llm.subprocess, "run", run)
+
+    llm.claude_complete("summarise this", model="haiku")
+
+    assert seen["cmd"][-1] == "haiku"
+
+
 # --- asking for a transcript repair ---------------------------------------
 
 

@@ -500,13 +500,16 @@ def _complete(
     parse: Callable[[str], T],
     failure: str,
     unavailable: str,
+    model: str | None = None,
 ) -> tuple[str, T]:
     """Gets an answer from the best backend that gives a usable one; a reply
-    that cannot be used demotes that backend rather than failing outright."""
+    that cannot be used demotes that backend rather than failing outright. The
+    model only steers claude: ollama has no equivalent per-call choice, it
+    always runs config.OLLAMA_MODEL."""
     errors = []
     if llm.claude_available():
         try:
-            return "claude", parse(llm.claude_complete(prompt))
+            return "claude", parse(llm.claude_complete(prompt, model=model))
         except (llm.BackendError, ValueError) as e:
             errors.append(f"claude: {e}")
     if llm.ollama_available():
@@ -577,6 +580,7 @@ def refine_transcript(repo: Repository, memo_id: int, dry_run: bool = False) -> 
             parse=partial(parse_refinements, expected_ids=chunk.target_ids),
             failure="refinement failed",
             unavailable="no refinement backend",
+            model=config.REFINE_MODEL,
         )[1]
         for chunk in chunks
     ]
