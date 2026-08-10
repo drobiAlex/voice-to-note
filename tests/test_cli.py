@@ -617,6 +617,21 @@ def test_explicit_setup_runs_regardless_of_readiness(monkeypatch, capsys):
     assert capsys.readouterr().out == "setup complete\n"
 
 
+def test_the_setup_command_can_preview_with_a_mock_world(monkeypatch, capsys):
+    captured: dict = {}
+
+    def setup(log, download, world=None):
+        captured["world"] = world
+        return "setup complete"
+
+    monkeypatch.setattr(services, "setup", setup)
+
+    run(monkeypatch, StubRepo(), "setup", "--mock")
+
+    assert isinstance(captured["world"], services.World)
+    assert capsys.readouterr().out == "setup complete\n"
+
+
 def test_naming_a_speaker_nothing_ends_the_command_with_a_message(monkeypatch, capsys):
     def rename_speaker(_repo, _memo_id, _label, _name):
         raise services.InvalidInput("a speaker needs a name")

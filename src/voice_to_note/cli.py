@@ -31,7 +31,9 @@ def _version() -> str:
 def cmd_setup(args: argparse.Namespace) -> None:
     """Installs whisper.cpp and every model this app depends on: one line per
     finished step on stdout, and each download's progress overwriting itself
-    on stderr so a multi-gigabyte fetch never looks stalled."""
+    on stderr so a multi-gigabyte fetch never looks stalled. --mock swaps in a
+    world that touches neither the network nor disk, previewing the same flow
+    in seconds."""
     fresh = {"line": False}
 
     def log(line: str) -> None:
@@ -44,7 +46,10 @@ def cmd_setup(args: argparse.Namespace) -> None:
         print("\r" + line, end="", file=sys.stderr, flush=True)
         fresh["line"] = True
 
-    print(services.setup(log, download))
+    if args.mock:
+        print(services.setup(log, download, world=services.mock_world()))
+    else:
+        print(services.setup(log, download))
 
 
 def cmd_process(args: argparse.Namespace) -> None:
@@ -287,9 +292,11 @@ def main() -> None:
     sp.add_argument("question", nargs="+")
     sp.set_defaults(fn=cmd_ask)
 
-    sub.add_parser(
-        "setup", help="install whisper.cpp and all models (idempotent)"
-    ).set_defaults(fn=cmd_setup)
+    sp = sub.add_parser("setup", help="install whisper.cpp and all models (idempotent)")
+    sp.add_argument(
+        "--mock", action="store_true", help="preview the install flow without installing anything"
+    )
+    sp.set_defaults(fn=cmd_setup)
 
     sub.add_parser(
         "tui", help="browse, edit and process memos on one screen"

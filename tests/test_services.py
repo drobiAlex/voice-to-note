@@ -1275,6 +1275,39 @@ def test_a_vad_download_failure_is_tolerated_rather_than_failing_setup(monkeypat
     assert any("VAD download failed" in line for line in logged)
 
 
+def test_mock_world_previews_setup_without_touching_the_network_or_disk(monkeypatch, tmp_path):
+    # a preview has to fail early the same way a real run would (require_tools
+    # stays real) but must never reach git, cmake, curl or an actual download
+    configured_paths(monkeypatch, tmp_path)
+
+    def gateway_called(*_a, **_k):
+        raise AssertionError("real gateway called")
+
+    monkeypatch.setattr(services.bootstrap, "clone_whisper", gateway_called)
+    monkeypatch.setattr(services.bootstrap, "build_whisper", gateway_called)
+    monkeypatch.setattr(services.bootstrap, "download_model_script", gateway_called)
+    monkeypatch.setattr(services.bootstrap, "fetch", gateway_called)
+    monkeypatch.setattr(services.bootstrap, "fetch_tar_bz2", gateway_called)
+    monkeypatch.setattr(services.bootstrap, "require_tools", lambda: True)
+    logged: list = []
+    downloaded: list = []
+
+    result = services.setup(
+        log=logged.append,
+        download=downloaded.append,
+        world=services.mock_world(sleep=lambda _s: None),
+    )
+
+    assert result == "setup complete"
+    for n in range(1, 7):
+        assert any(line.startswith(f"[{n}/6]") for line in logged)
+    assert sum(line.startswith("      done in") for line in logged) == 6
+    assert any("%" in line and "MB" in line for line in downloaded)
+    assert not services.config.MODELS_DIR.exists()
+    assert not services.config.DATA_DIR.exists()
+    assert not services.config.UPLOADS_DIR.exists()
+
+
 def _write_ready_artifacts(skip: str = "") -> None:
     """Puts every artifact ready() checks on disk, except the one named to skip."""
     if skip != "binary":

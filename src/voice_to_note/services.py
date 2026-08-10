@@ -144,26 +144,115 @@ def _report_step(
     log(f"      done in {int(now() - t0)}s")
 
 
+@dataclass(frozen=True)
+class World:
+    """Everything setup touches outside its own logic, swappable as one piece
+    so a caller can preview the whole flow against a fake instead of git,
+    cmake and the network."""
+
+    require_tools: Callable[[], None]
+    mkdir: Callable[[Path], None]
+    exists: Callable[[Path], bool]
+    built: Callable[[Path], bool]
+    clone: Callable[[Path], None]
+    build: Callable[[Path], None]
+    script: Callable[[Path, str, list[str]], None]
+    fetch: Callable[[str, Path, Callable[[int, int], None]], None]
+    fetch_tar: Callable[[str, Path, Callable[[int, int], None]], None]
+
+
+def _real_world() -> World:
+    """The outside world setup actually touches. Read fresh on every call, so
+    a test that monkeypatches bootstrap's own functions still reaches them."""
+    return World(
+        require_tools=bootstrap.require_tools,
+        mkdir=lambda p: p.mkdir(parents=True, exist_ok=True),
+        exists=lambda p: p.exists(),
+        built=_built,
+        clone=bootstrap.clone_whisper,
+        build=bootstrap.build_whisper,
+        script=bootstrap.download_model_script,
+        fetch=bootstrap.fetch,
+        fetch_tar=bootstrap.fetch_tar_bz2,
+    )
+
+
+# a plausible size for a mocked download's progress bar, keyed by the real
+# artifact's filename so the preview looks like the run it stands in for
+_MOCK_ARTIFACT_SIZES = {
+    "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2": 6_000_000,
+    "nemo_en_titanet_large.onnx": 97_000_000,
+}
+
+
+def _mock_artifact_size(url: str) -> int:
+    """The byte count a mock download reports for a URL, taken from the real
+    artifact's known size where it is one, or a plain guess otherwise."""
+    return _MOCK_ARTIFACT_SIZES.get(Path(url).name, 50_000_000)
+
+
+def mock_world(sleep: Callable[[float], None] = time.sleep) -> World:
+    """A World that performs no real installation, for previewing the whole
+    setup flow in seconds: every step "runs" against a stopwatch instead of
+    git, cmake or the network, and nothing lands on disk. require_tools is
+    left real since checking for git, cmake and ffmpeg costs nothing and a
+    preview should still be honest about a machine that could not run this
+    for real."""
+
+    def clone(_vendor: Path) -> None:
+        sleep(0.8)
+
+    def build(_vendor: Path) -> None:
+        sleep(2.0)
+
+    def script(_vendor: Path, _name: str, _args: list[str]) -> None:
+        sleep(1.5)
+
+    def simulated_fetch(url: str, _dst: Path, tick: Callable[[int, int], None]) -> None:
+        total = _mock_artifact_size(url)
+        for step in range(1, 11):
+            sleep(0.08)
+            tick(total * step // 10, total)
+
+    return World(
+        require_tools=bootstrap.require_tools,
+        mkdir=lambda _p: None,
+        exists=lambda _p: False,
+        built=lambda _p: False,
+        clone=clone,
+        build=build,
+        script=script,
+        fetch=simulated_fetch,
+        fetch_tar=simulated_fetch,
+    )
+
+
 def setup(
-    log: Log = _silent, download: Log = _silent, now: Callable[[], float] = time.monotonic
+    log: Log = _silent,
+    download: Log = _silent,
+    now: Callable[[], float] = time.monotonic,
+    world: World | None = None,
 ) -> str:
     """Installs whisper.cpp and every model this app runs on, skipping any step
     whose artifact is already on disk so that re-running after a partial
     install only does what is still missing. A failed VAD download is the one
     step tolerated rather than raised: transcription still works without it,
-    just without the pause-aware segmentation VAD gives it."""
-    bootstrap.require_tools()
+    just without the pause-aware segmentation VAD gives it. A World stands in
+    for every step that touches git, cmake or the network; passing mock_world()
+    previews the same flow without doing any of it."""
+    world = world or _real_world()
+    world.require_tools()
     for d in (config.MODELS_DIR, config.DATA_DIR, config.UPLOADS_DIR):
-        d.mkdir(parents=True, exist_ok=True)
+        world.mkdir(d)
 
-    if config.VENDOR.exists():
+    if world.exists(config.VENDOR):
         log("[1/6] whisper.cpp source — already installed")
     else:
         _report_step(
-            log, now, 1, "cloning whisper.cpp", lambda: bootstrap.clone_whisper(config.VENDOR)
+            log, now, 1, "cloning whisper.cpp", lambda: world.clone(config.VENDOR)
         )
 
-    if _built(config.WHISPER_BIN):
+    if world.built(config.WHISPER_BIN):
         log("[2/6] whisper.cpp build — already installed")
     else:
         _report_step(
@@ -171,10 +260,10 @@ def setup(
             now,
             2,
             "building whisper.cpp (Metal — takes a few minutes)",
-            lambda: bootstrap.build_whisper(config.VENDOR),
+            lambda: world.build(config.VENDOR),
         )
 
-    if config.WHISPER_MODEL_PATH.exists():
+    if world.exists(config.WHISPER_MODEL_PATH):
         log("[3/6] whisper model — already installed")
     else:
         _report_step(
@@ -182,27 +271,27 @@ def setup(
             now,
             3,
             f"downloading whisper model {config.WHISPER_MODEL}",
-            lambda: bootstrap.download_model_script(
+            lambda: world.script(
                 config.VENDOR,
                 "download-ggml-model.sh",
                 [config.WHISPER_MODEL, str(config.MODELS_DIR)],
             ),
         )
 
-    if config.VAD_MODEL_PATH.exists():
+    if world.exists(config.VAD_MODEL_PATH):
         log("[4/6] VAD model — already installed")
     else:
         log("[4/6] downloading VAD model …")
         t0 = now()
         try:
-            bootstrap.download_model_script(
+            world.script(
                 config.VENDOR, "download-vad-model.sh", ["silero-v5.1.2", str(config.MODELS_DIR)]
             )
             log(f"      done in {int(now() - t0)}s")
         except GatewayError:
             log("VAD download failed — continuing without VAD")
 
-    if config.SEG_MODEL_PATH.exists():
+    if world.exists(config.SEG_MODEL_PATH):
         log("[5/6] speaker segmentation model — already installed")
     else:
         _report_step(
@@ -210,11 +299,11 @@ def setup(
             now,
             5,
             "downloading speaker segmentation model (~6 MB)",
-            lambda: bootstrap.fetch_tar_bz2(
+            lambda: world.fetch_tar(
                 "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
                 "speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
                 config.MODELS_DIR,
-                tick=lambda read, total: download(
+                lambda read, total: download(
                     _download_line("sherpa-onnx-pyannote-segmentation-3-0.tar.bz2", read, total)
                 ),
             ),
@@ -224,7 +313,7 @@ def setup(
     # setting lets a user point at a model they supply themselves, and this
     # download must never land under a name it does not own
     default_emb_model = config.MODELS_DIR / "nemo_en_titanet_large.onnx"
-    if default_emb_model.exists():
+    if world.exists(default_emb_model):
         log("[6/6] speaker embedding model — already installed")
     else:
         _report_step(
@@ -232,11 +321,11 @@ def setup(
             now,
             6,
             "downloading speaker embedding model (~97 MB)",
-            lambda: bootstrap.fetch(
+            lambda: world.fetch(
                 "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
                 "speaker-recongition-models/nemo_en_titanet_large.onnx",
                 default_emb_model,
-                tick=lambda read, total: download(
+                lambda read, total: download(
                     _download_line("nemo_en_titanet_large.onnx", read, total)
                 ),
             ),
