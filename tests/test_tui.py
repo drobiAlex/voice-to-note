@@ -1725,6 +1725,31 @@ async def test_a_processed_recording_gets_its_notes_extracted_in_the_same_job(
 
 
 @pytest.mark.asyncio
+async def test_a_processed_recordings_row_shows_extracted_once_the_job_finishes(
+    repo, tmp_path, monkeypatch
+):
+    # the list is redrawn right after storing, before extraction has run; unless
+    # it is redrawn again once extraction succeeds, the row keeps calling itself
+    # transcribed until the reader leaves the project and comes back
+    seed(repo)
+    monkeypatch.setattr(services, "process_memo", stores_a_memo())
+
+    def extract(worker_repo, memo_id, force=False):
+        worker_repo.save_extraction(memo_id, "claude", NOTES)
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", extract)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        await process_file(pilot, recording(tmp_path), "work")
+        await finish_jobs(pilot)
+
+        assert row_for(pilot.app, "standup.m4a")["status"] == "extracted"
+
+
+@pytest.mark.asyncio
 async def test_extraction_failing_after_a_recording_is_stored_still_leaves_it_listed(
     repo, tmp_path, monkeypatch
 ):

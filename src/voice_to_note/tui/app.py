@@ -860,6 +860,7 @@ class MemoApp(App[None]):
             self.call_from_thread(self.notify, str(failed), severity="warning")
         else:
             self._stage(f"memo {result.memo_id} extracted via {backend}")
+            self.call_from_thread(self._reload, self.project)
         return f"{src.name} is memo {result.memo_id}"
 
     def _stage(self, message: str) -> None:
