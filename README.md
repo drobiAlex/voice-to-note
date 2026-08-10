@@ -45,6 +45,8 @@ To upgrade, re-run the installer.
 | `vtn ask <id> <question…>` | ask a question about one memo |
 | `vtn tui` | browse, edit and process memos on one screen |
 
+Running `vtn` with no command opens the TUI too, once setup has run.
+
 `vtn --help` lists the full set (diarize, refine, projects, speaker naming, …).
 
 ## Roadmap

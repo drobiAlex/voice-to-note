@@ -176,6 +176,17 @@ def setup(log: Log = _silent) -> str:
     return "setup complete"
 
 
+def ready() -> bool:
+    """Whether the pipeline has everything it needs to run: every artifact setup
+    installs is on disk, save VAD, which transcription runs fine without."""
+    return (
+        _built(config.WHISPER_BIN)
+        and config.WHISPER_MODEL_PATH.exists()
+        and config.SEG_MODEL_PATH.exists()
+        and config.EMB_MODEL_PATH.exists()
+    )
+
+
 def process_memo(
     repo: Repository,
     src: Path,

@@ -190,7 +190,7 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--version", action="version", version=f"vtn {_version()}")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd")
 
     sp = sub.add_parser("process", help="transcribe an audio file")
     sp.add_argument("file")
@@ -288,6 +288,11 @@ def main() -> None:
     sp.set_defaults(fn=cmd_rename)
 
     args = p.parse_args()
+    if args.cmd is None:
+        # no subcommand at all, as opposed to one argparse already rejected
+        if not services.ready():
+            sys.exit("not set up yet — run: vtn setup (installs whisper.cpp and all models)")
+        args.fn = cmd_tui
     try:
         args.fn(args)
     except (

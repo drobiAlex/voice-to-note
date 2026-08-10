@@ -570,6 +570,37 @@ def test_the_setup_command_forwards_progress_and_completion_to_stdout(monkeypatc
     assert capsys.readouterr().out == "cloning whisper.cpp …\nsetup complete\n"
 
 
+# --- launching bare, with no subcommand -----------------------------------
+
+
+def test_bare_invocation_opens_the_tui_once_setup_has_run(monkeypatch):
+    monkeypatch.setattr(services, "ready", lambda: True)
+    called = []
+    monkeypatch.setattr(cli, "cmd_tui", lambda args: called.append(args))
+
+    run(monkeypatch, StubRepo())
+
+    assert len(called) == 1
+
+
+def test_bare_invocation_without_setup_tells_the_user_to_run_it(monkeypatch):
+    monkeypatch.setattr(services, "ready", lambda: False)
+
+    with pytest.raises(SystemExit) as err:
+        run(monkeypatch, StubRepo())
+
+    assert "vtn setup" in err.value.code
+
+
+def test_explicit_setup_runs_regardless_of_readiness(monkeypatch, capsys):
+    monkeypatch.setattr(services, "ready", lambda: False)
+    monkeypatch.setattr(services, "setup", lambda log: "setup complete")
+
+    run(monkeypatch, StubRepo(), "setup")
+
+    assert capsys.readouterr().out == "setup complete\n"
+
+
 def test_naming_a_speaker_nothing_ends_the_command_with_a_message(monkeypatch, capsys):
     def rename_speaker(_repo, _memo_id, _label, _name):
         raise services.InvalidInput("a speaker needs a name")

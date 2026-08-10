@@ -1188,3 +1188,35 @@ def test_a_vad_download_failure_is_tolerated_rather_than_failing_setup(monkeypat
     assert result == "setup complete"
     assert "download-vad-model.sh" in calls
     assert any("VAD download failed" in line for line in logged)
+
+
+def _write_ready_artifacts(skip: str = "") -> None:
+    """Puts every artifact ready() checks on disk, except the one named to skip."""
+    if skip != "binary":
+        binary = services.config.WHISPER_BIN
+        binary.parent.mkdir(parents=True)
+        binary.write_text("bin")
+        binary.chmod(0o755)
+    services.config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    if skip != "whisper_model":
+        services.config.WHISPER_MODEL_PATH.write_text("model")
+    if skip != "seg_model":
+        services.config.SEG_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        services.config.SEG_MODEL_PATH.write_text("seg")
+    if skip != "emb_model":
+        services.config.EMB_MODEL_PATH.write_text("emb")
+
+
+def test_ready_is_true_once_every_required_artifact_is_on_disk(monkeypatch, tmp_path):
+    configured_paths(monkeypatch, tmp_path)
+    _write_ready_artifacts()
+
+    assert services.ready() is True
+
+
+@pytest.mark.parametrize("skip", ["binary", "whisper_model", "seg_model", "emb_model"])
+def test_ready_is_false_when_one_required_artifact_is_missing(monkeypatch, tmp_path, skip):
+    configured_paths(monkeypatch, tmp_path)
+    _write_ready_artifacts(skip=skip)
+
+    assert services.ready() is False
