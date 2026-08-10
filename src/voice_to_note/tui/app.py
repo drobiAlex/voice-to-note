@@ -714,7 +714,7 @@ class MemoApp(App[None]):
             sidebar = self.query("#projects")
             return bool(sidebar) and self.focused is sidebar.first()
         if action == "step_back":
-            if self.tag is not None:
+            if self.memo_id is not None or self.tag is not None:
                 return True
             sidebar = self.query("#projects")
             on_sidebar = bool(sidebar) and self.focused is sidebar.first()
@@ -1125,21 +1125,28 @@ class MemoApp(App[None]):
         self.push_screen(TagSearch(self.show_tagged))
 
     def action_step_back(self) -> None:
-        """Walks escape back one level at a time: out of a detail pane onto the
-        memo table, out of a tag search onto the project it replaced, and out
-        of the memo table onto the projects list — going no further, since the
-        projects list is the near edge of the screen."""
-        projects = self.query_one("#projects", ListView)
+        """Closes whatever is open before it ever moves focus off it, since
+        escape means close what is in front of you rather than merely look
+        away from it: an open memo goes first, wherever the cursor sitting
+        inside its detail pane has wandered to, and a tag search goes next.
+        Only once neither is open does escape fall back to moving focus
+        toward the projects list, the near edge of the screen: out of a
+        detail pane onto the memo table, and out of the table onto the
+        sidebar."""
         memos = self.query_one("#memos", DataTable)
-        focused = self.focused
-        if focused is not None and focused is not projects and focused is not memos:
+        if self.memo_id is not None:
+            self.clear_memo()
             memos.focus()
             return
         if self.tag is not None:
             self._clear_tag()
             return
+        projects = self.query_one("#projects", ListView)
+        focused = self.focused
         if focused is memos:
             projects.focus()
+        elif focused is not None and focused is not projects:
+            memos.focus()
 
     def _clear_tag(self) -> None:
         """Puts the project back in the list once a tag search has been read.

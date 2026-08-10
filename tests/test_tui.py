@@ -1041,7 +1041,9 @@ async def test_a_tag_of_nothing_is_refused_without_losing_the_modal(repo):
 
 
 @pytest.mark.asyncio
-async def test_escape_from_a_detail_pane_moves_focus_to_the_memo_table(repo):
+async def test_escape_from_inside_the_notes_pane_closes_the_note_rather_than_just_leaving_it(repo):
+    # state beats focus: an open memo is still open no matter where the
+    # cursor has wandered to inside its own detail pane
     work, _home = seed(repo)
 
     async with MemoApp(repo).run_test() as pilot:
@@ -1052,6 +1054,29 @@ async def test_escape_from_a_detail_pane_moves_focus_to_the_memo_table(repo):
         await pilot.press("escape")
         await pilot.pause()
 
+        assert pilot.app.memo_id is None
+        assert pilot.app.focused is memo_table(pilot.app)
+
+
+@pytest.mark.asyncio
+async def test_escape_closes_an_open_memo_before_moving_focus_off_the_table(repo):
+    # the footer's memo keys must go the same moment the note does, or the
+    # screen keeps offering actions that no longer land on anything open
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("enter")  # picks the highlighted project, hands focus to the table
+        await pilot.press("enter")  # picks the highlighted row, opening its memo
+        await pilot.pause()
+        assert pilot.app.memo_id is not None
+        assert pilot.app.focused is memo_table(pilot.app)
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert pilot.app.memo_id is None
+        assert "no memo shown" in notes_pane(pilot).document.source
+        assert await missing(pilot, MEMO_KEYS) == MEMO_KEYS
         assert pilot.app.focused is memo_table(pilot.app)
 
 
