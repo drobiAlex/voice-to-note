@@ -156,7 +156,7 @@ class World:
     mkdir: Callable[[Path], None]
     exists: Callable[[Path], bool]
     built: Callable[[Path], bool]
-    clone: Callable[[Path], None]
+    clone: Callable[[Path, str], None]
     build: Callable[[Path], None]
     script: Callable[[Path, str, list[str]], None]
     fetch: Callable[[str, Path, Callable[[int, int], None]], None]
@@ -201,7 +201,7 @@ def mock_world(sleep: Callable[[float], None] = time.sleep) -> World:
     preview should still be honest about a machine that could not run this
     for real."""
 
-    def clone(_vendor: Path) -> None:
+    def clone(_vendor: Path, _repo_url: str) -> None:
         sleep(0.8)
 
     def build(_vendor: Path) -> None:
@@ -251,7 +251,11 @@ def setup(
         log("[1/6] whisper.cpp source — already installed")
     else:
         _report_step(
-            log, now, 1, "cloning whisper.cpp", lambda: world.clone(config.VENDOR)
+            log,
+            now,
+            1,
+            "cloning whisper.cpp",
+            lambda: world.clone(config.VENDOR, config.WHISPER_REPO_URL),
         )
 
     if world.built(config.WHISPER_BIN):
@@ -681,11 +685,11 @@ class RefineResult:
 
 
 # how many repair windows are asked for at once. A window is almost entirely
-# time spent waiting on a backend, so four of them together turn the minutes a
-# long memo used to take into roughly a quarter of that, while staying modest
-# enough to be a fair neighbour on a subscription CLI. The local fallback queues
-# requests on its own server regardless, so this can only ever help it.
-REFINE_WORKERS = 4
+# time spent waiting on a backend, so several together turn the minutes a long
+# memo used to take into a fraction of that, while staying modest enough to be
+# a fair neighbour on a subscription CLI. The local fallback queues requests on
+# its own server regardless, so this can only ever help it.
+REFINE_WORKERS: int = config.REFINE_WORKERS
 
 
 def _repair_window(chunk: Chunk) -> dict[int, str]:
@@ -713,7 +717,7 @@ def refine_transcript(repo: Repository, memo_id: int, dry_run: bool = False) -> 
     does not repair the same way."""
     require_memo(repo, memo_id)
     segments = repo.segments(memo_id)
-    chunks = chunk_segments(segments)
+    chunks = chunk_segments(segments, chunk_size=config.REFINE_WINDOW)
     with ThreadPoolExecutor(max_workers=REFINE_WORKERS) as pool:
         # map hands the replies back in window order, which is the order
         # merge_refinements pairs them against the windows in

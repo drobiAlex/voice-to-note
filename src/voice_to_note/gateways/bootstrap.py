@@ -39,10 +39,16 @@ def _run(cmd: list[str], what: str) -> None:
         raise GatewayError(f"{what} failed:\n{proc.stderr[-2000:]}")
 
 
-def clone_whisper(vendor: Path) -> None:
-    """Fetches whisper.cpp's source, shallow since only a build comes from it."""
+DEFAULT_WHISPER_REPO_URL = "https://github.com/ggml-org/whisper.cpp"
+
+
+def clone_whisper(vendor: Path, repo_url: str = DEFAULT_WHISPER_REPO_URL) -> None:
+    """Fetches whisper.cpp's source, shallow since only a build comes from it.
+    The caller names the repo to clone rather than this gateway reaching for
+    config itself — a fork or a mirror is a setup-time choice, not this
+    module's to know about."""
     _run(
-        ["git", "clone", "--depth", "1", "https://github.com/ggml-org/whisper.cpp", str(vendor)],
+        ["git", "clone", "--depth", "1", repo_url, str(vendor)],
         "cloning whisper.cpp",
     )
 

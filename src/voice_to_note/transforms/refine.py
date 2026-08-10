@@ -58,15 +58,18 @@ class Chunk:
         return [s.id for s in self.targets if s.id is not None]
 
 
-def chunk_segments(segments: Sequence[Segment]) -> list[Chunk]:
+def chunk_segments(segments: Sequence[Segment], chunk_size: int = CHUNK_SIZE) -> list[Chunk]:
     """Splits a transcript into windows small enough to repair in one request,
-    each carrying the neighbouring lines it needs to make sense of its own."""
+    each carrying the neighbouring lines it needs to make sense of its own.
+    A caller can ask for a different window size without this module ever
+    reaching out for config — transforms take values in, they do not fetch
+    them."""
     if any(s.id is None for s in segments):
         # repairs come back keyed by id; a line without one could never be filed
         raise ValueError("cannot refine a segment with no id — it is not stored yet")
     chunks = []
-    for start in range(0, len(segments), CHUNK_SIZE):
-        stop = start + CHUNK_SIZE
+    for start in range(0, len(segments), chunk_size):
+        stop = start + chunk_size
         chunks.append(
             Chunk(
                 before=list(segments[max(0, start - CONTEXT_SEGMENTS) : start]),

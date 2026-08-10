@@ -600,6 +600,23 @@ def test_refining_runs_on_the_cheaper_refine_model(repo, wav, monkeypatch):
     assert seen["model"] == config.REFINE_MODEL
 
 
+def test_refine_window_setting_controls_the_chunk_size(repo, wav, monkeypatch):
+    memo_id, only = add_transcript(repo, wav, ["so their going to ship on friday"])
+    fake_llm(monkeypatch, claude=refine_reply({only: "So they're going to ship on Friday."}))
+    monkeypatch.setattr(services.config, "REFINE_WINDOW", 7)
+    seen: dict = {}
+
+    def spy(segments, chunk_size=refine.CHUNK_SIZE):
+        seen["chunk_size"] = chunk_size
+        return refine.chunk_segments(segments, chunk_size=chunk_size)
+
+    monkeypatch.setattr(services, "chunk_segments", spy)
+
+    services.refine_transcript(repo, memo_id)
+
+    assert seen["chunk_size"] == 7
+
+
 def test_repair_windows_are_in_flight_at_the_same_time(repo, wav, monkeypatch):
     # one backend round trip per window, taken in turn, is minutes of waiting on
     # a long memo — the wall clock is what makes the feature usable at all
@@ -1388,12 +1405,15 @@ def configured_paths(monkeypatch, tmp_path):
     return vendor
 
 
-def stub_bootstrap(monkeypatch, *, vad_fails=False) -> list:
-    """Fakes every outside-world step setup takes, recording the order they ran in."""
+def stub_bootstrap(monkeypatch, *, vad_fails=False, cloned_urls: list | None = None) -> list:
+    """Fakes every outside-world step setup takes, recording the order they ran in.
+    cloned_urls, if given, also collects the repo url each clone call received."""
     calls: list = []
 
-    def clone(vendor):
+    def clone(vendor, repo_url):
         calls.append("clone")
+        if cloned_urls is not None:
+            cloned_urls.append(repo_url)
         vendor.mkdir(parents=True)
 
     def build(vendor):
@@ -1437,6 +1457,17 @@ def test_setup_runs_every_step_when_nothing_is_on_disk(monkeypatch, tmp_path):
     assert services.config.MODELS_DIR.is_dir()
     assert services.config.DATA_DIR.is_dir()
     assert services.config.UPLOADS_DIR.is_dir()
+
+
+def test_setup_clones_whisper_from_the_configured_repo_url(monkeypatch, tmp_path):
+    configured_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(services.config, "WHISPER_REPO_URL", "https://example.com/mirror.git")
+    cloned_urls: list = []
+    stub_bootstrap(monkeypatch, cloned_urls=cloned_urls)
+
+    services.setup()
+
+    assert cloned_urls == ["https://example.com/mirror.git"]
 
 
 def test_setup_numbers_and_times_each_step_it_actually_runs(monkeypatch, tmp_path):

@@ -90,6 +90,15 @@ SETTINGS: dict[str, Setting] = {
     "llm_backends": Setting("claude,ollama", str, "comma-ordered LLM backends to try"),
     "codex_model": Setting("", str, "codex model override; empty uses the CLI's own default"),
     "gemini_model": Setting("", str, "gemini model override; empty uses the CLI's own default"),
+    "claude_timeout_s": Setting(600, int, "seconds before a stuck claude call is given up on"),
+    "ollama_timeout_s": Setting(1800, int, "seconds before a stuck ollama call is given up on"),
+    "codex_timeout_s": Setting(600, int, "seconds before a stuck codex call is given up on"),
+    "gemini_timeout_s": Setting(600, int, "seconds before a stuck gemini call is given up on"),
+    "refine_workers": Setting(4, int, "repair windows a refine pass runs at once"),
+    "refine_window": Setting(20, int, "transcript lines repaired together in one refine window"),
+    "whisper_repo_url": Setting(
+        "https://github.com/ggml-org/whisper.cpp", str, "whisper.cpp source cloned during setup"
+    ),
 }
 
 _SETTINGS = read_config_file(CONFIG_PATH)
@@ -123,3 +132,13 @@ OLLAMA_MODEL: str = _setting("ollama_model")
 LLM_BACKENDS: str = _setting("llm_backends")
 CODEX_MODEL: str = _setting("codex_model")
 GEMINI_MODEL: str = _setting("gemini_model")
+
+CLAUDE_TIMEOUT_S: int = _setting("claude_timeout_s")
+OLLAMA_TIMEOUT_S: int = _setting("ollama_timeout_s")
+CODEX_TIMEOUT_S: int = _setting("codex_timeout_s")
+GEMINI_TIMEOUT_S: int = _setting("gemini_timeout_s")
+
+REFINE_WORKERS: int = _setting("refine_workers")
+REFINE_WINDOW: int = _setting("refine_window")
+
+WHISPER_REPO_URL: str = _setting("whisper_repo_url")

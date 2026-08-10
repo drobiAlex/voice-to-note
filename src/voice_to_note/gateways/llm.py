@@ -14,12 +14,6 @@ from . import GatewayError
 # an availability check runs ahead of every extraction, so it gives up quickly
 # rather than making the user wait on a backend that is not there
 AVAILABILITY_TIMEOUT_S = 3
-# stuck-call guards, not latency targets: a long transcript legitimately takes
-# minutes, and the local model is the slower of the two
-CLAUDE_TIMEOUT_S = 600
-OLLAMA_TIMEOUT_S = 1800
-CODEX_TIMEOUT_S = 600
-GEMINI_TIMEOUT_S = 600
 
 NOTES_PROMPT = """Extract structured notes from this voice-memo transcript.
 
@@ -140,7 +134,7 @@ def claude_complete(prompt: str, model: str | None = None) -> str:
     try:
         proc = subprocess.run(
             ["claude", "-p", "--model", model or config.CLAUDE_MODEL],
-            input=prompt, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT_S,
+            input=prompt, capture_output=True, text=True, timeout=config.CLAUDE_TIMEOUT_S,
         )
     except FileNotFoundError as e:
         # claude_available() passed moments ago; it can still be gone by now
@@ -160,7 +154,7 @@ def codex_complete(prompt: str, model: str | None = None) -> str:
     cmd = ["codex", "exec", *(["-c", f'model="{m}"'] if m else [])]
     try:
         proc = subprocess.run(
-            cmd, input=prompt, capture_output=True, text=True, timeout=CODEX_TIMEOUT_S,
+            cmd, input=prompt, capture_output=True, text=True, timeout=config.CODEX_TIMEOUT_S,
         )
     except FileNotFoundError as e:
         # codex_available() passed moments ago; it can still be gone by now
@@ -180,7 +174,7 @@ def gemini_complete(prompt: str, model: str | None = None) -> str:
     cmd = ["gemini", "-p", prompt, *(["-m", m] if m else [])]
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=GEMINI_TIMEOUT_S,
+            cmd, capture_output=True, text=True, timeout=config.GEMINI_TIMEOUT_S,
         )
     except FileNotFoundError as e:
         # gemini_available() passed moments ago; it can still be gone by now
@@ -210,7 +204,7 @@ def ollama_complete(prompt: str, schema: dict | None = None) -> str:
         headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT_S) as r:
+        with urllib.request.urlopen(req, timeout=config.OLLAMA_TIMEOUT_S) as r:
             reply = r.read()
     except urllib.error.URLError as e:
         raise BackendError(str(e)) from e
