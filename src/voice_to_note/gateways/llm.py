@@ -3,6 +3,8 @@ import shutil
 import subprocess
 import urllib.error
 import urllib.request
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from .. import config
 from ..domain import Segment
@@ -170,3 +172,36 @@ def ollama_complete(prompt: str, schema: dict | None = None) -> str:
         # ollama answers 200 with an error body when the model was never pulled
         raise BackendError(f"unexpected reply from ollama: {reply[:500]!r}") from e
     return content
+
+
+@dataclass(frozen=True)
+class Backend:
+    """One LLM a caller can be answered by, wired uniformly so the caller
+    trying several in turn need not know each one's own calling convention."""
+
+    name: str
+    available: Callable[[], bool]
+    complete: Callable[[str, dict | None, str | None], str]
+    describe: Callable[[str | None], str]
+
+
+# every function below is looked up by its bare name at call time rather than
+# bound here, so monkeypatching the module attribute — the way tests replace
+# claude_complete or ollama_available — still reaches these entries
+BACKENDS: dict[str, Backend] = {
+    "claude": Backend(
+        name="claude",
+        available=lambda: claude_available(),
+        # the prompt already carries the shape it wants back, so claude has
+        # no separate schema argument to be given
+        complete=lambda prompt, schema, model: claude_complete(prompt, model),
+        describe=lambda model: "claude",
+    ),
+    "ollama": Backend(
+        name="ollama",
+        available=lambda: ollama_available(),
+        # ollama has no per-call model choice; it always runs config.OLLAMA_MODEL
+        complete=lambda prompt, schema, model: ollama_complete(prompt, schema),
+        describe=lambda model: f"ollama/{config.OLLAMA_MODEL}",
+    ),
+}

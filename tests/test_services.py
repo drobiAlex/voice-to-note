@@ -70,6 +70,74 @@ def fake_llm(monkeypatch, *, claude=None, ollama=None) -> list[str]:
     return seen
 
 
+def fake_backend(name, *, available=True, reply=None) -> llm.Backend:
+    """A backend whose availability and reply are fixed for the test, standing
+    in for the registry entries _backends() would otherwise look up by name."""
+    return llm.Backend(
+        name=name,
+        available=lambda: available,
+        complete=lambda prompt, schema, model: (
+            (_ for _ in ()).throw(reply) if isinstance(reply, Exception) else reply
+        ),
+        describe=lambda model: name,
+    )
+
+
+# --- choosing which backends to try -----------------------------------------
+
+
+def test_backends_are_tried_in_the_order_the_setting_names_them(repo, wav, monkeypatch):
+    monkeypatch.setattr(
+        services.llm,
+        "BACKENDS",
+        {"first": fake_backend("first"), "second": fake_backend("second")},
+    )
+    monkeypatch.setattr(services.config, "LLM_BACKENDS", "second,first")
+
+    assert [b.name for b in services._backends()] == ["second", "first"]
+
+
+def test_a_failing_backend_falls_through_to_the_next_one_in_order(repo, wav, monkeypatch):
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Hello", speaker="S1")])
+    monkeypatch.setattr(
+        services.llm,
+        "BACKENDS",
+        {
+            "first": fake_backend("first", reply=llm.BackendError("boom")),
+            "second": fake_backend("second", reply=json.dumps(NOTES)),
+        },
+    )
+    monkeypatch.setattr(services.config, "LLM_BACKENDS", "first,second")
+
+    backend = services.run_extraction(repo, memo_id)
+
+    assert backend == "second"
+
+
+def test_an_unavailable_backend_is_skipped_without_being_called(repo, wav, monkeypatch):
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Hello", speaker="S1")])
+    monkeypatch.setattr(
+        services.llm,
+        "BACKENDS",
+        {
+            "first": fake_backend("first", available=False),
+            "second": fake_backend("second", reply=json.dumps(NOTES)),
+        },
+    )
+    monkeypatch.setattr(services.config, "LLM_BACKENDS", "first,second")
+
+    backend = services.run_extraction(repo, memo_id)
+
+    assert backend == "second"
+
+
+def test_an_unknown_backend_name_in_the_setting_is_rejected(monkeypatch):
+    monkeypatch.setattr(services.config, "LLM_BACKENDS", "claude,not-a-real-backend")
+
+    with pytest.raises(services.InvalidInput, match="not-a-real-backend"):
+        services._backends()
+
+
 def test_processing_gives_the_transcriber_the_audio_duration(repo, tmp_path, monkeypatch):
     # whisper's timeout budget is derived from the duration, so it has to arrive
     src = tmp_path / "standup.m4a"

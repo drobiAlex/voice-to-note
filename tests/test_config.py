@@ -54,6 +54,7 @@ def test_every_setting_resolves_to_its_known_default():
         "refine_model": "haiku",
         "ollama_url": "http://localhost:11434",
         "ollama_model": "qwen3:8b",
+        "llm_backends": "claude,ollama",
     }
 
 

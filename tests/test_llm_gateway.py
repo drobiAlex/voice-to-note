@@ -232,3 +232,53 @@ def test_the_prompt_keeps_speakers_attached_to_their_lines():
 
     assert "Alice" in prompt
     assert "Bob" in prompt
+
+
+# --- the backend registry --------------------------------------------------
+
+
+def test_the_registry_carries_todays_two_backends():
+    assert set(llm.BACKENDS) == {"claude", "ollama"}
+
+
+def test_claudes_label_is_byte_identical_to_todays(monkeypatch):
+    assert llm.BACKENDS["claude"].describe(None) == "claude"
+    assert llm.BACKENDS["claude"].describe("haiku") == "claude"
+
+
+def test_ollamas_label_names_the_configured_model(monkeypatch):
+    monkeypatch.setattr(config, "OLLAMA_MODEL", "qwen3:8b")
+
+    assert llm.BACKENDS["ollama"].describe(None) == "ollama/qwen3:8b"
+
+
+def test_a_backends_available_check_reaches_a_monkeypatched_function(monkeypatch):
+    # BACKENDS is built at import time, so its entries must look the patched
+    # attribute up by name rather than holding the function object they saw then
+    monkeypatch.setattr(llm, "claude_available", lambda: "patched claude")
+    monkeypatch.setattr(llm, "ollama_available", lambda: "patched ollama")
+
+    assert llm.BACKENDS["claude"].available() == "patched claude"
+    assert llm.BACKENDS["ollama"].available() == "patched ollama"
+
+
+def test_claudes_complete_passes_the_model_and_drops_the_schema(monkeypatch):
+    seen: dict = {}
+    monkeypatch.setattr(llm, "claude_complete", lambda prompt, model=None: seen.update(
+        prompt=prompt, model=model
+    ))
+
+    llm.BACKENDS["claude"].complete("summarise this", {"type": "object"}, "haiku")
+
+    assert seen == {"prompt": "summarise this", "model": "haiku"}
+
+
+def test_ollamas_complete_passes_the_schema_and_drops_the_model(monkeypatch):
+    seen: dict = {}
+    monkeypatch.setattr(llm, "ollama_complete", lambda prompt, schema=None: seen.update(
+        prompt=prompt, schema=schema
+    ))
+
+    llm.BACKENDS["ollama"].complete("summarise this", {"type": "object"}, "haiku")
+
+    assert seen == {"prompt": "summarise this", "schema": {"type": "object"}}

@@ -87,6 +87,7 @@ SETTINGS: dict[str, Setting] = {
     "refine_model": Setting("haiku", str, "claude model used for transcript repair"),
     "ollama_url": Setting("http://localhost:11434", str, "ollama server used as a local fallback"),
     "ollama_model": Setting("qwen3:8b", str, "ollama model used as a local fallback"),
+    "llm_backends": Setting("claude,ollama", str, "comma-ordered LLM backends to try"),
 }
 
 _SETTINGS = read_config_file(CONFIG_PATH)
@@ -116,3 +117,5 @@ CLAUDE_MODEL: str = _setting("claude_model")
 REFINE_MODEL: str = _setting("refine_model")
 OLLAMA_URL: str = _setting("ollama_url")
 OLLAMA_MODEL: str = _setting("ollama_model")
+
+LLM_BACKENDS: str = _setting("llm_backends")

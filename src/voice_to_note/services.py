@@ -595,6 +595,23 @@ def transcript_lines(repo: Repository, memo_id: int, *, raw: bool = False) -> st
     )
 
 
+def _backends() -> list[llm.Backend]:
+    """The backends `_complete` tries, in the order config.llm_backends names
+    them, refusing a name this app does not register: a typo in the setting
+    must be caught here rather than silently trying fewer backends than the
+    user asked for."""
+    backends = []
+    for name in config.LLM_BACKENDS.split(","):
+        name = name.strip()
+        if not name:
+            continue
+        backend = llm.BACKENDS.get(name)
+        if backend is None:
+            raise InvalidInput(f"unknown backend: {name} (see: vtn config)")
+        backends.append(backend)
+    return backends
+
+
 def _complete(
     prompt: str,
     schema: dict | None,
@@ -603,21 +620,18 @@ def _complete(
     unavailable: str,
     model: str | None = None,
 ) -> tuple[str, T]:
-    """Gets an answer from the best backend that gives a usable one; a reply
-    that cannot be used demotes that backend rather than failing outright. The
-    model only steers claude: ollama has no equivalent per-call choice, it
-    always runs config.OLLAMA_MODEL."""
+    """Gets an answer from the best backend that gives a usable one, tried in
+    the order config.llm_backends names them; a reply that cannot be used
+    demotes that backend rather than failing outright. The model steers
+    whichever backends accept a per-call choice — others ignore it."""
     errors = []
-    if llm.claude_available():
+    for backend in _backends():
+        if not backend.available():
+            continue
         try:
-            return "claude", parse(llm.claude_complete(prompt, model=model))
+            return backend.describe(model), parse(backend.complete(prompt, schema, model))
         except (llm.BackendError, ValueError) as e:
-            errors.append(f"claude: {e}")
-    if llm.ollama_available():
-        try:
-            return f"ollama/{config.OLLAMA_MODEL}", parse(llm.ollama_complete(prompt, schema))
-        except (llm.BackendError, ValueError) as e:
-            errors.append(f"ollama: {e}")
+            errors.append(f"{backend.name}: {e}")
     if errors:
         raise ExtractionError(f"{failure}: " + "; ".join(errors))
     raise ExtractionError(
