@@ -304,6 +304,43 @@ class AskQuestion(ModalScreen[None]):
         self.dismiss(None)
 
 
+class DiarizeSpeakers(ModalScreen[None]):
+    """How many voices to look for in a redo of speaker detection, left to a
+    guess when that count is not known."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, store: Callable[[str], None]) -> None:
+        """Opens on the way to run the pass with a count pinned or left loose."""
+        super().__init__()
+        self.store = store
+
+    def compose(self) -> ComposeResult:
+        """A line to type a speaker count into, guessed when left blank."""
+        yield Input(placeholder="auto", id="speaker-count")
+
+    def on_mount(self) -> None:
+        """Puts the cursor where the count goes."""
+        self.query_one("#speaker-count", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Runs the pass with whatever they typed."""
+        self._submit(event.value)
+
+    def _submit(self, typed: str) -> None:
+        """Closes only once the pass has actually started."""
+        try:
+            self.store(typed)
+        except services.InvalidInput as refused:
+            self.notify(str(refused), severity="warning")
+            return
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        """Leaves the memo diarized as it was, running nothing."""
+        self.dismiss(None)
+
+
 class Answer(ModalScreen[None]):
     """What one recording had to say to one question."""
 
@@ -818,15 +855,24 @@ class MemoApp(App[None]):
         return f"memo {memo_id} repaired"
 
     def action_diarize(self) -> None:
-        """Runs speaker detection over the memo on screen again."""
+        """Offers to run speaker detection over the memo on screen again,
+        pinning how many voices to look for if that count is known."""
         memo_id = self.memo_id
         if memo_id is None:
             return
-        self._start_memo_job(memo_id, "diarizing", lambda repo: self._diarize(repo, memo_id))
+        self.push_screen(DiarizeSpeakers(lambda typed: self._diarize_count(memo_id, typed)))
 
-    def _diarize(self, repo: Repository, memo_id: int) -> str:
+    def _diarize_count(self, memo_id: int, typed: str) -> None:
+        """Refuses a speaker count that cannot be used here and now, so the
+        modal keeps what was typed, and sends anything else off to a thread."""
+        num_speakers = services.speaker_count(typed)
+        self._start_memo_job(
+            memo_id, "diarizing", lambda repo: self._diarize(repo, memo_id, num_speakers)
+        )
+
+    def _diarize(self, repo: Repository, memo_id: int, num_speakers: int | None = None) -> str:
         """The speaker pass itself, and what to say once it has been stored."""
-        services.rediarize(repo, memo_id)
+        services.rediarize(repo, memo_id, num_speakers=num_speakers)
         return f"memo {memo_id} diarized"
 
     def action_process(self) -> None:

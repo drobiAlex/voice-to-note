@@ -184,6 +184,19 @@ def test_rediarization_refuses_a_speaker_count_below_one(repo, bad_count):
         services.rediarize(repo, 999, num_speakers=bad_count)
 
 
+@pytest.mark.parametrize(
+    "typed, expected", [("", None), ("auto", None), ("AUTO ", None), ("2", 2)]
+)
+def test_speaker_count_parses_what_was_typed(typed, expected):
+    assert services.speaker_count(typed) == expected
+
+
+@pytest.mark.parametrize("typed", ["0", "x"])
+def test_speaker_count_refuses_what_it_cannot_use(typed):
+    with pytest.raises(services.InvalidInput):
+        services.speaker_count(typed)
+
+
 def test_unparseable_claude_output_falls_back_to_ollama(repo, wav, monkeypatch):
     memo_id = add_memo(
         repo,

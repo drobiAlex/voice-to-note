@@ -142,6 +142,21 @@ def _speaker_count(num_speakers: int | None) -> int | None:
     return num_speakers
 
 
+def speaker_count(text: str) -> int | None:
+    """A speaker count as typed into a modal before a redo of speaker
+    detection: blank or "auto" leaves it to be guessed, anything else must
+    actually be one. Public so a screen can refuse one while its modal is
+    still open, rather than after it has closed on the typing."""
+    typed = text.strip()
+    if not typed or typed.lower() == "auto":
+        return None
+    try:
+        count = int(typed)
+    except ValueError:
+        raise InvalidInput(f"not a speaker count: {typed}") from None
+    return _speaker_count(count)
+
+
 def rediarize(
     repo: Repository, memo_id: int, log: Log = _silent, num_speakers: int | None = None
 ) -> list[str]:

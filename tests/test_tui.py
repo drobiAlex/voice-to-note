@@ -1483,6 +1483,116 @@ async def test_an_answer_arrives_even_once_you_have_moved_on(repo, monkeypatch):
         assert "memo 1" in answer_shown(pilot)
 
 
+# --- pinning a speaker count before redoing detection ----------------------
+
+
+async def diarize_speakers(pilot, typed: str) -> None:
+    """Pins a speaker count for a redo of speaker detection, the way a person
+    types one — or leaves the line as it opened, for a guess."""
+    await pilot.press("d")
+    await pilot.pause()
+    pilot.app.screen.query_one("#speaker-count", Input).value = typed
+    await pilot.press("enter")
+
+
+@pytest.mark.asyncio
+async def test_pressing_d_opens_a_modal_asking_how_many_speakers(repo):
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("d")
+        await pilot.pause()
+
+        assert showing(pilot.app, "#speaker-count")
+
+
+@pytest.mark.asyncio
+async def test_a_typed_speaker_count_reaches_rediarization(repo, monkeypatch):
+    work, _home = seed(repo)
+    seen: dict = {}
+    monkeypatch.setattr(
+        services,
+        "rediarize",
+        lambda _r, _i, log=None, num_speakers=None: seen.setdefault(
+            "num_speakers", num_speakers
+        )
+        or ["S1"],
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await diarize_speakers(pilot, "2")
+        await finish_jobs(pilot)
+
+        assert seen["num_speakers"] == 2
+        assert said(pilot) == ["diarizing memo 1 …", "memo 1 diarized"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("typed", ["", "auto"])
+async def test_leaving_the_count_blank_or_auto_leaves_it_to_be_guessed(
+    repo, monkeypatch, typed
+):
+    work, _home = seed(repo)
+    seen: dict = {}
+    monkeypatch.setattr(
+        services,
+        "rediarize",
+        lambda _r, _i, log=None, num_speakers=None: seen.setdefault(
+            "num_speakers", num_speakers
+        )
+        or ["S1"],
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await diarize_speakers(pilot, typed)
+        await finish_jobs(pilot)
+
+        assert seen["num_speakers"] is None
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_speaker_count_is_refused_without_losing_the_modal(
+    repo, monkeypatch
+):
+    # refused while the modal is still open, like every other thing typed into
+    # one: finding out after it closed would mean typing the count again
+    work, _home = seed(repo)
+    ran: list = []
+    monkeypatch.setattr(services, "rediarize", lambda *a, **k: ran.append(k) or ["S1"])
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await diarize_speakers(pilot, "banana")
+        await pilot.pause()
+
+        assert showing(pilot.app, "#speaker-count")
+        assert pilot.app.jobs == set()
+        assert ran == []
+
+
+@pytest.mark.asyncio
+async def test_leaving_the_speaker_count_modal_starts_no_job(repo, monkeypatch):
+    work, _home = seed(repo)
+    ran: list = []
+    monkeypatch.setattr(services, "rediarize", lambda *a, **k: ran.append(k) or ["S1"])
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("d")
+        await pilot.pause()
+        assert showing(pilot.app, "#speaker-count")
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert not showing(pilot.app, "#speaker-count")
+        assert pilot.app.jobs == set()
+        assert ran == []
+
+
 # --- bringing a new recording in ------------------------------------------
 
 
