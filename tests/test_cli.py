@@ -586,6 +586,25 @@ def test_the_setup_command_overwrites_its_own_download_line_on_stderr(monkeypatc
     assert out.err == "\r  model.bin 1.0/2.0 MB (50%)\r  model.bin 2.0/2.0 MB (100%)\n"
 
 
+# --- settings --------------------------------------------------------------
+
+
+def test_the_config_command_prints_the_rows_services_provided(monkeypatch, capsys):
+    monkeypatch.setattr(
+        services,
+        "config_rows",
+        lambda: [("num_speakers", "-1", "default", "speaker count to assume; -1 auto-detects")],
+    )
+
+    run(monkeypatch, StubRepo(), "config")
+
+    out = capsys.readouterr().out
+    assert "num_speakers" in out
+    assert "-1" in out
+    assert "default" in out
+    assert "speaker count to assume" in out
+
+
 # --- launching bare, with no subcommand -----------------------------------
 
 

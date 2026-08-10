@@ -1,6 +1,7 @@
 import os
 import tomllib
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -48,30 +49,70 @@ def resolve(
     return default if raw is None else cast(raw)
 
 
+def source(key: str, env: Mapping[str, str], settings: Mapping[str, Any]) -> str:
+    """Where a setting's effective value actually came from — the same order
+    resolve() falls back through, named for a person to read rather than
+    inferred by them from the value alone."""
+    if f"VTN_{key.upper()}" in env:
+        return "env"
+    if key in settings:
+        return "file"
+    return "default"
+
+
+@dataclass(frozen=True)
+class Setting:
+    """One configurable value, complete enough to resolve and to describe: its
+    default, how to parse it out of text, and what it does. A default and its
+    parser live in the same place, so they cannot drift apart."""
+
+    default: Any
+    cast: Callable[[Any], Any]
+    doc: str
+
+
+SETTINGS: dict[str, Setting] = {
+    "whisper_model": Setting("large-v3-turbo", str, "whisper.cpp model used to transcribe"),
+    "emb_model": Setting(
+        "nemo_en_titanet_large.onnx", str, "model used to embed a voice for speaker matching"
+    ),
+    "num_speakers": Setting(-1, int, "speaker count to assume; -1 auto-detects"),
+    "diar_threshold": Setting(
+        0.5, float, "similarity above which two turns count as the same speaker"
+    ),
+    "match_threshold": Setting(
+        0.5, float, "similarity above which a voice matches a known speaker"
+    ),
+    "claude_model": Setting("sonnet", str, "claude model used for extraction and Q&A"),
+    "refine_model": Setting("haiku", str, "claude model used for transcript repair"),
+    "ollama_url": Setting("http://localhost:11434", str, "ollama server used as a local fallback"),
+    "ollama_model": Setting("qwen3:8b", str, "ollama model used as a local fallback"),
+}
+
 _SETTINGS = read_config_file(CONFIG_PATH)
 
 
-def _setting(key: str, default: T, cast: Callable[[Any], T]) -> T:
-    """One setting, resolved against this machine's environment and config.
-    Every setting states how to read it, so a default and its parser cannot
-    drift apart."""
-    return resolve(key, default, cast, os.environ, _SETTINGS)
+def _setting(key: str) -> Any:
+    """One setting, resolved against this machine's environment and config
+    file by way of what SETTINGS says about it."""
+    setting = SETTINGS[key]
+    return resolve(key, setting.default, setting.cast, os.environ, _SETTINGS)
 
 
-WHISPER_MODEL = _setting("whisper_model", "large-v3-turbo", str)
+WHISPER_MODEL: str = _setting("whisper_model")
 WHISPER_MODEL_PATH = MODELS_DIR / f"ggml-{WHISPER_MODEL}.bin"
 VAD_MODEL_PATH = MODELS_DIR / "ggml-silero-v5.1.2.bin"
 
 SEG_MODEL_PATH = MODELS_DIR / "sherpa-onnx-pyannote-segmentation-3-0" / "model.onnx"
-EMB_MODEL = _setting("emb_model", "nemo_en_titanet_large.onnx", str)
+EMB_MODEL: str = _setting("emb_model")
 EMB_MODEL_PATH = MODELS_DIR / EMB_MODEL
 
-NUM_SPEAKERS = _setting("num_speakers", -1, int)
-DIAR_THRESHOLD = _setting("diar_threshold", 0.5, float)
+NUM_SPEAKERS: int = _setting("num_speakers")
+DIAR_THRESHOLD: float = _setting("diar_threshold")
 
-MATCH_THRESHOLD = _setting("match_threshold", 0.5, float)
+MATCH_THRESHOLD: float = _setting("match_threshold")
 
-CLAUDE_MODEL = _setting("claude_model", "sonnet", str)
-REFINE_MODEL = _setting("refine_model", "haiku", str)
-OLLAMA_URL = _setting("ollama_url", "http://localhost:11434", str)
-OLLAMA_MODEL = _setting("ollama_model", "qwen3:8b", str)
+CLAUDE_MODEL: str = _setting("claude_model")
+REFINE_MODEL: str = _setting("refine_model")
+OLLAMA_URL: str = _setting("ollama_url")
+OLLAMA_MODEL: str = _setting("ollama_model")

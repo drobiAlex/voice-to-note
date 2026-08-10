@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from voice_to_note.config import home, read_config_file, resolve
+from voice_to_note.config import SETTINGS, home, read_config_file, resolve, source
 
 
 def test_home_defaults_to_the_macos_application_support_directory():
@@ -41,3 +41,29 @@ def test_unknown_keys_in_the_config_file_are_ignored(tmp_path):
     settings = read_config_file(path)
     assert resolve("whisper_model", "large-v3-turbo", str, {}, settings) == "small"
     assert resolve("num_speakers", -1, int, {}, settings) == -1
+
+
+def test_every_setting_resolves_to_its_known_default():
+    assert {key: setting.default for key, setting in SETTINGS.items()} == {
+        "whisper_model": "large-v3-turbo",
+        "emb_model": "nemo_en_titanet_large.onnx",
+        "num_speakers": -1,
+        "diar_threshold": 0.5,
+        "match_threshold": 0.5,
+        "claude_model": "sonnet",
+        "refine_model": "haiku",
+        "ollama_url": "http://localhost:11434",
+        "ollama_model": "qwen3:8b",
+    }
+
+
+def test_source_is_env_when_the_environment_variable_is_set():
+    assert source("num_speakers", {"VTN_NUM_SPEAKERS": "3"}, {"num_speakers": 2}) == "env"
+
+
+def test_source_is_file_when_only_the_config_file_has_it():
+    assert source("num_speakers", {}, {"num_speakers": 2}) == "file"
+
+
+def test_source_is_default_when_neither_is_set():
+    assert source("num_speakers", {}, {}) == "default"

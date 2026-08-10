@@ -347,6 +347,21 @@ def ready() -> bool:
     )
 
 
+def config_rows() -> list[tuple[str, str, str, str]]:
+    """Every setting `vtn config` lists, in the order the registry defines
+    them: its key, the value actually in effect on this machine, where that
+    value came from, and what it does."""
+    return [
+        (
+            key,
+            str(config._setting(key)),
+            config.source(key, os.environ, config._SETTINGS),
+            setting.doc,
+        )
+        for key, setting in config.SETTINGS.items()
+    ]
+
+
 def process_memo(
     repo: Repository,
     src: Path,

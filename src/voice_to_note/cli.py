@@ -183,6 +183,17 @@ def cmd_ask(args: argparse.Namespace) -> None:
     print(answer)
 
 
+def cmd_config(args: argparse.Namespace) -> None:
+    """Lists every setting: the value in effect, where it came from, and what
+    it does."""
+    rows = services.config_rows()
+    key_w = max(len(key) for key, _, _, _ in rows)
+    value_w = max(len(value) for _, value, _, _ in rows)
+    source_w = max(len(source) for _, _, source, _ in rows)
+    for key, value, source, doc in rows:
+        print(f"{key:<{key_w}}  {value:<{value_w}}  {source:<{source_w}}  {doc}")
+
+
 def cmd_tui(args: argparse.Namespace) -> None:
     """Opens the memo browser."""
     # textual costs about as much to import as the whole rest of the app, and
@@ -297,6 +308,10 @@ def main() -> None:
         "--mock", action="store_true", help="preview the install flow without installing anything"
     )
     sp.set_defaults(fn=cmd_setup)
+
+    sub.add_parser(
+        "config", help="list settings and where each value comes from"
+    ).set_defaults(fn=cmd_config)
 
     sub.add_parser(
         "tui", help="browse, edit and process memos on one screen"
