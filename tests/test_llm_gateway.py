@@ -177,6 +177,136 @@ def test_claude_complete_uses_the_model_it_is_given(monkeypatch):
     assert seen["cmd"][-1] == "haiku"
 
 
+# --- talking to codex (opt-in) ---------------------------------------------
+
+
+def test_a_codex_that_vanished_after_the_check_is_a_backend_failure(monkeypatch):
+    def run(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "codex")
+
+    monkeypatch.setattr(llm.subprocess, "run", run)
+
+    with pytest.raises(llm.BackendError, match="codex"):
+        llm.codex_complete("summarise this")
+
+
+def test_a_failing_codex_call_reports_what_it_printed(monkeypatch):
+    monkeypatch.setattr(
+        llm.subprocess,
+        "run",
+        lambda *a, **k: llm.subprocess.CompletedProcess(a[0], 1, "", "rate limited"),
+    )
+
+    with pytest.raises(llm.BackendError, match="rate limited"):
+        llm.codex_complete("summarise this")
+
+
+def test_codex_complete_passes_the_prompt_on_stdin_with_no_model_flag_by_default(monkeypatch):
+    monkeypatch.setattr(config, "CODEX_MODEL", "")
+    seen: dict = {}
+
+    def run(cmd, **kwargs):
+        seen["cmd"], seen["input"] = cmd, kwargs.get("input")
+        return llm.subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr(llm.subprocess, "run", run)
+
+    llm.codex_complete("summarise this")
+
+    assert seen["cmd"] == ["codex", "exec"]
+    assert seen["input"] == "summarise this"
+
+
+def test_codex_complete_passes_the_model_it_is_given(monkeypatch):
+    seen: dict = {}
+
+    def run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return llm.subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr(llm.subprocess, "run", run)
+
+    llm.codex_complete("summarise this", model="gpt-5")
+
+    assert seen["cmd"] == ["codex", "exec", "-c", 'model="gpt-5"']
+
+
+def test_codex_complete_falls_back_to_the_configured_model(monkeypatch):
+    monkeypatch.setattr(config, "CODEX_MODEL", "gpt-5-mini")
+    seen: dict = {}
+
+    def run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return llm.subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr(llm.subprocess, "run", run)
+
+    llm.codex_complete("summarise this")
+
+    assert seen["cmd"] == ["codex", "exec", "-c", 'model="gpt-5-mini"']
+
+
+# --- talking to gemini (opt-in, not installed on this machine) -------------
+
+
+def test_gemini_is_unavailable_when_the_binary_is_not_on_the_path(monkeypatch):
+    monkeypatch.setattr(llm.shutil, "which", lambda _name: None)
+
+    assert llm.gemini_available() is False
+
+
+def test_a_gemini_that_vanished_after_the_check_is_a_backend_failure(monkeypatch):
+    def run(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "gemini")
+
+    monkeypatch.setattr(llm.subprocess, "run", run)
+
+    with pytest.raises(llm.BackendError, match="gemini"):
+        llm.gemini_complete("summarise this")
+
+
+def test_a_failing_gemini_call_reports_what_it_printed(monkeypatch):
+    monkeypatch.setattr(
+        llm.subprocess,
+        "run",
+        lambda *a, **k: llm.subprocess.CompletedProcess(a[0], 1, "", "quota exceeded"),
+    )
+
+    with pytest.raises(llm.BackendError, match="quota exceeded"):
+        llm.gemini_complete("summarise this")
+
+
+def test_gemini_complete_passes_the_prompt_as_an_argument_with_no_model_flag_by_default(
+    monkeypatch,
+):
+    monkeypatch.setattr(config, "GEMINI_MODEL", "")
+    seen: dict = {}
+
+    def run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return llm.subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr(llm.subprocess, "run", run)
+
+    llm.gemini_complete("summarise this")
+
+    assert seen["cmd"] == ["gemini", "-p", "summarise this"]
+
+
+def test_gemini_complete_passes_the_model_it_is_given(monkeypatch):
+    seen: dict = {}
+
+    def run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return llm.subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr(llm.subprocess, "run", run)
+
+    llm.gemini_complete("summarise this", model="gemini-2.5-pro")
+
+    assert seen["cmd"] == ["gemini", "-p", "summarise this", "-m", "gemini-2.5-pro"]
+
+
 # --- asking for a transcript repair ---------------------------------------
 
 
@@ -237,8 +367,8 @@ def test_the_prompt_keeps_speakers_attached_to_their_lines():
 # --- the backend registry --------------------------------------------------
 
 
-def test_the_registry_carries_todays_two_backends():
-    assert set(llm.BACKENDS) == {"claude", "ollama"}
+def test_the_registry_carries_all_four_backends():
+    assert set(llm.BACKENDS) == {"claude", "ollama", "codex", "gemini"}
 
 
 def test_claudes_label_is_byte_identical_to_todays(monkeypatch):
@@ -252,14 +382,48 @@ def test_ollamas_label_names_the_configured_model(monkeypatch):
     assert llm.BACKENDS["ollama"].describe(None) == "ollama/qwen3:8b"
 
 
+def test_codexs_label_is_bare_when_nothing_is_configured(monkeypatch):
+    # a caller's override is a claude model name — codex must never wear it
+    monkeypatch.setattr(config, "CODEX_MODEL", "")
+
+    assert llm.BACKENDS["codex"].describe(None) == "codex"
+    assert llm.BACKENDS["codex"].describe("haiku") == "codex"
+
+
+def test_codexs_label_carries_the_configured_model_regardless_of_any_override(monkeypatch):
+    monkeypatch.setattr(config, "CODEX_MODEL", "gpt-5-mini")
+
+    assert llm.BACKENDS["codex"].describe(None) == "codex/gpt-5-mini"
+    assert llm.BACKENDS["codex"].describe("haiku") == "codex/gpt-5-mini"
+
+
+def test_geminis_label_is_bare_when_nothing_is_configured(monkeypatch):
+    # a caller's override is a claude model name — gemini must never wear it
+    monkeypatch.setattr(config, "GEMINI_MODEL", "")
+
+    assert llm.BACKENDS["gemini"].describe(None) == "gemini"
+    assert llm.BACKENDS["gemini"].describe("haiku") == "gemini"
+
+
+def test_geminis_label_carries_the_configured_model_regardless_of_any_override(monkeypatch):
+    monkeypatch.setattr(config, "GEMINI_MODEL", "gemini-2.5-pro")
+
+    assert llm.BACKENDS["gemini"].describe(None) == "gemini/gemini-2.5-pro"
+    assert llm.BACKENDS["gemini"].describe("haiku") == "gemini/gemini-2.5-pro"
+
+
 def test_a_backends_available_check_reaches_a_monkeypatched_function(monkeypatch):
     # BACKENDS is built at import time, so its entries must look the patched
     # attribute up by name rather than holding the function object they saw then
     monkeypatch.setattr(llm, "claude_available", lambda: "patched claude")
     monkeypatch.setattr(llm, "ollama_available", lambda: "patched ollama")
+    monkeypatch.setattr(llm, "codex_available", lambda: "patched codex")
+    monkeypatch.setattr(llm, "gemini_available", lambda: "patched gemini")
 
     assert llm.BACKENDS["claude"].available() == "patched claude"
     assert llm.BACKENDS["ollama"].available() == "patched ollama"
+    assert llm.BACKENDS["codex"].available() == "patched codex"
+    assert llm.BACKENDS["gemini"].available() == "patched gemini"
 
 
 def test_claudes_complete_passes_the_model_and_drops_the_schema(monkeypatch):
@@ -282,3 +446,29 @@ def test_ollamas_complete_passes_the_schema_and_drops_the_model(monkeypatch):
     llm.BACKENDS["ollama"].complete("summarise this", {"type": "object"}, "haiku")
 
     assert seen == {"prompt": "summarise this", "schema": {"type": "object"}}
+
+
+def test_codexs_complete_drops_both_the_schema_and_the_callers_model_override(monkeypatch):
+    # a caller's override is a claude model name; codex must run only what
+    # it is itself configured with, never a model meant for another backend
+    seen: dict = {}
+    monkeypatch.setattr(llm, "codex_complete", lambda prompt, model=None: seen.update(
+        prompt=prompt, model=model
+    ))
+
+    llm.BACKENDS["codex"].complete("summarise this", {"type": "object"}, "haiku")
+
+    assert seen == {"prompt": "summarise this", "model": None}
+
+
+def test_geminis_complete_drops_both_the_schema_and_the_callers_model_override(monkeypatch):
+    # a caller's override is a claude model name; gemini must run only what
+    # it is itself configured with, never a model meant for another backend
+    seen: dict = {}
+    monkeypatch.setattr(llm, "gemini_complete", lambda prompt, model=None: seen.update(
+        prompt=prompt, model=model
+    ))
+
+    llm.BACKENDS["gemini"].complete("summarise this", {"type": "object"}, "haiku")
+
+    assert seen == {"prompt": "summarise this", "model": None}

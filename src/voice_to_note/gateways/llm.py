@@ -18,6 +18,8 @@ AVAILABILITY_TIMEOUT_S = 3
 # minutes, and the local model is the slower of the two
 CLAUDE_TIMEOUT_S = 600
 OLLAMA_TIMEOUT_S = 1800
+CODEX_TIMEOUT_S = 600
+GEMINI_TIMEOUT_S = 600
 
 NOTES_PROMPT = """Extract structured notes from this voice-memo transcript.
 
@@ -106,6 +108,16 @@ def claude_available() -> bool:
     return shutil.which("claude") is not None
 
 
+def codex_available() -> bool:
+    """Whether the opt-in backend is installed on this machine."""
+    return shutil.which("codex") is not None
+
+
+def gemini_available() -> bool:
+    """Whether the opt-in backend is installed on this machine."""
+    return shutil.which("gemini") is not None
+
+
 def ollama_available() -> bool:
     """Whether the local fallback is running and has the model pulled."""
     try:
@@ -137,6 +149,46 @@ def claude_complete(prompt: str, model: str | None = None) -> str:
         raise BackendError(str(e)) from e
     if proc.returncode != 0:
         raise BackendError(f"claude -p failed: {proc.stderr[-500:]}")
+    return proc.stdout
+
+
+def codex_complete(prompt: str, model: str | None = None) -> str:
+    """Asks Codex, through the CLI the user already signed in to. Nothing
+    configured and nothing asked for here leaves the model choice to the CLI
+    itself, rather than this app guessing at one on its behalf."""
+    m = model or config.CODEX_MODEL
+    cmd = ["codex", "exec", *(["-c", f'model="{m}"'] if m else [])]
+    try:
+        proc = subprocess.run(
+            cmd, input=prompt, capture_output=True, text=True, timeout=CODEX_TIMEOUT_S,
+        )
+    except FileNotFoundError as e:
+        # codex_available() passed moments ago; it can still be gone by now
+        raise BackendError(f"codex could not be run: {e}") from e
+    except subprocess.TimeoutExpired as e:
+        raise BackendError(str(e)) from e
+    if proc.returncode != 0:
+        raise BackendError(f"codex exec failed: {proc.stderr[-500:]}")
+    return proc.stdout
+
+
+def gemini_complete(prompt: str, model: str | None = None) -> str:
+    """Asks Gemini, through the CLI the user already signed in to. Nothing
+    configured and nothing asked for here leaves the model choice to the CLI
+    itself, rather than this app guessing at one on its behalf."""
+    m = model or config.GEMINI_MODEL
+    cmd = ["gemini", "-p", prompt, *(["-m", m] if m else [])]
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=GEMINI_TIMEOUT_S,
+        )
+    except FileNotFoundError as e:
+        # gemini_available() passed moments ago; it can still be gone by now
+        raise BackendError(f"gemini could not be run: {e}") from e
+    except subprocess.TimeoutExpired as e:
+        raise BackendError(str(e)) from e
+    if proc.returncode != 0:
+        raise BackendError(f"gemini -p failed: {proc.stderr[-500:]}")
     return proc.stdout
 
 
@@ -185,9 +237,23 @@ class Backend:
     describe: Callable[[str | None], str]
 
 
+def _model_label(name: str, model: str | None, configured: str) -> str:
+    """A backend's label carrying the model actually used, once some choice —
+    the caller's override, or the one it is configured with — was actually
+    made; the bare name alone once neither said anything, which leaves the
+    call running on the CLI's own default."""
+    effective = model or configured
+    return f"{name}/{effective}" if effective else name
+
+
 # every function below is looked up by its bare name at call time rather than
 # bound here, so monkeypatching the module attribute — the way tests replace
 # claude_complete or ollama_available — still reaches these entries
+#
+# a per-task override reaching _complete (e.g. refine's config.REFINE_MODEL)
+# is always a claude model name, since claude is the only backend a caller
+# can steer per call; codex and gemini ignore it and run whatever they are
+# configured with, or their CLI's own default when that is empty too
 BACKENDS: dict[str, Backend] = {
     "claude": Backend(
         name="claude",
@@ -203,5 +269,17 @@ BACKENDS: dict[str, Backend] = {
         # ollama has no per-call model choice; it always runs config.OLLAMA_MODEL
         complete=lambda prompt, schema, model: ollama_complete(prompt, schema),
         describe=lambda model: f"ollama/{config.OLLAMA_MODEL}",
+    ),
+    "codex": Backend(
+        name="codex",
+        available=lambda: codex_available(),
+        complete=lambda prompt, schema, model: codex_complete(prompt),
+        describe=lambda model: _model_label("codex", None, config.CODEX_MODEL),
+    ),
+    "gemini": Backend(
+        name="gemini",
+        available=lambda: gemini_available(),
+        complete=lambda prompt, schema, model: gemini_complete(prompt),
+        describe=lambda model: _model_label("gemini", None, config.GEMINI_MODEL),
     ),
 }

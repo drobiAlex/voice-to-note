@@ -88,6 +88,8 @@ SETTINGS: dict[str, Setting] = {
     "ollama_url": Setting("http://localhost:11434", str, "ollama server used as a local fallback"),
     "ollama_model": Setting("qwen3:8b", str, "ollama model used as a local fallback"),
     "llm_backends": Setting("claude,ollama", str, "comma-ordered LLM backends to try"),
+    "codex_model": Setting("", str, "codex model override; empty uses the CLI's own default"),
+    "gemini_model": Setting("", str, "gemini model override; empty uses the CLI's own default"),
 }
 
 _SETTINGS = read_config_file(CONFIG_PATH)
@@ -119,3 +121,5 @@ OLLAMA_URL: str = _setting("ollama_url")
 OLLAMA_MODEL: str = _setting("ollama_model")
 
 LLM_BACKENDS: str = _setting("llm_backends")
+CODEX_MODEL: str = _setting("codex_model")
+GEMINI_MODEL: str = _setting("gemini_model")

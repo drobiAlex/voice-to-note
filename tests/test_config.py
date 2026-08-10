@@ -55,6 +55,8 @@ def test_every_setting_resolves_to_its_known_default():
         "ollama_url": "http://localhost:11434",
         "ollama_model": "qwen3:8b",
         "llm_backends": "claude,ollama",
+        "codex_model": "",
+        "gemini_model": "",
     }
 
 
