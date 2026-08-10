@@ -1,6 +1,10 @@
+import multiprocessing
 import wave
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
+from typing import TypeVar
 
 import numpy as np
 import sherpa_onnx
@@ -24,6 +28,8 @@ MODEL_THREADS = 4
 MIN_SPEECH_S = 0.3
 MIN_SILENCE_S = 0.5
 
+T = TypeVar("T")
+
 
 def load_wav(path: Path) -> np.ndarray:
     """Reads a converted recording into memory for the speaker models."""
@@ -45,12 +51,46 @@ def _embedding_config() -> sherpa_onnx.SpeakerEmbeddingExtractorConfig:
     )
 
 
+def _isolated(fn: Callable[..., T], /, *args: object) -> T:
+    """Runs one piece of work in a child process of its own and waits for the
+    answer. The wait is on inter-process communication, which leaves the
+    calling thread interruptible — the point of paying for a process at all.
+    The child is started fresh and shut down again with the call, so nothing
+    outlives the work it was made for."""
+    # spawn, not fork: fork copies a process that has already loaded onnx
+    # runtime threads into a child that cannot safely use them
+    ctx = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
+        return pool.submit(fn, *args).result()
+
+
 def diarize(wav: Path, num_speakers: int | None = None) -> list[Turn]:
     """Works out who spoke when. A caller who already knows how many voices
     are on the recording can pin that count; left unset, the configured
-    default is used to guess it instead."""
+    default is used to guess it instead.
+
+    The work happens in a child process because the diarizer never yields the
+    interpreter while it runs — minutes of it on a long memo — and a caller
+    that had to sit through that in-process would take the whole app's
+    interface down with it, however carefully it had moved off the main
+    thread."""
+    # the check belongs on this side of the boundary: a user who has not run
+    # setup yet should hear so at once, not after waiting for a process to start
     if not config.SEG_MODEL_PATH.exists() or not config.EMB_MODEL_PATH.exists():
         raise GatewayError("diarization models missing — run ./run.sh first")
+    try:
+        return _isolated(_diarize_here, wav, num_speakers)
+    except BrokenProcessPool as e:
+        # the child died without saying why — anything it raised would have
+        # arrived intact instead
+        raise GatewayError(f"diarization crashed — {e}") from e
+
+
+def _diarize_here(wav: Path, num_speakers: int | None) -> list[Turn]:
+    """The diarization itself, wherever it is asked to run. It reads its
+    settings from config like everything else: a child process re-imports the
+    app and inherits the environment, so it derives the same settings the
+    caller would have used."""
     cfg = sherpa_onnx.OfflineSpeakerDiarizationConfig(
         segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
             pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(
