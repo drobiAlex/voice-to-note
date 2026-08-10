@@ -2578,3 +2578,70 @@ async def test_a_tag_search_fills_the_same_table_with_the_same_columns(repo):
         await search_tag(pilot, "release")
 
         assert row_for(pilot.app, "interview.m4a")["speakers"] == "2"
+
+
+# --- settings, read and changed without leaving the app --------------------
+
+
+def settings_table(pilot) -> DataTable:
+    """The table listing every setting, once the settings screen is open."""
+    return pilot.app.screen.query_one("#settings", DataTable)
+
+
+def settings_keys(pilot) -> list[str]:
+    """The settings the table is showing, read down its key column."""
+    table = settings_table(pilot)
+    return [str(table.get_row_at(i)[0]) for i in range(table.row_count)]
+
+
+@pytest.mark.asyncio
+async def test_pressing_shift_s_opens_the_settings_screen(repo):
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("S")
+        await pilot.pause()
+
+        assert showing(pilot.app, "#settings")
+        assert "num_speakers" in settings_keys(pilot)
+
+
+@pytest.mark.asyncio
+async def test_editing_a_setting_writes_it_through_services(repo, monkeypatch):
+    written: dict = {}
+    monkeypatch.setattr(
+        services,
+        "config_set",
+        lambda key, value: written.setdefault(key, value) or f"{key} set to {value}",
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("S")
+        await pilot.pause()
+        table = settings_table(pilot)
+        table.move_cursor(row=table.get_row_index("num_speakers"))
+        await pilot.press("enter")
+        await pilot.pause()
+        pilot.app.screen.query_one("#setting-value", Input).value = "3"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert written == {"num_speakers": "3"}
+
+
+@pytest.mark.asyncio
+async def test_pressing_u_restores_the_highlighted_setting_to_default(repo, monkeypatch):
+    unset: list = []
+    monkeypatch.setattr(
+        services,
+        "config_unset",
+        lambda key: unset.append(key) or f"{key} unset",
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("S")
+        await pilot.pause()
+        table = settings_table(pilot)
+        table.move_cursor(row=table.get_row_index("num_speakers"))
+        await pilot.press("u")
+        await pilot.pause()
+
+        assert unset == ["num_speakers"]

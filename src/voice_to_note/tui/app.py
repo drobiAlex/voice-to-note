@@ -509,6 +509,107 @@ class ConfirmRemove(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class EditSetting(ModalScreen[None]):
+    """One setting's value, open to be typed over. Opens on what is actually
+    in effect now, whether that came from vtn.toml, the environment, or the
+    setting's own default."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, key: str, current: str, store: Callable[[str, str], None]) -> None:
+        """Opens on one setting's current value and the way to write over it."""
+        super().__init__()
+        self.key = key
+        self.current = current
+        self.store = store
+
+    def compose(self) -> ComposeResult:
+        """The value, ready to be typed over."""
+        yield Input(self.current, id="setting-value")
+
+    def on_mount(self) -> None:
+        """Puts the cursor in the value."""
+        self.query_one("#setting-value", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Writes whatever they left on the line."""
+        self._submit(event.value)
+
+    def _submit(self, typed: str) -> None:
+        """Closes only once the setting has actually been written."""
+        try:
+            self.store(self.key, typed)
+        except services.InvalidInput as refused:
+            self.notify(str(refused), severity="warning")
+            return
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        """Leaves the setting as it was."""
+        self.dismiss(None)
+
+
+class SettingsScreen(ModalScreen[None]):
+    """Every setting `vtn config` lists, open to be read and changed from
+    inside the app: its key, the value actually in effect, where that value
+    came from, and what it does."""
+
+    BINDINGS = [
+        ("u", "restore_default", "Restore default"),
+        ("escape", "close", "Close"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        """A table of every setting, one row each."""
+        yield DataTable(id="settings", cursor_type="row")
+
+    def on_mount(self) -> None:
+        """Lays out the columns once, since only the rows change from here on,
+        and draws the settings as they stand right now."""
+        table = self.query_one("#settings", DataTable)
+        for column in ("key", "value", "source", "doc"):
+            table.add_column(column, key=column)
+        self._refresh()
+        table.focus()
+
+    def _refresh(self) -> None:
+        """Redraws every row from what is actually in effect now, each one
+        keyed by the setting's own name so the row under the cursor can still
+        be read back once the table under it has changed."""
+        table = self.query_one("#settings", DataTable)
+        table.clear()
+        for key, value, source, doc in services.config_rows():
+            table.add_row(key, value, source, doc, key=key)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Opens the highlighted setting for editing."""
+        # the app behind this modal listens for row selections of its own,
+        # on the memo table this screen has nothing to do with
+        event.stop()
+        key = str(event.row_key.value)
+        current = str(self.query_one("#settings", DataTable).get_cell(event.row_key, "value"))
+        self.app.push_screen(EditSetting(key, current, self._set))
+
+    def _set(self, key: str, value: str) -> None:
+        """Writes the setting, then redraws the table so its row says where
+        the value now comes from."""
+        self.notify(services.config_set(key, value))
+        self._refresh()
+
+    def action_restore_default(self) -> None:
+        """Drops the highlighted setting back to its default."""
+        table = self.query_one("#settings", DataTable)
+        if table.row_count == 0:
+            return
+        key = str(table.ordered_rows[table.cursor_row].key.value)
+        self.notify(services.config_unset(key))
+        self._refresh()
+
+    def action_close(self) -> None:
+        """Puts the app back in front of them."""
+        self.dismiss(None)
+
+
 class NotesPane(MarkdownViewer):
     """One memo's notes, with their headings listed beside them so a long note
     can be jumped around rather than scrolled through.
@@ -628,6 +729,7 @@ class MemoApp(App[None]):
         ("R", "rename_project", "Rename project"),
         ("X", "remove_project", "Empty project"),
         ("slash", "find_tag", "Find tag"),
+        ("S", "settings", "Settings"),
         ("escape", "step_back", "Back"),
         ("q", "quit", "Quit"),
     ]
@@ -1123,6 +1225,11 @@ class MemoApp(App[None]):
     def action_find_tag(self) -> None:
         """Offers to look for a tag across every project at once."""
         self.push_screen(TagSearch(self.show_tagged))
+
+    def action_settings(self) -> None:
+        """Opens every setting `vtn config` would list, to be read and changed
+        without leaving the app."""
+        self.push_screen(SettingsScreen())
 
     def action_step_back(self) -> None:
         """Closes whatever is open before it ever moves focus off it, since
