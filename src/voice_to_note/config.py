@@ -23,6 +23,7 @@ DATA_DIR = ROOT / "data"
 UPLOADS_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "voice_to_note.db"
 CONFIG_PATH = ROOT / "vtn.toml"
+TEMPLATES_DIR = ROOT / "templates"
 
 T = TypeVar("T")
 

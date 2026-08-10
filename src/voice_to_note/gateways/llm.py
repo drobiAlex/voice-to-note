@@ -41,12 +41,7 @@ Rules:
 Transcript:
 """
 
-ASK_PROMPT = """Answer the question using only this voice-memo transcript. Reference speakers and timestamps where helpful. If the answer is not in the transcript, say so plainly. Be concise.
-
-Question: {question}
-
-Transcript:
-{transcript}"""
+ASK_PROMPT = """Answer the question using only this voice-memo transcript. Reference speakers and timestamps where helpful. If the answer is not in the transcript, say so plainly. Be concise."""
 
 
 REFINE_PROMPT = """Repair the transcription errors in these lines of a voice-memo transcript.
@@ -68,18 +63,40 @@ Lines:
 """
 
 
+# every static prompt block a caller can put a saved override in front of.
+# the JSON shape each reply must come back in is enforced by the parser that
+# reads it, not by this text, so an override can reword the ask but not the
+# answer a caller downstream is prepared to accept
+TEMPLATES: dict[str, str] = {
+    "notes": NOTES_PROMPT,
+    "refine": REFINE_PROMPT,
+    "ask": ASK_PROMPT,
+}
+
+
+def template(name: str) -> str:
+    """One prompt template's effective text: a user's saved override if
+    `config.TEMPLATES_DIR/<name>.md` exists, else the text this app ships
+    with. Read from disk on every call, so editing the file takes hold on the
+    very next LLM call rather than waiting for a restart."""
+    override = config.TEMPLATES_DIR / f"{name}.md"
+    if override.exists():
+        return override.read_text()
+    return TEMPLATES[name]
+
+
 class BackendError(GatewayError):
     """A backend was installed but the call to it failed."""
 
 
 def notes_prompt(transcript: str) -> str:
     """Asks for the notes in the exact shape the app can store."""
-    return NOTES_PROMPT + transcript
+    return template("notes") + transcript
 
 
 def ask_prompt(transcript: str, question: str) -> str:
     """Asks a question in a way that keeps the answer inside the transcript."""
-    return ASK_PROMPT.format(question=question, transcript=transcript)
+    return f"{template('ask')}\n\nQuestion: {question}\n\nTranscript:\n{transcript}"
 
 
 def _refine_line(segment: Segment, *, readonly: bool) -> str:
@@ -94,7 +111,7 @@ def refine_prompt(chunk: Chunk) -> str:
     lines = [_refine_line(s, readonly=True) for s in chunk.before]
     lines += [_refine_line(s, readonly=False) for s in chunk.targets]
     lines += [_refine_line(s, readonly=True) for s in chunk.after]
-    return REFINE_PROMPT + "\n".join(lines)
+    return template("refine") + "\n".join(lines)
 
 
 def claude_available() -> bool:

@@ -450,6 +450,48 @@ def config_reset() -> str:
     return "all settings reset to default (takes effect on next start)"
 
 
+def _template_override_path(name: str) -> Path:
+    """Where a saved override for one prompt template would live."""
+    return config.TEMPLATES_DIR / f"{name}.md"
+
+
+def _registered_template(name: str) -> None:
+    """Refuses a template name this app does not ship: `vtn template` lists
+    every name it will accept."""
+    if name not in llm.TEMPLATES:
+        raise InvalidInput(
+            f"unknown template: {name} — valid names: {', '.join(llm.TEMPLATES)}"
+        )
+
+
+def template_rows() -> list[tuple[str, str]]:
+    """Every prompt template this app ships, and whether a saved override is
+    shadowing its built-in text."""
+    return [
+        (name, "overridden" if _template_override_path(name).exists() else "built-in")
+        for name in llm.TEMPLATES
+    ]
+
+
+def template_text(name: str) -> str:
+    """One template's effective text: a saved override if the user wrote one,
+    else the text this app ships with."""
+    _registered_template(name)
+    return llm.template(name)
+
+
+def template_reset(name: str) -> str:
+    """Deletes a template's override file, restoring the built-in text. A
+    template already at its built-in text is left alone rather than reporting
+    a restore that did nothing."""
+    _registered_template(name)
+    path = _template_override_path(name)
+    if not path.exists():
+        return f"{name} is already built-in"
+    path.unlink()
+    return f"{name} restored to built-in"
+
+
 def process_memo(
     repo: Repository,
     src: Path,

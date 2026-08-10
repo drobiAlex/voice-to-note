@@ -620,6 +620,50 @@ def test_config_set_routes_the_typed_key_and_value_to_services(monkeypatch, caps
     assert capsys.readouterr().err == "whisper_model set to small\n"
 
 
+def test_template_show_routes_the_typed_name_to_services(monkeypatch, capsys):
+    seen = {}
+
+    def fake_template_text(name):
+        seen["call"] = name
+        return "a custom notes prompt"
+
+    monkeypatch.setattr(services, "template_text", fake_template_text)
+
+    run(monkeypatch, StubRepo(), "template", "show", "notes")
+
+    assert seen["call"] == "notes"
+    assert capsys.readouterr().out == "a custom notes prompt\n"
+
+
+def test_template_reset_routes_the_typed_name_to_services(monkeypatch, capsys):
+    seen = {}
+
+    def fake_template_reset(name):
+        seen["call"] = name
+        return "notes restored to built-in"
+
+    monkeypatch.setattr(services, "template_reset", fake_template_reset)
+
+    run(monkeypatch, StubRepo(), "template", "reset", "notes")
+
+    assert seen["call"] == "notes"
+    assert capsys.readouterr().err == "notes restored to built-in\n"
+
+
+def test_the_bare_template_command_lists_names_and_status(monkeypatch, capsys):
+    monkeypatch.setattr(
+        services, "template_rows", lambda: [("notes", "built-in"), ("refine", "overridden")]
+    )
+
+    run(monkeypatch, StubRepo(), "template")
+
+    out = capsys.readouterr().out
+    assert "notes" in out
+    assert "built-in" in out
+    assert "refine" in out
+    assert "overridden" in out
+
+
 # --- launching bare, with no subcommand -----------------------------------
 
 

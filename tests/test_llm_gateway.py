@@ -33,6 +33,34 @@ def tags(*names: str) -> bytes:
     return json.dumps({"models": [{"name": n} for n in names]}).encode()
 
 
+# --- prompt templates -----------------------------------------------------
+
+
+def test_a_template_reads_as_built_in_absent_an_override_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "TEMPLATES_DIR", tmp_path)
+
+    assert llm.template("notes") == llm.TEMPLATES["notes"]
+
+
+def test_a_template_override_file_shadows_the_built_in_text(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "TEMPLATES_DIR", tmp_path)
+    (tmp_path / "notes.md").write_text("a custom notes prompt")
+
+    assert llm.template("notes") == "a custom notes prompt"
+
+
+def test_an_edited_override_file_is_read_fresh_on_every_call(monkeypatch, tmp_path):
+    # no restart should be needed to pick up a hand-edited template
+    monkeypatch.setattr(config, "TEMPLATES_DIR", tmp_path)
+    override = tmp_path / "refine.md"
+    override.write_text("first")
+    assert llm.template("refine") == "first"
+
+    override.write_text("second")
+
+    assert llm.template("refine") == "second"
+
+
 # --- the prompts ---------------------------------------------------------
 
 

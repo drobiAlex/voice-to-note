@@ -3,7 +3,7 @@ import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from . import services
+from . import config, services
 from .gateways import GatewayError
 from .storage.repository import Repository
 
@@ -209,6 +209,25 @@ def cmd_config_reset(args: argparse.Namespace) -> None:
     status(services.config_reset())
 
 
+def cmd_template(args: argparse.Namespace) -> None:
+    """Lists every prompt template: whether it is built-in or a saved
+    override, and where an override file would go."""
+    for name, state in services.template_rows():
+        print(f"{name:<8} {state:<10} {config.TEMPLATES_DIR / f'{name}.md'}")
+    status(f'\nwrite a custom one with: vtn template show <name> > "{config.TEMPLATES_DIR}/<name>.md"')
+
+
+def cmd_template_show(args: argparse.Namespace) -> None:
+    """Prints one template's effective text: a saved override if there is
+    one, else the text this app ships with."""
+    print(services.template_text(args.name))
+
+
+def cmd_template_reset(args: argparse.Namespace) -> None:
+    """Deletes a template's override file, restoring the built-in text."""
+    status(services.template_reset(args.name))
+
+
 def cmd_tui(args: argparse.Namespace) -> None:
     """Opens the memo browser."""
     # textual costs about as much to import as the whole rest of the app, and
@@ -342,6 +361,22 @@ def main() -> None:
     config_sub.add_parser(
         "reset", help="clear every setting back to its default"
     ).set_defaults(fn=cmd_config_reset)
+
+    sp = sub.add_parser(
+        "template", help="list, show or reset the built-in LLM prompts: template show|reset"
+    )
+    sp.set_defaults(fn=cmd_template)
+    template_sub = sp.add_subparsers(dest="template_cmd")
+
+    tsp = template_sub.add_parser("show", help="print a template's effective text: template show <name>")
+    tsp.add_argument("name")
+    tsp.set_defaults(fn=cmd_template_show)
+
+    tsp = template_sub.add_parser(
+        "reset", help="restore a template to its built-in text: template reset <name>"
+    )
+    tsp.add_argument("name")
+    tsp.set_defaults(fn=cmd_template_reset)
 
     sub.add_parser(
         "tui", help="browse, edit and process memos on one screen"

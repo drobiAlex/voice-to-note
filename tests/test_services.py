@@ -1348,6 +1348,66 @@ def test_setting_a_value_warns_when_an_env_override_still_wins(config_path, monk
     assert "still wins" in message
 
 
+# --- prompt templates --------------------------------------------------------
+
+
+@pytest.fixture
+def templates_dir(monkeypatch, tmp_path):
+    """Points template reads and writes at a scratch directory instead of the
+    real one, so a test never touches a saved override on the machine
+    running it."""
+    path = tmp_path / "templates"
+    monkeypatch.setattr(config, "TEMPLATES_DIR", path)
+    return path
+
+
+def test_every_registered_template_starts_out_built_in(templates_dir):
+    assert services.template_rows() == [(name, "built-in") for name in llm.TEMPLATES]
+
+
+def test_an_override_file_marks_its_template_overridden(templates_dir):
+    templates_dir.mkdir()
+    (templates_dir / "notes.md").write_text("custom")
+
+    rows = dict(services.template_rows())
+
+    assert rows["notes"] == "overridden"
+    assert rows["refine"] == "built-in"
+
+
+def test_template_text_returns_the_built_in_text_absent_an_override(templates_dir):
+    assert services.template_text("notes") == llm.TEMPLATES["notes"]
+
+
+def test_template_text_returns_a_saved_override(templates_dir):
+    templates_dir.mkdir()
+    (templates_dir / "ask").with_suffix(".md").write_text("custom ask prompt")
+
+    assert services.template_text("ask") == "custom ask prompt"
+
+
+def test_an_unknown_template_name_is_refused(templates_dir):
+    with pytest.raises(services.InvalidInput, match="unknown template: bogus"):
+        services.template_text("bogus")
+
+
+def test_resetting_an_overridden_template_deletes_its_file(templates_dir):
+    templates_dir.mkdir()
+    override = templates_dir / "notes.md"
+    override.write_text("custom")
+
+    message = services.template_reset("notes")
+
+    assert not override.exists()
+    assert "restored" in message
+
+
+def test_resetting_a_template_already_built_in_reports_so_without_erroring(templates_dir):
+    message = services.template_reset("refine")
+
+    assert "already built-in" in message
+
+
 def test_unsetting_a_value_removes_it_from_the_file(config_path):
     config_path.write_text('whisper_model = "small"\nnum_speakers = 2\n')
 
