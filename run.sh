@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
+export VTN_HOME="$PWD"
 
 REPO=vendor/whisper.cpp
 MODELS_DIR=models

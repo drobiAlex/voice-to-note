@@ -1,4 +1,14 @@
-from voice_to_note.config import read_config_file, resolve
+from pathlib import Path
+
+from voice_to_note.config import home, read_config_file, resolve
+
+
+def test_home_defaults_to_the_macos_application_support_directory():
+    assert home({}) == Path.home() / "Library" / "Application Support" / "vtn"
+
+
+def test_home_uses_vtn_home_when_set():
+    assert home({"VTN_HOME": "/tmp/somewhere"}) == Path("/tmp/somewhere")
 
 
 def test_env_var_beats_the_config_file():

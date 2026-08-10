@@ -4,7 +4,17 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, TypeVar
 
-ROOT = Path(__file__).resolve().parents[2]
+
+def home(env: Mapping[str, str]) -> Path:
+    """Where the app keeps everything (models, data, config): VTN_HOME if
+    set, else the macOS application-support directory. Read from the
+    environment only — vtn.toml lives inside this directory, so it cannot
+    name its own location."""
+    raw = env.get("VTN_HOME")
+    return Path(raw) if raw else Path.home() / "Library" / "Application Support" / "vtn"
+
+
+ROOT = home(os.environ)
 VENDOR = ROOT / "vendor" / "whisper.cpp"
 WHISPER_BIN = VENDOR / "build" / "bin" / "whisper-cli"
 MODELS_DIR = ROOT / "models"
