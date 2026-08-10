@@ -1036,6 +1036,76 @@ async def test_a_tag_of_nothing_is_refused_without_losing_the_modal(repo):
         assert [str(n.message) for n in pilot.app._notifications] == ["a tag needs some text"]
 
 
+# --- escape stepping back one level at a time -----------------------------
+
+
+@pytest.mark.asyncio
+async def test_escape_from_a_detail_pane_moves_focus_to_the_memo_table(repo):
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        notes_pane(pilot).table_of_contents.query_one(Tree).focus()
+        await pilot.pause()
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert pilot.app.focused is memo_table(pilot.app)
+
+
+@pytest.mark.asyncio
+async def test_escape_from_the_memo_table_moves_focus_to_the_projects_list(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("enter")  # picks the highlighted project, hands focus to the table
+        await pilot.pause()
+        assert pilot.app.focused is memo_table(pilot.app)
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert pilot.app.focused is pilot.app.query_one("#projects", ListView)
+
+
+@pytest.mark.asyncio
+async def test_escape_on_the_projects_list_with_no_tag_showing_does_nothing(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("enter")  # onto the memo table
+        await pilot.pause()
+        await pilot.press("escape")  # back onto the projects list
+        await pilot.pause()
+        before = memo_names(pilot.app)
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert pilot.app.focused is pilot.app.query_one("#projects", ListView)
+        assert memo_names(pilot.app) == before
+
+
+@pytest.mark.asyncio
+async def test_escape_clears_a_tag_search_when_focus_is_on_the_projects_list(repo):
+    # a tag search is opened with the sidebar still focused, so this is the
+    # ordinary case rather than an edge one
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("personal")
+        await pilot.pause()
+        await search_tag(pilot, "release")
+        assert pilot.app.focused is pilot.app.query_one("#projects", ListView)
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert memo_names(pilot.app) == ["shopping.m4a"]
+        assert pilot.app.sub_title == ""
+
+
 # --- work that takes long enough to happen off the main thread ------------
 
 

@@ -553,7 +553,7 @@ class MemoApp(App[None]):
         ("R", "rename_project", "Rename project"),
         ("X", "remove_project", "Empty project"),
         ("slash", "find_tag", "Find tag"),
-        ("escape", "clear_tag", "Back to project"),
+        ("escape", "step_back", "Back"),
         ("q", "quit", "Quit"),
     ]
 
@@ -622,8 +622,12 @@ class MemoApp(App[None]):
             # checked while the screen is still being built, before there is one
             sidebar = self.query("#projects")
             return bool(sidebar) and self.focused is sidebar.first()
-        if action == "clear_tag":
-            return self.tag is not None
+        if action == "step_back":
+            if self.tag is not None:
+                return True
+            sidebar = self.query("#projects")
+            on_sidebar = bool(sidebar) and self.focused is sidebar.first()
+            return self.focused is not None and not on_sidebar
         return True
 
     def load_projects(self) -> None:
@@ -899,10 +903,27 @@ class MemoApp(App[None]):
         """Offers to look for a tag across every project at once."""
         self.push_screen(TagSearch(self.show_tagged))
 
-    def action_clear_tag(self) -> None:
+    def action_step_back(self) -> None:
+        """Walks escape back one level at a time: out of a detail pane onto the
+        memo table, out of a tag search onto the project it replaced, and out
+        of the memo table onto the projects list — going no further, since the
+        projects list is the near edge of the screen."""
+        projects = self.query_one("#projects", ListView)
+        memos = self.query_one("#memos", DataTable)
+        focused = self.focused
+        if focused is not None and focused is not projects and focused is not memos:
+            memos.focus()
+            return
+        if self.tag is not None:
+            self._clear_tag()
+            return
+        if focused is memos:
+            projects.focus()
+
+    def _clear_tag(self) -> None:
         """Puts the project back in the list once a tag search has been read.
-        With no search showing there is nothing to come back from, so escape
-        stays out of the way of everything else."""
+        With no search showing there is nothing to come back from, so the
+        escape ladder never reaches this rung in that case."""
         if self.tag is None:
             return
         if self.project is None:
