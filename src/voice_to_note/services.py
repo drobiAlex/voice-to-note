@@ -134,15 +134,28 @@ def process_memo(
     return ProcessResult(memo_id, len(segs), labels, language)
 
 
-def rediarize(repo: Repository, memo_id: int, log: Log = _silent) -> list[str]:
-    """Runs speaker detection over a memo again, keeping the names people gave."""
+def _speaker_count(num_speakers: int | None) -> int | None:
+    """A speaker count pinned for re-diarization, refusing one that could not
+    describe any recording: a memo always has at least one voice on it."""
+    if num_speakers is not None and num_speakers < 1:
+        raise InvalidInput(f"speaker count must be at least 1, got {num_speakers}")
+    return num_speakers
+
+
+def rediarize(
+    repo: Repository, memo_id: int, log: Log = _silent, num_speakers: int | None = None
+) -> list[str]:
+    """Runs speaker detection over a memo again, keeping the names people gave.
+    A caller who knows how many voices are on the recording can pin that
+    count instead of leaving it to be guessed."""
+    num_speakers = _speaker_count(num_speakers)
     memo = require_memo(repo, memo_id)
     wav = Path(memo.wav_path)
     if not wav.exists():
         raise NotFound(f"wav missing: {wav}")
     keep_names = repo.named_speakers(memo_id)
     log(f"diarizing memo {memo_id} …")
-    turns = sherpa.diarize(wav)
+    turns = sherpa.diarize(wav, num_speakers)
     segs = assign_speakers(repo.segments(memo_id), turns)
     labels, speakers, matches = _identify(repo, wav, turns, keep_names, exclude=memo_id)
     repo.save_diarization(memo_id, segs, speakers)

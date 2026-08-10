@@ -45,8 +45,10 @@ def _embedding_config() -> sherpa_onnx.SpeakerEmbeddingExtractorConfig:
     )
 
 
-def diarize(wav: Path) -> list[Turn]:
-    """Works out who spoke when."""
+def diarize(wav: Path, num_speakers: int | None = None) -> list[Turn]:
+    """Works out who spoke when. A caller who already knows how many voices
+    are on the recording can pin that count; left unset, the configured
+    default is used to guess it instead."""
     if not config.SEG_MODEL_PATH.exists() or not config.EMB_MODEL_PATH.exists():
         raise GatewayError("diarization models missing — run ./run.sh first")
     cfg = sherpa_onnx.OfflineSpeakerDiarizationConfig(
@@ -58,7 +60,8 @@ def diarize(wav: Path) -> list[Turn]:
         ),
         embedding=_embedding_config(),
         clustering=sherpa_onnx.FastClusteringConfig(
-            num_clusters=config.NUM_SPEAKERS, threshold=config.DIAR_THRESHOLD
+            num_clusters=num_speakers if num_speakers is not None else config.NUM_SPEAKERS,
+            threshold=config.DIAR_THRESHOLD,
         ),
         min_duration_on=MIN_SPEECH_S,
         min_duration_off=MIN_SILENCE_S,

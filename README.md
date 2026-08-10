@@ -24,7 +24,7 @@ LLM — `claude` if you have it, or a local Ollama model; the transcript needs n
 | `vtn show <id>` | print a memo's transcript |
 | `vtn notes <id>` | print the extracted notes |
 | `vtn extract <id>` | (re)run note extraction; `--force` replaces notes you edited |
-| `vtn diarize <id>` | (re)run diarization on a stored memo |
+| `vtn diarize <id>` | (re)run diarization; `--speakers N` pins the count instead of auto-detecting |
 | `vtn refine <id>` | repair transcription errors; `--diff` shows them without storing |
 | `vtn ask <id> <question…>` | ask a question about one memo |
 | `vtn info <id>` | what state a memo is in, and when it last changed |

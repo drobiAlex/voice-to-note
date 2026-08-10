@@ -43,7 +43,7 @@ def add_memo(repo, wav, *, segments=(), speakers=(), filename="memo.m4a") -> int
 
 
 def fake_diarization(monkeypatch, turns, embeddings) -> None:
-    monkeypatch.setattr(services.sherpa, "diarize", lambda _wav: list(turns))
+    monkeypatch.setattr(services.sherpa, "diarize", lambda _wav, num_speakers=None: list(turns))
     monkeypatch.setattr(services.sherpa, "speaker_embeddings", lambda _wav, _turns: dict(embeddings))
 
 
@@ -144,6 +144,44 @@ def test_an_unnamed_speaker_is_auto_named_from_another_memo(repo, wav, monkeypat
 
     assert repo.display_names(memo_id) == {"S1": "Bob"}
     assert log[-1] == "  S1 sounds like Bob (similarity 1.00) — auto-named"
+
+
+def test_rediarization_forwards_a_pinned_speaker_count_to_sherpa(repo, wav, monkeypatch):
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Hello", speaker="S1")])
+    seen: dict = {}
+
+    def diarize(_wav, num_speakers=None):
+        seen["num_speakers"] = num_speakers
+        return [Turn(0, 1000, "S1")]
+
+    monkeypatch.setattr(services.sherpa, "diarize", diarize)
+    monkeypatch.setattr(services.sherpa, "speaker_embeddings", lambda _wav, _turns: {})
+
+    services.rediarize(repo, memo_id, num_speakers=3)
+
+    assert seen["num_speakers"] == 3
+
+
+def test_rediarization_without_a_speaker_count_leaves_it_to_sherpa(repo, wav, monkeypatch):
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Hello", speaker="S1")])
+    seen: dict = {}
+
+    def diarize(_wav, num_speakers=None):
+        seen["num_speakers"] = num_speakers
+        return [Turn(0, 1000, "S1")]
+
+    monkeypatch.setattr(services.sherpa, "diarize", diarize)
+    monkeypatch.setattr(services.sherpa, "speaker_embeddings", lambda _wav, _turns: {})
+
+    services.rediarize(repo, memo_id)
+
+    assert seen["num_speakers"] is None
+
+
+@pytest.mark.parametrize("bad_count", [0, -3])
+def test_rediarization_refuses_a_speaker_count_below_one(repo, bad_count):
+    with pytest.raises(services.InvalidInput, match="speaker"):
+        services.rediarize(repo, 999, num_speakers=bad_count)
 
 
 def test_unparseable_claude_output_falls_back_to_ollama(repo, wav, monkeypatch):

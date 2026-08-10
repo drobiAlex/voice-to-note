@@ -527,6 +527,34 @@ def test_re_extracting_can_be_told_to_overwrite_an_edited_note(monkeypatch, caps
     assert seen == {"memo_id": 3, "force": True}
 
 
+def test_diarizing_can_be_told_how_many_speakers_to_look_for(monkeypatch, capsys):
+    seen: dict = {}
+
+    def rediarize(_repo, memo_id, log=None, num_speakers=None):
+        seen["memo_id"], seen["num_speakers"] = memo_id, num_speakers
+        return ["S1", "S2", "S3"]
+
+    monkeypatch.setattr(services, "rediarize", rediarize)
+
+    run(monkeypatch, StubRepo(), "diarize", "3", "--speakers", "3")
+
+    assert seen == {"memo_id": 3, "num_speakers": 3}
+
+
+def test_diarizing_without_a_speaker_count_leaves_it_to_auto_detect(monkeypatch, capsys):
+    seen: dict = {}
+
+    def rediarize(_repo, memo_id, log=None, num_speakers=None):
+        seen["num_speakers"] = num_speakers
+        return ["S1"]
+
+    monkeypatch.setattr(services, "rediarize", rediarize)
+
+    run(monkeypatch, StubRepo(), "diarize", "3")
+
+    assert seen["num_speakers"] is None
+
+
 def test_naming_a_speaker_nothing_ends_the_command_with_a_message(monkeypatch, capsys):
     def rename_speaker(_repo, _memo_id, _label, _name):
         raise services.InvalidInput("a speaker needs a name")

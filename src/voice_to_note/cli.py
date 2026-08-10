@@ -112,7 +112,7 @@ def cmd_show(args: argparse.Namespace) -> None:
 def cmd_diarize(args: argparse.Namespace) -> None:
     """Redoes speaker detection when the first pass got voices wrong."""
     with Repository() as repo:
-        labels = services.rediarize(repo, args.id, log=status)
+        labels = services.rediarize(repo, args.id, log=status, num_speakers=args.speakers)
     status(f"done — {len(labels)} speakers: {', '.join(labels)}")
 
 
@@ -232,6 +232,13 @@ def main() -> None:
 
     sp = sub.add_parser("diarize", help="(re)run diarization on an existing memo")
     sp.add_argument("id", type=int)
+    sp.add_argument(
+        "--speakers",
+        type=int,
+        default=None,
+        metavar="N",
+        help="pin the number of speakers instead of auto-detecting",
+    )
     sp.set_defaults(fn=cmd_diarize)
 
     sp = sub.add_parser("refine", help="repair transcription errors in a memo")
