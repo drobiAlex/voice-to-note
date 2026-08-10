@@ -105,10 +105,10 @@ def test_a_reply_that_is_not_json_is_refused():
         refine.parse_refinements("I could not repair that transcript.", [0])
 
 
-def test_a_reply_that_drops_a_line_is_refused_by_id():
-    # silently keeping the original would hide that the model ignored the line
-    with pytest.raises(ValueError, match="7"):
-        refine.parse_refinements(reply({6: "Fixed."}), [6, 7])
+def test_a_reply_that_drops_a_line_is_read_for_what_it_did_answer():
+    # a weaker model that leaves lines out must not fail the whole pass over
+    # it — the omission is surfaced downstream, by whoever accepts repairs
+    assert refine.parse_refinements(reply({6: "Fixed."}), [6, 7]) == {6: "Fixed."}
 
 
 def test_a_reply_inventing_a_line_is_refused_by_id():
@@ -274,6 +274,17 @@ def test_lines_nobody_repaired_come_back_unchanged():
 
     assert text == {0: "first line", 1: "Second line."}
     assert flagged == []
+
+
+def test_a_line_a_window_was_asked_about_but_never_answered_is_flagged():
+    # repairs.get(id) alone cannot tell "never targeted" from "skipped by the
+    # model" apart — targeted is what makes the difference visible
+    segments = [seg(0, "first line"), seg(1, "second line")]
+
+    text, flagged = refine.accept_repairs(segments, {1: "Second line."}, targeted=[0, 1])
+
+    assert text == {0: "first line", 1: "Second line."}
+    assert flagged == [0]
 
 
 def test_the_reply_schema_requires_an_id_and_text_on_every_entry():

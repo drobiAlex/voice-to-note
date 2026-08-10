@@ -446,6 +446,27 @@ def test_a_repair_identical_to_the_original_counts_as_untouched(repo, wav, monke
     assert result.changes == []
 
 
+def test_a_line_a_window_left_out_of_its_reply_is_flagged_not_lost(repo, wav, monkeypatch):
+    # a weaker repair model can leave lines out of its reply; the pass must
+    # still complete, with the omitted line surfaced instead of silently kept
+    memo_id, first, second = add_transcript(
+        repo, wav, ["so their going to ship on friday", "yeah we agreed on that"]
+    )
+    fake_llm(monkeypatch, claude=refine_reply({first: "So they're going to ship on Friday."}))
+
+    result = services.refine_transcript(repo, memo_id)
+
+    stored = repo.segments(memo_id)
+    assert [s.text for s in stored] == [
+        "so their going to ship on friday",
+        "yeah we agreed on that",
+    ]
+    assert stored[1].refined_text is None
+    assert result.flagged == [second]
+    assert len(result.changes) == 1
+    assert result.untouched == 0
+
+
 def test_a_dry_run_shows_the_repairs_without_storing_any(repo, wav, monkeypatch):
     memo_id, only = add_transcript(repo, wav, ["so their going to ship on friday"])
     fake_llm(monkeypatch, claude=refine_reply({only: "So they're going to ship on Friday."}))

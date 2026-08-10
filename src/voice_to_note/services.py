@@ -558,8 +558,9 @@ class Change:
 
 @dataclass(frozen=True)
 class RefineResult:
-    """What a repair pass did: the lines it changed, the lines whose repair was
-    refused as a rewrite, and the count it found nothing to fix in."""
+    """What a repair pass did: the lines it changed, the lines flagged — either
+    a rewrite the pass refused to accept, or a line a window never answered
+    for — and the count it found nothing to fix in."""
 
     changes: list[Change]
     flagged: list[int]
@@ -592,9 +593,11 @@ def _repair_window(chunk: Chunk) -> dict[int, str]:
 def refine_transcript(repo: Repository, memo_id: int, dry_run: bool = False) -> RefineResult:
     """Repairs transcription errors a window at a time, several windows at once,
     reading each line in the company of its neighbours. A line the model changed
-    past recognition keeps the words that were actually transcribed, and is
-    reported instead. A pass replaces the memo's whole refinement, so running it
-    again reverts any line this pass does not repair the same way."""
+    past recognition, or never answered for at all, keeps the words that were
+    actually transcribed and is reported instead — a weaker model that leaves
+    lines out of a reply must not fail the whole pass over it. A pass replaces
+    the memo's whole refinement, so running it again reverts any line this pass
+    does not repair the same way."""
     require_memo(repo, memo_id)
     segments = repo.segments(memo_id)
     chunks = chunk_segments(segments)
@@ -602,7 +605,8 @@ def refine_transcript(repo: Repository, memo_id: int, dry_run: bool = False) -> 
         # map hands the replies back in window order, which is the order
         # merge_refinements pairs them against the windows in
         replies = list(pool.map(_repair_window, chunks))
-    final, flagged = accept_repairs(segments, merge_refinements(chunks, replies))
+    targeted = {tid for chunk in chunks for tid in chunk.target_ids}
+    final, flagged = accept_repairs(segments, merge_refinements(chunks, replies), targeted)
     changes = [
         Change(s.id, s.text, final[s.id])
         for s in segments

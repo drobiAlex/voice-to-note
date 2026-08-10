@@ -1,5 +1,5 @@
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
@@ -78,8 +78,12 @@ def chunk_segments(segments: Sequence[Segment]) -> list[Chunk]:
 
 
 def parse_refinements(text: str, expected_ids: Sequence[int]) -> dict[int, str]:
-    """Reads a repair reply, refusing one that would quietly drop a line or add
-    a line nobody asked about — either would corrupt the stored transcript."""
+    """Reads a repair reply and returns whatever repairs it actually contains.
+    A weaker model can leave lines out of its reply; silence about a line is
+    not an error here — it means the line stays as heard, and it is on the
+    caller to notice and surface that. A repair for a line nobody asked about
+    is still refused outright: it could only have landed there by accident,
+    and filing it would corrupt a line the reply was never meant to touch."""
     text = text.strip()
     if "<think>" in text and "</think>" in text:
         text = text.split("</think>", 1)[1]
@@ -108,9 +112,6 @@ def parse_refinements(text: str, expected_ids: Sequence[int]) -> dict[int, str]:
         repaired[seg_id] = entry["text"]
 
     expected = set(expected_ids)
-    missing = sorted(expected - repaired.keys())
-    if missing:
-        raise ValueError(f"reply left out segments: {missing}")
     invented = sorted(repaired.keys() - expected)
     if invented:
         raise ValueError(f"reply returned segments nobody asked for: {invented}")
@@ -157,18 +158,28 @@ def _is_repair(original: str, repaired: str) -> bool:
 
 
 def accept_repairs(
-    segments: Sequence[Segment], repairs: Mapping[int, str]
+    segments: Sequence[Segment],
+    repairs: Mapping[int, str],
+    targeted: Collection[int] = (),
 ) -> tuple[dict[int, str], list[int]]:
     """The text to keep for every line, and the lines whose repair was refused.
     A refused line keeps its original wording: a transcript with known
-    transcription errors is worth more than one quietly rewritten."""
+    transcription errors is worth more than one quietly rewritten.
+
+    targeted is the ids a repair window was actually asked to answer for; a
+    line missing from repairs otherwise reads as one nobody asked about, so
+    without it a line the model silently skipped would settle in as untouched
+    rather than being flagged like any other refused repair."""
     text: dict[int, str] = {}
     flagged: list[int] = []
     for s in segments:
         if s.id is None:
             continue
         repaired = repairs.get(s.id)
-        if repaired is not None and not _is_repair(s.text, repaired):
+        if repaired is None and s.id in targeted:
+            text[s.id] = s.text
+            flagged.append(s.id)
+        elif repaired is not None and not _is_repair(s.text, repaired):
             text[s.id] = s.text
             flagged.append(s.id)
         else:
