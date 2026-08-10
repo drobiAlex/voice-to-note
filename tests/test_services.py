@@ -1061,3 +1061,130 @@ def test_a_speaker_name_is_tidied_before_it_is_stored(repo, wav):
     services.rename_speaker(repo, memo_id, "S1", "  Alice  ")
 
     assert services.speakers(repo, memo_id) == {"S1": "Alice"}
+
+
+# --- installing whisper.cpp and its models --------------------------------
+
+
+def configured_paths(monkeypatch, tmp_path):
+    """Points every setup path at a scratch directory, mirroring config.py's layout."""
+    vendor = tmp_path / "vendor" / "whisper.cpp"
+    models = tmp_path / "models"
+    monkeypatch.setattr(services.config, "VENDOR", vendor)
+    monkeypatch.setattr(services.config, "WHISPER_BIN", vendor / "build" / "bin" / "whisper-cli")
+    monkeypatch.setattr(services.config, "MODELS_DIR", models)
+    monkeypatch.setattr(services.config, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(services.config, "UPLOADS_DIR", tmp_path / "data" / "uploads")
+    monkeypatch.setattr(services.config, "WHISPER_MODEL", "large-v3-turbo")
+    monkeypatch.setattr(services.config, "WHISPER_MODEL_PATH", models / "ggml-large-v3-turbo.bin")
+    monkeypatch.setattr(services.config, "VAD_MODEL_PATH", models / "ggml-silero-v5.1.2.bin")
+    monkeypatch.setattr(
+        services.config,
+        "SEG_MODEL_PATH",
+        models / "sherpa-onnx-pyannote-segmentation-3-0" / "model.onnx",
+    )
+    monkeypatch.setattr(services.config, "EMB_MODEL_PATH", models / "nemo_en_titanet_large.onnx")
+    return vendor
+
+
+def stub_bootstrap(monkeypatch, *, vad_fails=False) -> list:
+    """Fakes every outside-world step setup takes, recording the order they ran in."""
+    calls: list = []
+
+    def clone(vendor):
+        calls.append("clone")
+        vendor.mkdir(parents=True)
+
+    def build(vendor):
+        calls.append("build")
+        binary = vendor / "build" / "bin" / "whisper-cli"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("bin")
+        binary.chmod(0o755)
+
+    def download(vendor, script, args):
+        calls.append(script)
+        if script == "download-vad-model.sh" and vad_fails:
+            raise services.bootstrap.GatewayError("network unreachable")
+
+    monkeypatch.setattr(services.bootstrap, "require_tools", lambda: calls.append("tools"))
+    monkeypatch.setattr(services.bootstrap, "clone_whisper", clone)
+    monkeypatch.setattr(services.bootstrap, "build_whisper", build)
+    monkeypatch.setattr(services.bootstrap, "download_model_script", download)
+    monkeypatch.setattr(services.bootstrap, "fetch_tar_bz2", lambda url, dst: calls.append("seg"))
+    monkeypatch.setattr(services.bootstrap, "fetch", lambda url, dst: calls.append("emb"))
+    return calls
+
+
+def test_setup_runs_every_step_when_nothing_is_on_disk(monkeypatch, tmp_path):
+    configured_paths(monkeypatch, tmp_path)
+    calls = stub_bootstrap(monkeypatch)
+
+    result = services.setup()
+
+    assert result == "setup complete"
+    assert calls == [
+        "tools", "clone", "build",
+        "download-ggml-model.sh", "download-vad-model.sh", "seg", "emb",
+    ]
+    assert services.config.MODELS_DIR.is_dir()
+    assert services.config.DATA_DIR.is_dir()
+    assert services.config.UPLOADS_DIR.is_dir()
+
+
+def test_cloning_happens_before_building(monkeypatch, tmp_path):
+    configured_paths(monkeypatch, tmp_path)
+    calls = stub_bootstrap(monkeypatch)
+
+    services.setup()
+
+    assert calls.index("clone") < calls.index("build")
+
+
+def test_setup_skips_steps_whose_artifact_already_exists(monkeypatch, tmp_path):
+    vendor = configured_paths(monkeypatch, tmp_path)
+    vendor.mkdir(parents=True)
+    binary = services.config.WHISPER_BIN
+    binary.parent.mkdir(parents=True)
+    binary.write_text("bin")
+    binary.chmod(0o755)
+    services.config.MODELS_DIR.mkdir(parents=True)
+    services.config.WHISPER_MODEL_PATH.write_text("model")
+    services.config.VAD_MODEL_PATH.write_text("vad")
+    services.config.SEG_MODEL_PATH.parent.mkdir(parents=True)
+    services.config.SEG_MODEL_PATH.write_text("seg")
+    (services.config.MODELS_DIR / "nemo_en_titanet_large.onnx").write_text("emb")
+    calls = stub_bootstrap(monkeypatch)
+
+    services.setup()
+
+    assert calls == ["tools"]
+
+
+def test_the_embedding_model_always_downloads_under_its_own_fixed_name(monkeypatch, tmp_path):
+    # emb_model can be overridden to point at a model the user supplies
+    # themselves; provisioning the default must never land under that name
+    configured_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        services.config, "EMB_MODEL_PATH", services.config.MODELS_DIR / "custom.onnx"
+    )
+    stub_bootstrap(monkeypatch)
+    fetched: list = []
+    monkeypatch.setattr(services.bootstrap, "fetch", lambda url, dst: fetched.append(dst))
+
+    services.setup()
+
+    assert fetched == [services.config.MODELS_DIR / "nemo_en_titanet_large.onnx"]
+    assert not (services.config.MODELS_DIR / "custom.onnx").exists()
+
+
+def test_a_vad_download_failure_is_tolerated_rather_than_failing_setup(monkeypatch, tmp_path):
+    configured_paths(monkeypatch, tmp_path)
+    calls = stub_bootstrap(monkeypatch, vad_fails=True)
+    logged: list = []
+
+    result = services.setup(log=logged.append)
+
+    assert result == "setup complete"
+    assert "download-vad-model.sh" in calls
+    assert any("VAD download failed" in line for line in logged)

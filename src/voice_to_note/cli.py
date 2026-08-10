@@ -28,6 +28,11 @@ def _version() -> str:
         return "unknown"
 
 
+def cmd_setup(args: argparse.Namespace) -> None:
+    """Installs whisper.cpp and every model this app depends on."""
+    print(services.setup(print))
+
+
 def cmd_process(args: argparse.Namespace) -> None:
     """Takes a recording all the way to notes on screen."""
     src = Path(args.file).expanduser().resolve()
@@ -267,6 +272,10 @@ def main() -> None:
     sp.add_argument("id", type=int)
     sp.add_argument("question", nargs="+")
     sp.set_defaults(fn=cmd_ask)
+
+    sub.add_parser(
+        "setup", help="install whisper.cpp and all models (idempotent)"
+    ).set_defaults(fn=cmd_setup)
 
     sub.add_parser(
         "tui", help="browse, edit and process memos on one screen"

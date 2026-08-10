@@ -555,6 +555,21 @@ def test_diarizing_without_a_speaker_count_leaves_it_to_auto_detect(monkeypatch,
     assert seen["num_speakers"] is None
 
 
+# --- installing whisper.cpp and its models --------------------------------
+
+
+def test_the_setup_command_forwards_progress_and_completion_to_stdout(monkeypatch, capsys):
+    def setup(log):
+        log("cloning whisper.cpp …")
+        return "setup complete"
+
+    monkeypatch.setattr(services, "setup", setup)
+
+    run(monkeypatch, StubRepo(), "setup")
+
+    assert capsys.readouterr().out == "cloning whisper.cpp …\nsetup complete\n"
+
+
 def test_naming_a_speaker_nothing_ends_the_command_with_a_message(monkeypatch, capsys):
     def rename_speaker(_repo, _memo_id, _label, _name):
         raise services.InvalidInput("a speaker needs a name")

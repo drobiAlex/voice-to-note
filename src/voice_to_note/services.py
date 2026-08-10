@@ -1,4 +1,5 @@
 import json
+import os
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -8,7 +9,7 @@ from typing import TypeVar
 
 from . import config
 from .domain import Extraction, Memo, Speaker, SpeakerMatch, Turn
-from .gateways import audio, llm, sherpa, whisper
+from .gateways import GatewayError, audio, bootstrap, llm, sherpa, whisper
 from .storage.repository import Repository
 from .transforms.notes import SCHEMA, parse_notes, render_notes, render_notes_markdown
 from .transforms.refine import (
@@ -110,6 +111,69 @@ def _tag(tag: str | None) -> str | None:
     if not text:
         raise InvalidInput("a tag needs some text")
     return text
+
+
+def _built(path: Path) -> bool:
+    """Whether a binary this app shells out to is actually runnable, not just
+    present: a file left over from an interrupted build would exist but not
+    execute, and existence alone would then read as done."""
+    return path.exists() and os.access(path, os.X_OK)
+
+
+def setup(log: Log = _silent) -> str:
+    """Installs whisper.cpp and every model this app runs on, skipping any step
+    whose artifact is already on disk so that re-running after a partial
+    install only does what is still missing. A failed VAD download is the one
+    step tolerated rather than raised: transcription still works without it,
+    just without the pause-aware segmentation VAD gives it."""
+    bootstrap.require_tools()
+    for d in (config.MODELS_DIR, config.DATA_DIR, config.UPLOADS_DIR):
+        d.mkdir(parents=True, exist_ok=True)
+
+    if not config.VENDOR.exists():
+        log("cloning whisper.cpp …")
+        bootstrap.clone_whisper(config.VENDOR)
+
+    if not _built(config.WHISPER_BIN):
+        log("building whisper.cpp (Metal) …")
+        bootstrap.build_whisper(config.VENDOR)
+
+    if not config.WHISPER_MODEL_PATH.exists():
+        log(f"downloading whisper model {config.WHISPER_MODEL} …")
+        bootstrap.download_model_script(
+            config.VENDOR, "download-ggml-model.sh", [config.WHISPER_MODEL, str(config.MODELS_DIR)]
+        )
+
+    if not config.VAD_MODEL_PATH.exists():
+        log("downloading VAD model …")
+        try:
+            bootstrap.download_model_script(
+                config.VENDOR, "download-vad-model.sh", ["silero-v5.1.2", str(config.MODELS_DIR)]
+            )
+        except GatewayError:
+            log("VAD download failed — continuing without VAD")
+
+    if not config.SEG_MODEL_PATH.exists():
+        log("downloading speaker segmentation model …")
+        bootstrap.fetch_tar_bz2(
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+            "speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
+            config.MODELS_DIR,
+        )
+
+    # provisioned under its own fixed name, not config.EMB_MODEL_PATH: that
+    # setting lets a user point at a model they supply themselves, and this
+    # download must never land under a name it does not own
+    default_emb_model = config.MODELS_DIR / "nemo_en_titanet_large.onnx"
+    if not default_emb_model.exists():
+        log("downloading speaker embedding model …")
+        bootstrap.fetch(
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+            "speaker-recongition-models/nemo_en_titanet_large.onnx",
+            default_emb_model,
+        )
+
+    return "setup complete"
 
 
 def process_memo(
