@@ -197,7 +197,7 @@ class AudioTree(DirectoryTree):
     actually be processed is settled when the path is submitted, so a format
     missing from this list can still be typed in by hand."""
 
-    AUDIO_SUFFIXES = frozenset({".m4a", ".wav", ".mp3", ".opus", ".caf", ".aac", ".flac", ".ogg"})
+    AUDIO_SUFFIXES = frozenset({".m4a", ".wav", ".mp3", ".qta", ".opus", ".caf", ".aac", ".flac", ".ogg"})
 
     def filter_paths(self, paths: Iterable[Path]) -> Iterable[Path]:
         """Keeps the folders and the recordings, drops everything else."""

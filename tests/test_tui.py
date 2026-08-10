@@ -2024,6 +2024,18 @@ async def test_the_tree_shows_a_recording_whatever_case_its_name_is_in(repo, tmp
 
 
 @pytest.mark.asyncio
+async def test_the_tree_shows_qta_recordings(repo, tmp_path):
+    # the user's voice recorder hands back .qta files, which still need to walk into the tree
+    seed(repo)
+    (tmp_path / "status.qta").write_bytes(b"fake audio")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_add_modal(pilot, tmp_path)
+
+        assert tree_labels(pilot) == ["status.qta"]
+
+
+@pytest.mark.asyncio
 async def test_picking_a_recording_from_the_tree_fills_the_path(repo, tmp_path):
     # the typed line stays the one source of truth; the tree only writes to it
     seed(repo)
