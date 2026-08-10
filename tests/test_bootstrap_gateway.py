@@ -85,12 +85,15 @@ def test_a_failing_build_is_a_gateway_error(monkeypatch, tmp_path):
         bootstrap.build_whisper(tmp_path / "vendor")
 
 
-def test_a_model_download_script_runs_with_its_own_arguments(monkeypatch, tmp_path):
+def test_a_model_download_script_runs_with_its_own_arguments_and_streams_output(
+    monkeypatch, tmp_path
+):
     seen = {}
 
     def run(cmd, **kwargs):
         seen["cmd"] = cmd
-        return subprocess.CompletedProcess(cmd, 0, "", "")
+        seen["kwargs"] = kwargs
+        return subprocess.CompletedProcess(cmd, 0, None, None)
 
     monkeypatch.setattr(bootstrap.subprocess, "run", run)
     vendor = tmp_path / "vendor"
@@ -101,14 +104,14 @@ def test_a_model_download_script_runs_with_its_own_arguments(monkeypatch, tmp_pa
         "bash", str(vendor / "models" / "download-ggml-model.sh"),
         "large-v3-turbo", "models",
     ]
+    # curl's own progress bar must reach the terminal, so nothing here may capture it
+    assert seen["kwargs"] == {}
 
 
-def test_a_failing_model_script_is_a_gateway_error(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        bootstrap.subprocess, "run", fake_run(1, "curl: (6) could not resolve host")
-    )
+def test_a_failing_model_script_is_a_gateway_error_naming_the_script(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap.subprocess, "run", fake_run(1))
 
-    with pytest.raises(GatewayError, match="could not resolve host"):
+    with pytest.raises(GatewayError, match="download-vad-model.sh failed"):
         bootstrap.download_model_script(tmp_path / "vendor", "download-vad-model.sh", ["silero-v5.1.2"])
 
 
@@ -125,6 +128,23 @@ def test_fetching_a_file_writes_it_under_its_final_name(monkeypatch, tmp_path):
 
     assert dst.read_bytes() == b"model bytes"
     assert not dst.with_suffix(dst.suffix + ".part").exists()
+
+
+def test_fetching_a_file_reports_progress_as_chunks_arrive(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        bootstrap.urllib.request,
+        "urlopen",
+        lambda _url, timeout=None: FakeResponse(b"0123456789", length=10, chunk_size=4),
+    )
+    dst = tmp_path / "model.onnx"
+    ticks = []
+
+    bootstrap.fetch(
+        "https://example.com/model.onnx", dst, tick=lambda read, total: ticks.append((read, total))
+    )
+
+    assert ticks == [(4, 10), (8, 10), (10, 10)]
+    assert dst.read_bytes() == b"0123456789"
 
 
 def test_a_failed_fetch_leaves_no_file_behind(monkeypatch, tmp_path):
@@ -176,6 +196,25 @@ def test_fetching_a_tar_archive_leaves_no_temp_file_behind(monkeypatch, tmp_path
     bootstrap.fetch_tar_bz2("https://example.com/seg.tar.bz2", tmp_path)
 
     assert list(tmp_path.glob("*.part")) == []
+
+
+def test_fetching_a_tar_archive_reports_progress_as_chunks_arrive(monkeypatch, tmp_path):
+    body = make_tar_bz2({"a/b.onnx": b"x" * 10})
+    monkeypatch.setattr(
+        bootstrap.urllib.request,
+        "urlopen",
+        lambda _url, timeout=None: FakeResponse(body, length=len(body), chunk_size=len(body) // 2),
+    )
+    ticks = []
+
+    bootstrap.fetch_tar_bz2(
+        "https://example.com/seg.tar.bz2",
+        tmp_path,
+        tick=lambda read, total: ticks.append((read, total)),
+    )
+
+    assert len(ticks) >= 2
+    assert ticks[-1] == (len(body), len(body))
 
 
 def test_a_failed_tar_fetch_raises_a_gateway_error(monkeypatch, tmp_path):

@@ -1,5 +1,6 @@
 import json
 import os
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -120,7 +121,32 @@ def _built(path: Path) -> bool:
     return path.exists() and os.access(path, os.X_OK)
 
 
-def setup(log: Log = _silent) -> str:
+def _download_line(name: str, read: int, total: int) -> str:
+    """One line of a download's progress, sized the way a person reads a
+    file's weight rather than in raw bytes: megabytes to one decimal, with a
+    percentage once the server has said how big the whole thing is."""
+    mb = read / 1_000_000
+    if not total:
+        return f"  {name} {mb:.1f} MB"
+    pct = int(read / total * 100)
+    return f"  {name} {mb:.1f}/{total / 1_000_000:.1f} MB ({pct}%)"
+
+
+def _report_step(
+    log: Log, now: Callable[[], float], n: int, doing: str, work: Callable[[], None]
+) -> None:
+    """Times one setup step that actually has to run, saying what it is doing
+    before the work and how long it took once it is done: the two lines a
+    person staring at a silent terminal needs to know it has not hung."""
+    log(f"[{n}/6] {doing} …")
+    t0 = now()
+    work()
+    log(f"      done in {int(now() - t0)}s")
+
+
+def setup(
+    log: Log = _silent, download: Log = _silent, now: Callable[[], float] = time.monotonic
+) -> str:
     """Installs whisper.cpp and every model this app runs on, skipping any step
     whose artifact is already on disk so that re-running after a partial
     install only does what is still missing. A failed VAD download is the one
@@ -130,47 +156,90 @@ def setup(log: Log = _silent) -> str:
     for d in (config.MODELS_DIR, config.DATA_DIR, config.UPLOADS_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
-    if not config.VENDOR.exists():
-        log("cloning whisper.cpp …")
-        bootstrap.clone_whisper(config.VENDOR)
-
-    if not _built(config.WHISPER_BIN):
-        log("building whisper.cpp (Metal) …")
-        bootstrap.build_whisper(config.VENDOR)
-
-    if not config.WHISPER_MODEL_PATH.exists():
-        log(f"downloading whisper model {config.WHISPER_MODEL} …")
-        bootstrap.download_model_script(
-            config.VENDOR, "download-ggml-model.sh", [config.WHISPER_MODEL, str(config.MODELS_DIR)]
+    if config.VENDOR.exists():
+        log("[1/6] whisper.cpp source — already installed")
+    else:
+        _report_step(
+            log, now, 1, "cloning whisper.cpp", lambda: bootstrap.clone_whisper(config.VENDOR)
         )
 
-    if not config.VAD_MODEL_PATH.exists():
-        log("downloading VAD model …")
+    if _built(config.WHISPER_BIN):
+        log("[2/6] whisper.cpp build — already installed")
+    else:
+        _report_step(
+            log,
+            now,
+            2,
+            "building whisper.cpp (Metal — takes a few minutes)",
+            lambda: bootstrap.build_whisper(config.VENDOR),
+        )
+
+    if config.WHISPER_MODEL_PATH.exists():
+        log("[3/6] whisper model — already installed")
+    else:
+        _report_step(
+            log,
+            now,
+            3,
+            f"downloading whisper model {config.WHISPER_MODEL}",
+            lambda: bootstrap.download_model_script(
+                config.VENDOR,
+                "download-ggml-model.sh",
+                [config.WHISPER_MODEL, str(config.MODELS_DIR)],
+            ),
+        )
+
+    if config.VAD_MODEL_PATH.exists():
+        log("[4/6] VAD model — already installed")
+    else:
+        log("[4/6] downloading VAD model …")
+        t0 = now()
         try:
             bootstrap.download_model_script(
                 config.VENDOR, "download-vad-model.sh", ["silero-v5.1.2", str(config.MODELS_DIR)]
             )
+            log(f"      done in {int(now() - t0)}s")
         except GatewayError:
             log("VAD download failed — continuing without VAD")
 
-    if not config.SEG_MODEL_PATH.exists():
-        log("downloading speaker segmentation model …")
-        bootstrap.fetch_tar_bz2(
-            "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
-            "speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
-            config.MODELS_DIR,
+    if config.SEG_MODEL_PATH.exists():
+        log("[5/6] speaker segmentation model — already installed")
+    else:
+        _report_step(
+            log,
+            now,
+            5,
+            "downloading speaker segmentation model (~6 MB)",
+            lambda: bootstrap.fetch_tar_bz2(
+                "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+                "speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
+                config.MODELS_DIR,
+                tick=lambda read, total: download(
+                    _download_line("sherpa-onnx-pyannote-segmentation-3-0.tar.bz2", read, total)
+                ),
+            ),
         )
 
     # provisioned under its own fixed name, not config.EMB_MODEL_PATH: that
     # setting lets a user point at a model they supply themselves, and this
     # download must never land under a name it does not own
     default_emb_model = config.MODELS_DIR / "nemo_en_titanet_large.onnx"
-    if not default_emb_model.exists():
-        log("downloading speaker embedding model …")
-        bootstrap.fetch(
-            "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
-            "speaker-recongition-models/nemo_en_titanet_large.onnx",
-            default_emb_model,
+    if default_emb_model.exists():
+        log("[6/6] speaker embedding model — already installed")
+    else:
+        _report_step(
+            log,
+            now,
+            6,
+            "downloading speaker embedding model (~97 MB)",
+            lambda: bootstrap.fetch(
+                "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+                "speaker-recongition-models/nemo_en_titanet_large.onnx",
+                default_emb_model,
+                tick=lambda read, total: download(
+                    _download_line("nemo_en_titanet_large.onnx", read, total)
+                ),
+            ),
         )
 
     return "setup complete"

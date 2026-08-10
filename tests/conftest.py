@@ -17,10 +17,14 @@ def transcript(n: int) -> list[Segment]:
 
 class FakeResponse:
     """An HTTP 200 whose body is whatever the test wants the server to have
-    said — a chat reply, or the list of models it has pulled."""
+    said — a chat reply, the list of models it has pulled, or a download's
+    bytes. A length and a chunk size let a download test see the same
+    multi-read progress a live server delivering a large file would give."""
 
-    def __init__(self, body: bytes):
+    def __init__(self, body: bytes, length: int | None = None, chunk_size: int | None = None):
         self.body = body
+        self.headers = {"Content-Length": str(length)} if length is not None else {}
+        self.chunk_size = chunk_size
 
     def __enter__(self) -> "FakeResponse":
         return self
@@ -28,8 +32,13 @@ class FakeResponse:
     def __exit__(self, *exc) -> bool:
         return False
 
-    def read(self) -> bytes:
-        return self.body
+    def read(self, size: int = -1) -> bytes:
+        n = self.chunk_size if self.chunk_size is not None else size
+        if n < 0:
+            chunk, self.body = self.body, b""
+        else:
+            chunk, self.body = self.body[:n], self.body[n:]
+        return chunk
 
 
 class StubRepo:

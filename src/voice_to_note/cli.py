@@ -29,8 +29,22 @@ def _version() -> str:
 
 
 def cmd_setup(args: argparse.Namespace) -> None:
-    """Installs whisper.cpp and every model this app depends on."""
-    print(services.setup(print))
+    """Installs whisper.cpp and every model this app depends on: one line per
+    finished step on stdout, and each download's progress overwriting itself
+    on stderr so a multi-gigabyte fetch never looks stalled."""
+    fresh = {"line": False}
+
+    def log(line: str) -> None:
+        if fresh["line"]:
+            print(file=sys.stderr)
+            fresh["line"] = False
+        print(line)
+
+    def download(line: str) -> None:
+        print("\r" + line, end="", file=sys.stderr, flush=True)
+        fresh["line"] = True
+
+    print(services.setup(log, download))
 
 
 def cmd_process(args: argparse.Namespace) -> None:

@@ -559,7 +559,7 @@ def test_diarizing_without_a_speaker_count_leaves_it_to_auto_detect(monkeypatch,
 
 
 def test_the_setup_command_forwards_progress_and_completion_to_stdout(monkeypatch, capsys):
-    def setup(log):
+    def setup(log, download):
         log("cloning whisper.cpp …")
         return "setup complete"
 
@@ -568,6 +568,22 @@ def test_the_setup_command_forwards_progress_and_completion_to_stdout(monkeypatc
     run(monkeypatch, StubRepo(), "setup")
 
     assert capsys.readouterr().out == "cloning whisper.cpp …\nsetup complete\n"
+
+
+def test_the_setup_command_overwrites_its_own_download_line_on_stderr(monkeypatch, capsys):
+    def setup(log, download):
+        download("  model.bin 1.0/2.0 MB (50%)")
+        download("  model.bin 2.0/2.0 MB (100%)")
+        log("done")
+        return "setup complete"
+
+    monkeypatch.setattr(services, "setup", setup)
+
+    run(monkeypatch, StubRepo(), "setup")
+
+    out = capsys.readouterr()
+    assert out.out == "done\nsetup complete\n"
+    assert out.err == "\r  model.bin 1.0/2.0 MB (50%)\r  model.bin 2.0/2.0 MB (100%)\n"
 
 
 # --- launching bare, with no subcommand -----------------------------------
@@ -594,7 +610,7 @@ def test_bare_invocation_without_setup_tells_the_user_to_run_it(monkeypatch):
 
 def test_explicit_setup_runs_regardless_of_readiness(monkeypatch, capsys):
     monkeypatch.setattr(services, "ready", lambda: False)
-    monkeypatch.setattr(services, "setup", lambda log: "setup complete")
+    monkeypatch.setattr(services, "setup", lambda log, download: "setup complete")
 
     run(monkeypatch, StubRepo(), "setup")
 

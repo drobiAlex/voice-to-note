@@ -3,7 +3,9 @@ import subprocess
 import tarfile
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from . import GatewayError
 
@@ -14,6 +16,8 @@ TOOL_HINTS = {
     "cmake": "https://cmake.org/download/ or brew install cmake",
     "ffmpeg": "https://evermeet.cx/ffmpeg/ or brew install ffmpeg",
 }
+
+_CHUNK = 1 << 20  # 1 MB: small enough to report progress without slowing a download
 
 
 def require_tools() -> None:
@@ -55,30 +59,53 @@ def build_whisper(vendor: Path) -> None:
 
 def download_model_script(vendor: Path, script: str, args: list[str]) -> None:
     """Runs one of whisper.cpp's own model-download scripts, which ship inside
-    its clone rather than in this project."""
-    _run(["bash", str(vendor / "models" / script), *args], script)
+    its clone rather than in this project. Left to print straight to the
+    terminal rather than captured, since curl's own progress bar is the only
+    feedback a multi-gigabyte model download otherwise gives."""
+    proc = subprocess.run(["bash", str(vendor / "models" / script), *args])
+    if proc.returncode != 0:
+        raise GatewayError(f"{script} failed — see output above")
 
 
-def fetch(url: str, dst: Path) -> None:
+def _no_tick(read: int, total: int) -> None:
+    """Default for callers that don't want a download's progress reported."""
+
+
+def _stream(r: Any, dst: Path, tick: Callable[[int, int], None]) -> None:
+    """Copies an open response's body to dst in 1 MB chunks, calling tick after
+    each one with the bytes read so far and the total the server advertised
+    (0 when it did not say)."""
+    total = int(r.headers.get("Content-Length") or 0)
+    read = 0
+    with dst.open("wb") as f:
+        while chunk := r.read(_CHUNK):
+            f.write(chunk)
+            read += len(chunk)
+            tick(read, total)
+
+
+def fetch(url: str, dst: Path, tick: Callable[[int, int], None] = _no_tick) -> None:
     """Downloads one file under a `.part` name and only then renames it into
     place, so a run killed mid-download never leaves something at `dst` that a
     later run's exists-check would mistake for a finished one."""
     part = dst.with_suffix(dst.suffix + ".part")
     try:
         with urllib.request.urlopen(url) as r:
-            part.write_bytes(r.read())
+            _stream(r, part, tick)
     except (urllib.error.URLError, OSError) as e:
         raise GatewayError(f"download failed: {url}: {e}") from e
     part.rename(dst)
 
 
-def fetch_tar_bz2(url: str, dst_dir: Path) -> None:
+def fetch_tar_bz2(
+    url: str, dst_dir: Path, tick: Callable[[int, int], None] = _no_tick
+) -> None:
     """Downloads a `.tar.bz2` release archive and unpacks it in place, the way
     sherpa-onnx ships its models: as an archive containing its own directory."""
     tmp = dst_dir / f"{Path(url).name}.part"
     try:
         with urllib.request.urlopen(url) as r:
-            tmp.write_bytes(r.read())
+            _stream(r, tmp, tick)
         with tarfile.open(tmp, "r:bz2") as tar:
             tar.extractall(dst_dir, filter="data")
     except (urllib.error.URLError, OSError, tarfile.TarError) as e:

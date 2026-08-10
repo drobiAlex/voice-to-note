@@ -1107,12 +1107,18 @@ def stub_bootstrap(monkeypatch, *, vad_fails=False) -> list:
         if script == "download-vad-model.sh" and vad_fails:
             raise services.bootstrap.GatewayError("network unreachable")
 
+    def fetch_tar_bz2(url, dst, tick=lambda read, total: None):
+        calls.append("seg")
+
+    def fetch(url, dst, tick=lambda read, total: None):
+        calls.append("emb")
+
     monkeypatch.setattr(services.bootstrap, "require_tools", lambda: calls.append("tools"))
     monkeypatch.setattr(services.bootstrap, "clone_whisper", clone)
     monkeypatch.setattr(services.bootstrap, "build_whisper", build)
     monkeypatch.setattr(services.bootstrap, "download_model_script", download)
-    monkeypatch.setattr(services.bootstrap, "fetch_tar_bz2", lambda url, dst: calls.append("seg"))
-    monkeypatch.setattr(services.bootstrap, "fetch", lambda url, dst: calls.append("emb"))
+    monkeypatch.setattr(services.bootstrap, "fetch_tar_bz2", fetch_tar_bz2)
+    monkeypatch.setattr(services.bootstrap, "fetch", fetch)
     return calls
 
 
@@ -1130,6 +1136,81 @@ def test_setup_runs_every_step_when_nothing_is_on_disk(monkeypatch, tmp_path):
     assert services.config.MODELS_DIR.is_dir()
     assert services.config.DATA_DIR.is_dir()
     assert services.config.UPLOADS_DIR.is_dir()
+
+
+def test_setup_numbers_and_times_each_step_it_actually_runs(monkeypatch, tmp_path):
+    configured_paths(monkeypatch, tmp_path)
+    stub_bootstrap(monkeypatch)
+    logged: list = []
+    clock = iter(range(0, 100, 3))
+
+    services.setup(log=logged.append, now=lambda: next(clock))
+
+    assert logged[0] == "[1/6] cloning whisper.cpp …"
+    assert logged[1] == "      done in 3s"
+    assert logged[2] == "[2/6] building whisper.cpp (Metal — takes a few minutes) …"
+    assert logged[3] == "      done in 3s"
+    assert logged[4] == f"[3/6] downloading whisper model {config.WHISPER_MODEL} …"
+    assert logged[5] == "      done in 3s"
+    assert logged[6] == "[4/6] downloading VAD model …"
+    assert logged[7] == "      done in 3s"
+    assert logged[8] == "[5/6] downloading speaker segmentation model (~6 MB) …"
+    assert logged[9] == "      done in 3s"
+    assert logged[10] == "[6/6] downloading speaker embedding model (~97 MB) …"
+    assert logged[11] == "      done in 3s"
+
+
+def test_setup_reports_a_skipped_step_without_running_or_timing_it(monkeypatch, tmp_path):
+    vendor = configured_paths(monkeypatch, tmp_path)
+    vendor.mkdir(parents=True)
+    binary = services.config.WHISPER_BIN
+    binary.parent.mkdir(parents=True)
+    binary.write_text("bin")
+    binary.chmod(0o755)
+    services.config.MODELS_DIR.mkdir(parents=True)
+    services.config.WHISPER_MODEL_PATH.write_text("model")
+    services.config.VAD_MODEL_PATH.write_text("vad")
+    services.config.SEG_MODEL_PATH.parent.mkdir(parents=True)
+    services.config.SEG_MODEL_PATH.write_text("seg")
+    (services.config.MODELS_DIR / "nemo_en_titanet_large.onnx").write_text("emb")
+    stub_bootstrap(monkeypatch)
+    logged: list = []
+
+    services.setup(log=logged.append)
+
+    assert logged == [
+        "[1/6] whisper.cpp source — already installed",
+        "[2/6] whisper.cpp build — already installed",
+        "[3/6] whisper model — already installed",
+        "[4/6] VAD model — already installed",
+        "[5/6] speaker segmentation model — already installed",
+        "[6/6] speaker embedding model — already installed",
+    ]
+
+
+def test_setup_reports_download_progress_through_its_own_callback(monkeypatch, tmp_path):
+    configured_paths(monkeypatch, tmp_path)
+    stub_bootstrap(monkeypatch)
+
+    def fetch(url, dst, tick=lambda read, total: None):
+        tick(42_000_000, 97_000_000)
+
+    monkeypatch.setattr(services.bootstrap, "fetch", fetch)
+    lines: list = []
+
+    services.setup(download=lines.append)
+
+    assert any("MB" in line and "%" in line for line in lines)
+
+
+def test_download_line_shows_size_and_percent_once_total_is_known():
+    line = services._download_line("nemo_en_titanet_large.onnx", 42_000_000, 97_000_000)
+
+    assert line == "  nemo_en_titanet_large.onnx 42.0/97.0 MB (43%)"
+
+
+def test_download_line_omits_the_total_when_the_server_did_not_send_one():
+    assert services._download_line("model.bin", 42_000_000, 0) == "  model.bin 42.0 MB"
 
 
 def test_cloning_happens_before_building(monkeypatch, tmp_path):
@@ -1170,7 +1251,11 @@ def test_the_embedding_model_always_downloads_under_its_own_fixed_name(monkeypat
     )
     stub_bootstrap(monkeypatch)
     fetched: list = []
-    monkeypatch.setattr(services.bootstrap, "fetch", lambda url, dst: fetched.append(dst))
+    monkeypatch.setattr(
+        services.bootstrap,
+        "fetch",
+        lambda url, dst, tick=lambda read, total: None: fetched.append(dst),
+    )
 
     services.setup()
 
