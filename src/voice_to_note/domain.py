@@ -91,6 +91,19 @@ class Memo:
 
 
 @dataclass(frozen=True)
+class MemoListing:
+    """One memo as a list of them shows it: the memo itself, plus the few facts
+    about its contents a row carries beside the name. They travel with the memo
+    because a list is drawn all at once, and asking after each row's voices and
+    repairs separately would cost a query per memo on screen."""
+
+    memo: Memo
+    speakers: int
+    refined: bool
+    edited: bool
+
+
+@dataclass(frozen=True)
 class Extraction:
     """The structured notes an LLM produced for a memo."""
 

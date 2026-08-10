@@ -6,6 +6,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
+    DataTable,
     DirectoryTree,
     Footer,
     Header,
@@ -118,7 +119,7 @@ class MoveMemo(ModalScreen[None]):
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Files the memo under a project already in use."""
-        # the app behind this modal reads list selections as memo ids
+        # the screen behind this modal listens for list selections of its own
         event.stop()
         self._move(event.item.name or "")
 
@@ -173,7 +174,7 @@ class RenameSpeaker(ModalScreen[None]):
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Settles which voice is being named and moves on to typing the name,
         which is the half of the job the list cannot do."""
-        # the app behind this modal reads list selections as memo ids
+        # the screen behind this modal listens for list selections of its own
         event.stop()
         self.query_one("#speaker-name", Input).focus()
 
@@ -583,7 +584,10 @@ class MemoApp(App[None]):
         with Horizontal():
             yield ListView(id="projects")
             with Vertical():
-                yield ListView(id="memos")
+                # a table rather than a list of names: what state each memo is
+                # in decides which one you want, and reading that one memo at a
+                # time through the info key means opening every memo to find it
+                yield DataTable(id="memos", cursor_type="row")
                 with TabbedContent():
                     # the notes pane scrolls itself, headings and all
                     with TabPane("Notes"):
@@ -595,7 +599,9 @@ class MemoApp(App[None]):
     def on_mount(self) -> None:
         """Opens on the projects that exist, with the first one already picked
         out: a list highlighting nothing makes the session's first Enter do
-        nothing, which reads as the app being broken."""
+        nothing, which reads as the app being broken. The memo table gets its
+        headings once, since only its rows change from here on."""
+        self.query_one("#memos", DataTable).add_columns(*services.MEMO_COLUMNS)
         self.load_projects()
         self.query_one("#projects", ListView).focus()
 
@@ -628,6 +634,28 @@ class MemoApp(App[None]):
             sidebar.append(ListItem(Label(f"{name} ({count})"), name=name))
         sidebar.index = 0
 
+    def _list_memos(self, rows: list[services.MemoRow]) -> None:
+        """Draws the memo table from one listing, keying every row by the id of
+        the memo it describes: the row is what gets picked, and its position
+        says nothing about which memo that is. The cells go in the order the
+        headings were added in, both of them services'."""
+        memos = self.query_one("#memos", DataTable)
+        memos.clear()
+        for row in rows:
+            memos.add_row(
+                row.name,
+                row.duration,
+                row.speakers,
+                row.status,
+                row.created,
+                row.updated,
+                key=str(row.id),
+            )
+
+    def _listed(self, memo_id: int) -> bool:
+        """Whether a memo is among the rows the table is showing."""
+        return str(memo_id) in self.query_one("#memos", DataTable).rows
+
     def show_project(self, project: str) -> None:
         """Lists one project's recordings, newest first as everywhere else. This
         is also the way back from a tag search, so it takes the search down with
@@ -635,10 +663,7 @@ class MemoApp(App[None]):
         self.project = project
         self.tag = None
         self.sub_title = ""
-        memos = self.query_one("#memos", ListView)
-        memos.clear()
-        for memo in services.memos(self.repo, project=project):
-            memos.append(ListItem(Label(memo.filename), name=str(memo.id)))
+        self._list_memos(services.memo_rows(self.repo, project=project))
         self.refresh_bindings()
 
     def show_tagged(self, tag: str) -> None:
@@ -646,10 +671,7 @@ class MemoApp(App[None]):
         project it is filed under. The subtitle says so: the list no longer
         matches the highlighted project, and leaving that unsaid makes the
         sidebar read as a lie."""
-        memos = self.query_one("#memos", ListView)
-        memos.clear()
-        for memo in services.memos(self.repo, tag=tag):
-            memos.append(ListItem(Label(memo.filename), name=str(memo.id)))
+        self._list_memos(services.memo_rows(self.repo, tag=tag))
         self.tag = tag
         self.sub_title = f"tag: {tag}"
         self.refresh_bindings()
@@ -677,9 +699,7 @@ class MemoApp(App[None]):
             return
         self.show_project(project)
         memo_id = self.memo_id
-        if memo_id is not None and all(
-            memo.id != memo_id for memo in services.memos(self.repo, project=project)
-        ):
+        if memo_id is not None and not self._listed(memo_id):
             self.clear_memo()
 
     def clear_memo(self) -> None:
@@ -875,7 +895,7 @@ class MemoApp(App[None]):
         if self.tag is None:
             return
         if self.project is None:
-            self.query_one("#memos", ListView).clear()
+            self.query_one("#memos", DataTable).clear()
             self.tag = None
             self.sub_title = ""
             self.refresh_bindings()
@@ -985,10 +1005,14 @@ class MemoApp(App[None]):
         self._reload(self.project)
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
-        """A project fills the memo list; a memo fills the detail below it."""
-        chosen = event.item.name or ""
+        """A project fills the memo list, and hands the cursor to it."""
         if event.list_view.id == "projects":
-            self.show_project(chosen)
-            self.query_one("#memos", ListView).focus()
-        else:
-            self.show_memo(int(chosen))
+            self.show_project(event.item.name or "")
+            self.query_one("#memos", DataTable).focus()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """A memo fills the detail below the list. The row is keyed by the id of
+        the memo it describes — the one thing about a row that survives the list
+        being redrawn, reordered or narrowed to a tag — and every row is drawn
+        with one, so there is always an id under the cursor to read."""
+        self.show_memo(int(str(event.row_key.value)))

@@ -591,3 +591,71 @@ def test_running_speaker_detection_again_marks_when_the_memo_changed(repo):
     )
 
     assert repo.memo(memo_id).updated_at is not None
+
+
+# --- what a listing puts beside every memo --------------------------------
+
+
+def test_a_listing_carries_the_voices_repairs_and_edits_of_every_memo(repo):
+    plain = make_memo(repo, filename="plain.m4a", speakers=[Speaker("S1")])
+    marked = make_memo(
+        repo,
+        filename="marked.m4a",
+        segments=[Segment(0, 900, "helo")],
+        speakers=[Speaker("S1"), Speaker("S2")],
+    )
+    (stored,) = repo.segments(marked)
+    repo.update_refinements(marked, {stored.id: "hello"})
+    repo.save_notes_md(marked, "# My own words")
+
+    listed = {listing.memo.id: listing for listing in repo.memo_listings()}
+
+    assert (listed[marked].speakers, listed[marked].refined, listed[marked].edited) == (
+        2,
+        True,
+        True,
+    )
+    assert (listed[plain].speakers, listed[plain].refined, listed[plain].edited) == (
+        1,
+        False,
+        False,
+    )
+
+
+def test_a_listing_narrows_to_a_project_or_a_tag_like_the_plain_memo_list(repo):
+    tagged = tag_memo(repo, "a.m4a", ["release"], project="work")
+    tag_memo(repo, "b.m4a", ["hiring"], project="work")
+    make_memo(repo, filename="c.m4a", project="personal")
+
+    listed = repo.memo_listings(project="work")
+
+    assert [listing.memo.filename for listing in listed] == ["b.m4a", "a.m4a"]
+    assert [listing.memo.id for listing in repo.memo_listings(tag="release")] == [tagged]
+
+
+def test_a_listing_stops_calling_a_memo_edited_once_its_note_is_cleared(repo):
+    # a forced re-extraction takes the hand-written note with it, and the list
+    # would go on marking the memo as edited over notes nobody wrote
+    memo_id = make_memo(repo)
+    repo.save_notes_md(memo_id, "# My own words")
+
+    repo.save_extraction(memo_id, "claude", {"title": "A"}, clear_edited=True)
+
+    (listing,) = repo.memo_listings()
+    assert listing.edited is False
+    assert listing.refined is False
+
+
+def test_a_listing_costs_one_query_however_many_memos_it_carries(repo):
+    # the whole list is drawn at once, so a query per row is paid on every
+    # reload of every project
+    for i in range(4):
+        make_memo(repo, filename=f"memo{i}.m4a", speakers=[Speaker("S1")])
+    statements: list[str] = []
+    repo.con.set_trace_callback(statements.append)
+
+    listed = repo.memo_listings()
+
+    repo.con.set_trace_callback(None)
+    assert len(listed) == 4
+    assert len(statements) == 1

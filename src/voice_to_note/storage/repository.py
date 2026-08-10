@@ -7,7 +7,7 @@ from typing import Literal, cast
 import numpy as np
 
 from .. import config
-from ..domain import Extraction, Memo, NotesPayload, Segment, Speaker
+from ..domain import Extraction, Memo, MemoListing, NotesPayload, Segment, Speaker
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS memos (
@@ -138,11 +138,10 @@ class Repository:
             self._write_speakers(memo_id, speakers)
         return memo_id
 
-    def memos(self, project: str | None = None, tag: str | None = None) -> list[Memo]:
-        """Every memo, newest first, narrowed to a project, to a tag its notes
-        carry, or to both at once. Tags are matched whole and whatever case they
-        were written in; a memo nobody has extracted has no tags to be found by."""
-        sql = f"SELECT {MEMO_COLUMNS} FROM memos"
+    def _narrowed(self, project: str | None, tag: str | None) -> tuple[str, tuple]:
+        """How a listing is narrowed, as SQL and the values it reads: the plain
+        list and the one carrying each memo's state are narrowed the same ways,
+        and a filter written twice is a filter that comes to differ."""
         where = []
         params: list = []
         if project is not None:
@@ -157,10 +156,43 @@ class Repository:
                 " JOIN json_each(e.json, '$.tags') t WHERE lower(t.value)=lower(?))"
             )
             params.append(tag)
-        if where:
-            sql += " WHERE " + " AND ".join(where)
+        clause = " WHERE " + " AND ".join(where) if where else ""
+        return clause + " ORDER BY id DESC", tuple(params)
+
+    def memos(self, project: str | None = None, tag: str | None = None) -> list[Memo]:
+        """Every memo, newest first, narrowed to a project, to a tag its notes
+        carry, or to both at once. Tags are matched whole and whatever case they
+        were written in; a memo nobody has extracted has no tags to be found by."""
+        tail, params = self._narrowed(project, tag)
         return [
-            _memo(r) for r in self.con.execute(sql + " ORDER BY id DESC", tuple(params))
+            _memo(r)
+            for r in self.con.execute(f"SELECT {MEMO_COLUMNS} FROM memos" + tail, params)
+        ]
+
+    def memo_listings(
+        self, project: str | None = None, tag: str | None = None
+    ) -> list[MemoListing]:
+        """Every memo a list shows, narrowed the same ways as `memos`, each one
+        carrying how many voices are in it and whether its transcript has been
+        repaired or its notes written by hand.
+
+        One statement however many memos come back: a screen draws the whole
+        list at once and redraws it after every job, so counting each row's
+        speakers and repairs on its own would cost a query per row on screen."""
+        tail, params = self._narrowed(project, tag)
+        rows = self.con.execute(
+            f"SELECT {MEMO_COLUMNS},"
+            " (SELECT count(*) FROM speakers s WHERE s.memo_id=memos.id) AS speakers,"
+            " EXISTS(SELECT 1 FROM segments g WHERE g.memo_id=memos.id"
+            "  AND g.refined_text IS NOT NULL) AS refined,"
+            # an emptied note is no more a hand-written one than a missing note
+            " (notes_md IS NOT NULL AND notes_md<>'') AS edited"
+            " FROM memos" + tail,
+            params,
+        )
+        return [
+            MemoListing(_memo(r), r["speakers"], bool(r["refined"]), bool(r["edited"]))
+            for r in rows
         ]
 
     def projects(self) -> list[tuple[str, int]]:

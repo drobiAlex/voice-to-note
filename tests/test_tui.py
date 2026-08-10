@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from textual.widgets import (
+    DataTable,
     DirectoryTree,
     Input,
     Label,
@@ -61,6 +62,36 @@ def labels(view: ListView) -> list[str]:
     return [str(item.query_one(Label).content) for item in view.children]
 
 
+def memo_table(app) -> DataTable:
+    """The memo list, which lays each memo's state out in columns."""
+    return app.query_one("#memos", DataTable)
+
+
+def memo_columns(app) -> list[str]:
+    """What the table calls each of its columns, left to right."""
+    return [str(column.label) for column in memo_table(app).columns.values()]
+
+
+def memo_rows(app) -> list[list[str]]:
+    """Every row as a person reads it, in the order they are shown."""
+    table = memo_table(app)
+    return [[str(cell) for cell in table.get_row_at(i)] for i in range(table.row_count)]
+
+
+def memo_names(app) -> list[str]:
+    """The recordings the list is offering, read down its first column."""
+    return [row[0] for row in memo_rows(app)]
+
+
+def row_for(app, name: str) -> dict[str, str]:
+    """One memo's row read under the headings above it, so an assertion names
+    the column a value is in rather than counting to it."""
+    columns = memo_columns(app)
+    return next(
+        dict(zip(columns, row, strict=True)) for row in memo_rows(app) if row[0] == name
+    )
+
+
 @pytest.mark.asyncio
 async def test_the_app_opens_on_the_projects_that_exist(repo):
     seed(repo)
@@ -80,7 +111,7 @@ async def test_choosing_a_project_narrows_the_memo_list(repo):
         pilot.app.show_project("work")
         await pilot.pause()
 
-        assert labels(pilot.app.query_one("#memos", ListView)) == ["standup.m4a"]
+        assert memo_names(pilot.app) == ["standup.m4a"]
 
 
 @pytest.mark.asyncio
@@ -116,7 +147,7 @@ async def test_the_first_project_opens_without_a_keypress_to_wake_it(repo):
     async with MemoApp(repo).run_test() as pilot:
         await pilot.press("enter")
 
-        assert labels(pilot.app.query_one("#memos", ListView)) == ["shopping.m4a"]
+        assert memo_names(pilot.app) == ["shopping.m4a"]
 
 
 @pytest.mark.asyncio
@@ -127,7 +158,7 @@ async def test_the_keyboard_walks_on_to_the_next_project(repo):
     async with MemoApp(repo).run_test() as pilot:
         await pilot.press("down", "enter")
 
-        assert labels(pilot.app.query_one("#memos", ListView)) == ["standup.m4a"]
+        assert memo_names(pilot.app) == ["standup.m4a"]
 
 
 def test_the_tui_leaves_database_reads_and_formatting_to_services():
@@ -591,7 +622,8 @@ async def test_a_speaker_name_of_nothing_is_refused_without_losing_the_modal(rep
 
 @pytest.mark.asyncio
 async def test_choosing_a_speaker_from_the_list_stays_inside_the_modal(repo):
-    # the app behind reads a list selection as a memo id; "S1" is not one
+    # the screen behind listens for list selections of its own; picking a voice
+    # in here is the modal's business and nothing the screen should act on
     work, _home = seed(repo)
 
     async with MemoApp(repo).run_test() as pilot:
@@ -636,7 +668,7 @@ async def test_moving_the_shown_memo_out_of_view_stops_showing_it(repo):
         await pilot.press("enter")
         await pilot.pause()
 
-        assert labels(pilot.app.query_one("#memos", ListView)) == []
+        assert memo_names(pilot.app) == []
         assert "we ship on friday" not in str(
             pilot.app.query_one("#transcript", Static).content
         )
@@ -854,7 +886,7 @@ async def test_renaming_the_project_being_viewed_keeps_its_memos_in_front_of_you
         await pilot.press("enter")
         await pilot.pause()
 
-        assert labels(pilot.app.query_one("#memos", ListView)) == ["standup.m4a"]
+        assert memo_names(pilot.app) == ["standup.m4a"]
         assert "we ship on friday" in transcript(pilot)
 
 
@@ -878,7 +910,7 @@ async def test_a_renamed_project_is_found_again_under_its_tidied_name(repo):
             "client (1)",
             "personal (1)",
         ]
-        assert labels(pilot.app.query_one("#memos", ListView)) == ["standup.m4a"]
+        assert memo_names(pilot.app) == ["standup.m4a"]
 
 
 @pytest.mark.asyncio
@@ -966,7 +998,7 @@ async def test_emptying_the_project_being_viewed_stops_showing_its_memos(repo):
         await pilot.press("y")
         await pilot.pause()
 
-        assert labels(pilot.app.query_one("#memos", ListView)) == []
+        assert memo_names(pilot.app) == []
         assert "we ship on friday" not in transcript(pilot)
 
 
@@ -1067,7 +1099,7 @@ async def test_a_tag_search_reaches_across_every_project(repo):
         await pilot.pause()
         await search_tag(pilot, "release")
 
-        assert labels(pilot.app.query_one("#memos", ListView)) == ["standup.m4a"]
+        assert memo_names(pilot.app) == ["standup.m4a"]
 
 
 @pytest.mark.asyncio
@@ -1090,12 +1122,12 @@ async def test_leaving_a_tag_search_puts_the_project_back_in_the_list(repo):
         pilot.app.show_project("personal")
         await pilot.pause()
         await search_tag(pilot, "release")
-        assert labels(pilot.app.query_one("#memos", ListView)) == ["standup.m4a"]
+        assert memo_names(pilot.app) == ["standup.m4a"]
 
         await pilot.press("escape")
         await pilot.pause()
 
-        assert labels(pilot.app.query_one("#memos", ListView)) == ["shopping.m4a"]
+        assert memo_names(pilot.app) == ["shopping.m4a"]
         assert pilot.app.sub_title == ""
 
 
@@ -1107,7 +1139,7 @@ async def test_a_tag_nothing_carries_shows_an_empty_list_rather_than_everything(
     async with MemoApp(repo).run_test() as pilot:
         await search_tag(pilot, "nobody-used-this")
 
-        assert labels(pilot.app.query_one("#memos", ListView)) == []
+        assert memo_names(pilot.app) == []
 
 
 @pytest.mark.asyncio
@@ -1635,7 +1667,7 @@ async def test_a_processed_recording_joins_the_project_on_screen(repo, tmp_path,
         await finish_jobs(pilot)
 
         assert not showing(pilot.app, "#source-path")
-        assert labels(pilot.app.query_one("#memos", ListView)) == [
+        assert memo_names(pilot.app) == [
             "standup.m4a",
             "standup.m4a",
         ]
@@ -1862,7 +1894,7 @@ async def test_the_memo_keys_stay_when_the_cursor_leaves_the_sidebar(repo):
 
     async with MemoApp(repo).run_test() as pilot:
         await open_memo(pilot, work)
-        pilot.app.query_one("#memos", ListView).focus()
+        memo_table(pilot.app).focus()
         await pilot.pause()
 
         assert await missing(pilot, MEMO_KEYS) == []
@@ -1877,7 +1909,7 @@ async def test_the_project_keys_are_offered_only_while_the_sidebar_has_the_curso
     async with MemoApp(repo).run_test() as pilot:
         assert await missing(pilot, PROJECT_KEYS) == []
 
-        pilot.app.query_one("#memos", ListView).focus()
+        memo_table(pilot.app).focus()
         await pilot.pause()
 
         assert await offered(pilot, PROJECT_KEYS) == []
@@ -1957,7 +1989,7 @@ async def test_a_project_action_reached_off_the_sidebar_does_nothing(repo, actio
     seed(repo)
 
     async with MemoApp(repo).run_test() as pilot:
-        pilot.app.query_one("#memos", ListView).focus()
+        memo_table(pilot.app).focus()
         await pilot.pause()
 
         getattr(pilot.app, f"action_{action}")()
@@ -2099,7 +2131,112 @@ async def test_a_recording_picked_from_the_tree_goes_the_same_way_as_a_typed_one
         await finish_jobs(pilot)
 
         assert not showing(pilot.app, "#source-path")
-        assert labels(pilot.app.query_one("#memos", ListView)) == [
+        assert memo_names(pilot.app) == [
             "standup.m4a",
             "standup.m4a",
         ]
+
+
+# --- the memo list as a table of what state each memo is in ---------------
+
+
+def detailed_memo(repo, filename: str = "interview.m4a", project: str = "work") -> int:
+    """A memo with something worth reading in every column: two voices, a minute
+    and a quarter of audio, and notes already extracted from it."""
+    memo_id = repo.create_memo(
+        filename=filename, wav_path="/tmp/i.wav", duration_s=75.0, language="en",
+        segments=[Segment(0, 1000, "we talked it over", speaker="S1")],
+        speakers=[Speaker("S1"), Speaker("S2")], project=project,
+    )
+    repo.save_extraction(memo_id, "claude", NOTES)
+    return memo_id
+
+
+@pytest.mark.asyncio
+async def test_the_memo_list_shows_each_memos_state_beside_its_name(repo):
+    # all of it was behind the info key; the list has the room to just show it
+    memo_id = detailed_memo(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+
+        assert memo_columns(pilot.app) == [
+            "name",
+            "duration",
+            "speakers",
+            "status",
+            "created",
+            "updated",
+        ]
+        info = services.memo_info(repo, memo_id)
+        assert row_for(pilot.app, "interview.m4a") == {
+            "name": "interview.m4a",
+            "duration": "75s",
+            "speakers": "2",
+            "status": "extracted",
+            "created": info.created,
+            "updated": info.updated,
+        }
+
+
+@pytest.mark.asyncio
+async def test_a_repaired_and_rewritten_memo_is_marked_in_the_list(repo):
+    # the info modal reports both; on the list they are what tells one memo
+    # apart from the one under it
+    work, _home = seed(repo)
+    repair(repo, work, "We ship on Friday.")
+    repo.save_notes_md(work, "# My own words")
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+
+        assert row_for(pilot.app, "standup.m4a")["status"] == "extracted (repaired, edited)"
+
+
+@pytest.mark.asyncio
+async def test_a_memo_nobody_has_touched_is_marked_with_nothing(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("personal")
+        await pilot.pause()
+
+        assert row_for(pilot.app, "shopping.m4a")["status"] == "transcribed"
+
+
+@pytest.mark.asyncio
+async def test_choosing_a_row_opens_the_memo_that_row_is_about(repo):
+    # the row carries its memo's id, which is not where it sits in the list: the
+    # newest memo is the first row and the highest id
+    work, _home = seed(repo)
+    later = detailed_memo(repo, filename="retro.m4a")
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        memo_table(pilot.app).focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert pilot.app.memo_id == later
+        assert "we talked it over" in transcript(pilot)
+
+        await pilot.press("down", "enter")
+        await pilot.pause()
+
+        assert pilot.app.memo_id == work
+        assert "we ship on friday" in transcript(pilot)
+
+
+@pytest.mark.asyncio
+async def test_a_tag_search_fills_the_same_table_with_the_same_columns(repo):
+    # the list is one list however it was filled, so a searched-for memo says
+    # as much about itself as a browsed one
+    detailed_memo(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await search_tag(pilot, "release")
+
+        assert row_for(pilot.app, "interview.m4a")["speakers"] == "2"

@@ -384,6 +384,56 @@ def memos(
     return repo.memos(project, _tag(tag))
 
 
+# what a table of memos puts beside each name, in the order a reader scans it.
+# The screen takes its headings from here rather than naming them itself, so the
+# columns and the values under them cannot come to disagree.
+MEMO_COLUMNS = ("name", "duration", "speakers", "status", "created", "updated")
+
+
+@dataclass(frozen=True)
+class MemoRow:
+    """One memo as a table lists it: the id its row is keyed by, and a value for
+    each of MEMO_COLUMNS, in that order."""
+
+    id: int
+    name: str
+    duration: str
+    speakers: str
+    status: str
+    created: str
+    updated: str
+
+
+def _status(status: str, refined: bool, edited: bool) -> str:
+    """How far a memo got, and what has been done to it by hand since. The info
+    modal has a line each for repaired and edited; a table has one column, so
+    they ride along with the status they qualify, named the same either way."""
+    marks = [name for name, on in (("repaired", refined), ("edited", edited)) if on]
+    return f"{status} ({', '.join(marks)})" if marks else status
+
+
+def memo_rows(
+    repo: Repository, project: str | None = None, tag: str | None = None
+) -> list[MemoRow]:
+    """The memo list as a table lays it out, narrowed as the caller asked: a row
+    per memo, saying the same about each one as its info would, and gathered in
+    a single query so that a list of a hundred memos costs what a list of one
+    does. A memo nobody has changed reads as updated when it was made, exactly
+    as the info does, since a column has to say something."""
+    return [
+        MemoRow(
+            id=listed.memo.id,
+            name=listed.memo.filename,
+            duration=_duration(listed.memo.duration_s),
+            speakers=str(listed.speakers),
+            status=_status(listed.memo.status, listed.refined, listed.edited),
+            created=listed.memo.created_at,
+            updated=listed.memo.updated_at or listed.memo.created_at,
+        )
+        for listed in repo.memo_listings(project, _tag(tag))
+    ]
+
+
 def memos_json(
     repo: Repository, project: str | None = None, tag: str | None = None
 ) -> str:

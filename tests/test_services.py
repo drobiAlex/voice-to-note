@@ -710,6 +710,98 @@ def test_memos_can_be_had_as_records_rather_than_a_printed_table(repo, wav):
     assert listed[0].project == "work"
 
 
+# --- the memo list as a table lays it out ---------------------------------
+
+
+def test_the_memo_table_puts_a_memos_state_in_columns_beside_its_name(repo, wav):
+    memo_id = repo.create_memo(
+        filename="standup.m4a", wav_path=str(wav), duration_s=75.0, language="en",
+        segments=[Segment(0, 1000, "we ship friday", speaker="S1")],
+        speakers=[Speaker("S1"), Speaker("S2")], project="work",
+    )
+
+    (row,) = services.memo_rows(repo)
+
+    assert services.MEMO_COLUMNS == (
+        "name", "duration", "speakers", "status", "created", "updated",
+    )
+    assert row.id == memo_id
+    assert (row.name, row.duration, row.speakers) == ("standup.m4a", "75s", "2")
+    assert row.status == "transcribed"
+    assert row.created != ""
+    assert row.updated == row.created
+
+
+def test_a_repaired_transcript_and_a_hand_written_note_are_marked_in_the_status(repo, wav):
+    # the two the info modal calls repaired and edited, folded into the one
+    # column a table has room for
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "helo")])
+    (stored,) = repo.segments(memo_id)
+    repo.update_refinements(memo_id, {stored.id: "hello"})
+    repo.save_notes_md(memo_id, "# My own words")
+
+    (row,) = services.memo_rows(repo)
+
+    assert row.status == "transcribed (repaired, edited)"
+
+
+def test_a_memo_nobody_has_repaired_or_rewritten_carries_no_marks(repo, wav):
+    add_memo(repo, wav, segments=[Segment(0, 1000, "hello")])
+
+    (row,) = services.memo_rows(repo)
+
+    assert row.status == "transcribed"
+
+
+def test_the_table_says_the_same_about_a_memo_as_its_info_does(repo, wav):
+    # two readings of one memo: a memo repaired in the modal is repaired in the
+    # list, or the screen contradicts itself depending on where you look
+    memo_id = add_memo(
+        repo, wav, segments=[Segment(0, 1000, "helo")], speakers=[Speaker("S1")]
+    )
+    (stored,) = repo.segments(memo_id)
+    repo.update_refinements(memo_id, {stored.id: "hello"})
+
+    (row,) = services.memo_rows(repo)
+    info = services.memo_info(repo, memo_id)
+
+    assert (row.name, row.duration) == (info.filename, info.duration)
+    assert (row.created, row.updated) == (info.created, info.updated)
+    assert row.speakers == str(info.speakers)
+    assert row.status.startswith(info.status)
+    assert ("repaired" in row.status, "edited" in row.status) == (info.refined, info.edited)
+
+
+def test_the_table_is_filled_by_one_query_however_many_memos_it_lists(repo, wav):
+    # the state beside each name would otherwise cost a query per row, paid
+    # again on every reload
+    for i in range(4):
+        add_memo(repo, wav, filename=f"memo{i}.m4a", speakers=[Speaker("S1")])
+    statements: list[str] = []
+    repo.con.set_trace_callback(statements.append)
+
+    rows = services.memo_rows(repo)
+
+    repo.con.set_trace_callback(None)
+    assert len(rows) == 4
+    assert len(statements) == 1
+
+
+def test_the_table_can_be_narrowed_to_one_project_or_one_tag(repo, wav):
+    work = add_project_memo(repo, wav, "work.m4a", "work")
+    repo.save_extraction(work, "claude", {"title": "A", "tags": ["release"]})
+    add_project_memo(repo, wav, "home.m4a", "personal")
+
+    assert [r.name for r in services.memo_rows(repo, project="work")] == ["work.m4a"]
+    assert [r.name for r in services.memo_rows(repo, tag="  release  ")] == ["work.m4a"]
+
+
+@pytest.mark.parametrize("tag", ["", "   "])
+def test_a_table_asked_for_a_tag_of_nothing_is_refused(repo, tag):
+    with pytest.raises(services.InvalidInput):
+        services.memo_rows(repo, tag=tag)
+
+
 def test_notes_come_as_markdown_for_a_reader_that_renders_it(repo, wav):
     # the action items are the section the plain renderer loses to Markdown, so
     # they are the section worth asserting on
