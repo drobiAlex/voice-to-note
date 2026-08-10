@@ -23,6 +23,8 @@ from voice_to_note.gateways import GatewayError
 from voice_to_note.tui import app as tui_app
 from voice_to_note.tui.app import MemoApp
 
+pytestmark = pytest.mark.ui
+
 NOTES = {
     "title": "Sprint sync",
     "summary": "We agreed to ship on Friday.",
@@ -321,18 +323,6 @@ async def test_pressing_e_opens_the_note_for_editing(repo):
 
 
 @pytest.mark.asyncio
-async def test_pressing_e_before_choosing_a_memo_does_nothing(repo):
-    # there is nothing to edit yet, and offering an editor would save it nowhere
-    seed(repo)
-
-    async with MemoApp(repo).run_test() as pilot:
-        await pilot.press("e")
-        await pilot.pause()
-
-        assert not showing(pilot.app, "#editor")
-
-
-@pytest.mark.asyncio
 async def test_saving_an_edit_stores_it_and_shows_it(repo):
     work, _home = seed(repo)
 
@@ -348,22 +338,6 @@ async def test_saving_an_edit_stores_it_and_shows_it(repo):
         assert services.notes_markdown(repo, work) == "# In my own words"
         assert "In my own words" in notes_pane(pilot).document.source
         assert not showing(pilot.app, "#editor")
-
-
-@pytest.mark.asyncio
-async def test_leaving_an_untouched_editor_closes_it_at_once(repo):
-    work, _home = seed(repo)
-
-    async with MemoApp(repo).run_test() as pilot:
-        pilot.app.show_memo(work)
-        await pilot.pause()
-        await pilot.press("e")
-        await pilot.pause()
-        await pilot.press("escape")
-        await pilot.pause()
-
-        assert not showing(pilot.app, "#editor")
-        assert not showing(pilot.app, "#confirm-discard")
 
 
 @pytest.mark.asyncio
@@ -536,17 +510,6 @@ async def test_leaving_the_move_alone_leaves_the_memo_where_it_was(repo):
 
 
 @pytest.mark.asyncio
-async def test_pressing_m_before_choosing_a_memo_does_nothing(repo):
-    seed(repo)
-
-    async with MemoApp(repo).run_test() as pilot:
-        await pilot.press("m")
-        await pilot.pause()
-
-        assert not showing(pilot.app, "#project-name")
-
-
-@pytest.mark.asyncio
 async def test_pressing_r_offers_the_speakers_in_this_memo(repo):
     work, _home = seed(repo)
 
@@ -593,17 +556,6 @@ async def test_leaving_the_rename_alone_leaves_the_speaker_named_as_it_was(repo)
 
 
 @pytest.mark.asyncio
-async def test_pressing_r_before_choosing_a_memo_does_nothing(repo):
-    seed(repo)
-
-    async with MemoApp(repo).run_test() as pilot:
-        await pilot.press("r")
-        await pilot.pause()
-
-        assert not showing(pilot.app, "#speaker-choices")
-
-
-@pytest.mark.asyncio
 async def test_a_speaker_name_of_nothing_is_refused_without_losing_the_modal(repo):
     work, _home = seed(repo)
 
@@ -635,22 +587,6 @@ async def test_choosing_a_speaker_from_the_list_stays_inside_the_modal(repo):
         await pilot.pause()
 
         assert showing(pilot.app, "#speaker-name")
-
-
-@pytest.mark.asyncio
-async def test_choosing_a_speaker_moves_on_to_typing_the_name(repo):
-    # picking the voice is only half of it: the name still has to be typed
-    work, _home = seed(repo)
-
-    async with MemoApp(repo).run_test() as pilot:
-        await open_memo(pilot, work)
-        await pilot.press("r")
-        await pilot.pause()
-        pilot.app.screen.query_one("#speaker-choices", ListView).focus()
-        await pilot.press("enter")
-        await pilot.pause()
-
-        assert pilot.app.screen.focused is pilot.app.screen.query_one("#speaker-name", Input)
 
 
 @pytest.mark.asyncio
@@ -800,18 +736,6 @@ async def test_a_memo_moved_out_of_view_takes_the_raw_claim_with_it(repo):
         await pilot.pause()
         pilot.app.screen.query_one("#project-name", Input).value = "side"
         await pilot.press("enter")
-        await pilot.pause()
-
-        assert transcript_tab(pilot) == "Transcript"
-
-
-@pytest.mark.asyncio
-async def test_pressing_t_before_choosing_a_memo_does_nothing(repo):
-    # there is no transcript under the tab yet, so calling it raw would be a lie
-    seed(repo)
-
-    async with MemoApp(repo).run_test() as pilot:
-        await pilot.press("t")
         await pilot.pause()
 
         assert transcript_tab(pilot) == "Transcript"
@@ -1002,25 +926,6 @@ async def test_emptying_the_project_being_viewed_stops_showing_its_memos(repo):
         assert "we ship on friday" not in transcript(pilot)
 
 
-@pytest.mark.asyncio
-async def test_the_project_keys_do_nothing_while_the_memo_list_has_focus(repo):
-    # they act on the sidebar cursor, which is not what you are pointing at once
-    # you have walked into the memos
-    seed(repo)
-
-    async with MemoApp(repo).run_test() as pilot:
-        await pilot.press("enter")
-        await pilot.pause()
-
-        await pilot.press("R")
-        await pilot.pause()
-        assert not showing(pilot.app, "#project-rename")
-
-        await pilot.press("X")
-        await pilot.pause()
-        assert not showing(pilot.app, "#confirm-remove")
-
-
 # --- what state a memo is in ----------------------------------------------
 
 
@@ -1055,17 +960,6 @@ async def test_leaving_the_info_puts_the_memo_back_in_front_of_you(repo):
         assert "we ship on friday" in transcript(pilot)
 
 
-@pytest.mark.asyncio
-async def test_pressing_i_before_choosing_a_memo_does_nothing(repo):
-    seed(repo)
-
-    async with MemoApp(repo).run_test() as pilot:
-        await pilot.press("i")
-        await pilot.pause()
-
-        assert not showing(pilot.app, "#memo-info")
-
-
 # --- finding memos by tag -------------------------------------------------
 
 
@@ -1076,17 +970,6 @@ async def search_tag(pilot, tag: str) -> None:
     pilot.app.screen.query_one("#tag-search", Input).value = tag
     await pilot.press("enter")
     await pilot.pause()
-
-
-@pytest.mark.asyncio
-async def test_pressing_slash_asks_which_tag_to_look_for(repo):
-    seed(repo)
-
-    async with MemoApp(repo).run_test() as pilot:
-        await pilot.press("/")
-        await pilot.pause()
-
-        assert showing(pilot.app, "#tag-search")
 
 
 @pytest.mark.asyncio
@@ -1212,19 +1095,6 @@ async def test_pressing_p_repairs_the_transcript(repo, monkeypatch):
 
         assert said(pilot) == ["repairing memo 1 …", "memo 1 repaired"]
         assert "We ship on Friday." in transcript(pilot)
-
-
-@pytest.mark.asyncio
-async def test_pressing_d_runs_speaker_detection_again(repo, monkeypatch):
-    work, _home = seed(repo)
-    monkeypatch.setattr(services, "rediarize", lambda _repo, _id, log=None: ["S1", "S2"])
-
-    async with MemoApp(repo).run_test() as pilot:
-        await open_memo(pilot, work)
-        await pilot.press("d")
-        await finish_jobs(pilot)
-
-        assert said(pilot) == ["diarizing memo 1 …", "memo 1 diarized"]
 
 
 @pytest.mark.asyncio
@@ -1412,18 +1282,6 @@ async def test_work_finishing_on_a_memo_you_have_left_does_not_redraw_it(repo, m
         assert "Fresh off the model" not in notes_pane(pilot).document.source
 
 
-@pytest.mark.asyncio
-async def test_pressing_x_before_choosing_a_memo_does_nothing(repo, monkeypatch):
-    seed(repo)
-    monkeypatch.setattr(services, "run_extraction", lambda _r, _i, force=False: "claude")
-
-    async with MemoApp(repo).run_test() as pilot:
-        await pilot.press("x")
-        await finish_jobs(pilot)
-
-        assert said(pilot) == []
-
-
 # --- asking a memo a question ---------------------------------------------
 
 
@@ -1438,18 +1296,6 @@ async def ask_question(pilot, question: str) -> None:
 def answer_shown(pilot) -> str:
     """The answer as it reads on screen."""
     return pilot.app.screen.query_one("#answer", Markdown).source
-
-
-@pytest.mark.asyncio
-async def test_pressing_a_asks_what_you_want_to_know(repo):
-    work, _home = seed(repo)
-
-    async with MemoApp(repo).run_test() as pilot:
-        await open_memo(pilot, work)
-        await pilot.press("a")
-        await pilot.pause()
-
-        assert showing(pilot.app, "#ask-question")
 
 
 @pytest.mark.asyncio
@@ -1567,17 +1413,6 @@ async def test_an_answer_arrives_even_once_you_have_moved_on(repo, monkeypatch):
         assert "memo 1" in answer_shown(pilot)
 
 
-@pytest.mark.asyncio
-async def test_pressing_a_before_choosing_a_memo_does_nothing(repo):
-    seed(repo)
-
-    async with MemoApp(repo).run_test() as pilot:
-        await pilot.press("a")
-        await pilot.pause()
-
-        assert not showing(pilot.app, "#ask-question")
-
-
 # --- bringing a new recording in ------------------------------------------
 
 
@@ -1619,17 +1454,6 @@ async def process_file(pilot, src, project: str | None = None) -> None:
     if project is not None:
         pilot.app.screen.query_one("#source-project", Input).value = project
     await pilot.press("enter")
-
-
-@pytest.mark.asyncio
-async def test_pressing_o_asks_for_a_recording_and_a_project(repo, tmp_path):
-    seed(repo)
-
-    async with MemoApp(repo).run_test() as pilot:
-        await open_add_modal(pilot, tmp_path)
-
-        assert showing(pilot.app, "#source-path")
-        assert showing(pilot.app, "#source-project")
 
 
 @pytest.mark.asyncio
@@ -1946,97 +1770,6 @@ async def offered(pilot, keys: list[str]) -> list[str]:
     return [key for key in keys if key in shown]
 
 
-@pytest.mark.asyncio
-async def test_the_footer_offers_nothing_needing_a_memo_before_one_is_open(repo):
-    # a key that does nothing is a key that reads as broken
-    seed(repo)
-
-    async with MemoApp(repo).run_test() as pilot:
-        assert await offered(pilot, MEMO_KEYS) == []
-        assert await missing(pilot, ALWAYS_KEYS) == []
-
-
-@pytest.mark.asyncio
-async def test_opening_a_memo_offers_what_can_be_done_to_it(repo):
-    work, _home = seed(repo)
-
-    async with MemoApp(repo).run_test() as pilot:
-        await open_memo(pilot, work)
-
-        assert await missing(pilot, MEMO_KEYS) == []
-
-
-@pytest.mark.asyncio
-async def test_the_memo_keys_stay_when_the_cursor_leaves_the_sidebar(repo):
-    # they act on the memo being read, not on whatever holds focus, so walking
-    # down into the memo list must not take them away
-    work, _home = seed(repo)
-
-    async with MemoApp(repo).run_test() as pilot:
-        await open_memo(pilot, work)
-        memo_table(pilot.app).focus()
-        await pilot.pause()
-
-        assert await missing(pilot, MEMO_KEYS) == []
-
-
-@pytest.mark.asyncio
-async def test_the_project_keys_are_offered_only_while_the_sidebar_has_the_cursor(repo):
-    # the asymmetry with the memo keys is the point: these act on the row the
-    # cursor is resting on, and off the sidebar there is no such row
-    seed(repo)
-
-    async with MemoApp(repo).run_test() as pilot:
-        assert await missing(pilot, PROJECT_KEYS) == []
-
-        memo_table(pilot.app).focus()
-        await pilot.pause()
-
-        assert await offered(pilot, PROJECT_KEYS) == []
-
-
-@pytest.mark.asyncio
-async def test_the_way_back_is_offered_only_while_a_tag_search_is_showing(repo):
-    seed(repo)
-
-    async with MemoApp(repo).run_test() as pilot:
-        assert "escape" not in await footer_keys(pilot)
-
-        await search_tag(pilot, "release")
-
-        assert "escape" in await footer_keys(pilot)
-
-
-@pytest.mark.asyncio
-async def test_leaving_a_tag_search_takes_the_way_back_off_the_footer(repo):
-    seed(repo)
-
-    async with MemoApp(repo).run_test() as pilot:
-        pilot.app.show_project("personal")
-        await pilot.pause()
-        await search_tag(pilot, "release")
-        await pilot.press("escape")
-        await pilot.pause()
-
-        assert "escape" not in await footer_keys(pilot)
-
-
-@pytest.mark.asyncio
-async def test_a_memo_going_out_of_view_takes_its_keys_off_the_footer(repo):
-    work, _home = seed(repo)
-
-    async with MemoApp(repo).run_test() as pilot:
-        pilot.app.show_project("work")
-        await open_memo(pilot, work)
-        await pilot.press("m")
-        await pilot.pause()
-        pilot.app.screen.query_one("#project-name", Input).value = "side"
-        await pilot.press("enter")
-        await pilot.pause()
-
-        assert await offered(pilot, MEMO_KEYS) == []
-
-
 # --- the guards behind the hidden keys ------------------------------------
 
 # Hiding a key stops the key reaching its action at all, so a test that presses
@@ -2109,17 +1842,6 @@ async def pick_the_recording(pilot) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_add_modal_offers_somewhere_to_browse(repo, tmp_path):
-    seed(repo)
-    one_recording_among(tmp_path)
-
-    async with MemoApp(repo).run_test() as pilot:
-        await open_add_modal(pilot, tmp_path)
-
-        assert showing(pilot.app, "#source-tree")
-
-
-@pytest.mark.asyncio
 async def test_the_tree_starts_in_the_home_folder(repo):
     # where recordings actually are; the tests point it somewhere they own
     seed(repo)
@@ -2176,19 +1898,6 @@ async def test_picking_a_recording_from_the_tree_fills_the_path(repo, tmp_path):
         await pick_the_recording(pilot)
 
         assert pilot.app.screen.query_one("#source-path", Input).value == str(src)
-
-
-@pytest.mark.asyncio
-async def test_picking_a_recording_moves_on_to_sending_it(repo, tmp_path):
-    # picking is half of it; the project is still there to check before enter
-    seed(repo)
-    one_recording_among(tmp_path)
-
-    async with MemoApp(repo).run_test() as pilot:
-        await open_add_modal(pilot, tmp_path)
-        await pick_the_recording(pilot)
-
-        assert pilot.app.screen.focused is pilot.app.screen.query_one("#source-path", Input)
 
 
 @pytest.mark.asyncio

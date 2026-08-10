@@ -46,6 +46,9 @@ dev = [
 pythonpath = ["src"]
 asyncio_mode = "strict"
 testpaths = ["tests"]
+markers = [
+    "ui: TUI Pilot tests",
+]
 
 [tool.mypy]
 files = ["src"]
