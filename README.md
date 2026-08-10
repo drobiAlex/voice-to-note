@@ -1,12 +1,24 @@
 # Voice to note
 
-You sit in meetings across a lot of projects, and each one ends with its own decisions
-and its own things to do. voice-to-note gives them one home: record a voice memo, feed it
-in, and get back a transcript with named speakers, a summary, action items and decisions.
+voice-to-note is a simple, small framework for analysing voice recordings and
+extracting useful information from them. Today it ships one opinionated note
+template — summary, action items, decisions, and named speakers — with more
+templates for custom note structures on the way.
 
-Your audio never leaves the machine: ffmpeg normalises it, whisper.cpp transcribes, and
-sherpa-onnx separates the speakers, all into a local SQLite file. Only the notes need an
-LLM — `claude` if you have it, or a local Ollama model; the transcript needs neither.
+- **Privacy-first** — audio, transcription and speaker separation never leave
+  the machine: ffmpeg converts, whisper.cpp transcribes, and sherpa-onnx
+  separates speakers, all into a local SQLite file. Only note extraction uses
+  an LLM, and you choose which one — the `claude` CLI, or a local Ollama
+  model. With Ollama, nothing leaves the machine at all.
+- **Agent-ready** — humans get a TUI (`vtn tui`), agents get the same CLI:
+  results go to stdout, progress to stderr, and `list`, `show` and `notes`
+  take `--json`.
+
+  ```sh
+  vtn notes 3 --json | jq .action_items
+  ```
+- **Model choice** — the extraction model is configurable: the `claude` CLI
+  or a local Ollama model today.
 
 ## Install
 
@@ -14,34 +26,14 @@ LLM — `claude` if you have it, or a local Ollama model; the transcript needs n
 curl -fsSL https://raw.githubusercontent.com/drobiAlex/voice-to-note/main/install.sh | bash
 ```
 
-This installs `uv` if you don't have it, installs the `vtn` CLI with `uv tool
-install`, then builds whisper.cpp against Metal and downloads every model into
-`~/Library/Application Support/vtn`. It's idempotent — re-run it any time to upgrade.
+This installs `uv` if needed, installs the `vtn` CLI, builds whisper.cpp
+against Metal, and downloads the models. Needs macOS, the Xcode Command Line
+Tools (for `git`), `cmake` and `ffmpeg`; the installer names whichever of
+these is missing and how to get it.
 
-Needs macOS, the Xcode Command Line Tools (for `git`), `cmake` and `ffmpeg`; the
-installer names whichever of these is missing and how to get it.
+To upgrade, re-run the installer.
 
-To upgrade later, re-run the installer, or run `uv tool upgrade --reinstall
-voice-to-note`. If you'd rather install without the script, `uv tool install
-git+https://github.com/drobiAlex/voice-to-note` followed by `vtn setup` does the
-same thing.
-
-```sh
-vtn process ~/memos/standup.m4a
-```
-
-## Quickstart
-
-For development, `./run.sh` is the entry point instead — a source checkout keeps
-the database, models and whisper.cpp build inside the repo via `VTN_HOME`, and
-`run.sh` calls `vtn setup` under the hood.
-
-```sh
-./run.sh                            # checks tools, builds whisper.cpp, fetches models
-./run.sh process ~/memos/standup.m4a
-```
-
-`run.sh` is idempotent and forwards its arguments to `vtn` once setup is done.
+## Usage
 
 | Command | What it does |
 |---|---|
@@ -50,72 +42,22 @@ the database, models and whisper.cpp build inside the repo via `VTN_HOME`, and
 | `vtn list` | list stored memos |
 | `vtn show <id>` | print a memo's transcript |
 | `vtn notes <id>` | print the extracted notes |
-| `vtn extract <id>` | (re)run note extraction; `--force` replaces notes you edited |
-| `vtn diarize <id>` | (re)run diarization; `--speakers N` pins the count instead of auto-detecting |
-| `vtn refine <id>` | repair transcription errors; `--diff` shows them without storing |
 | `vtn ask <id> <question…>` | ask a question about one memo |
-| `vtn info <id>` | what state a memo is in, and when it last changed |
-| `vtn rename <id> <label> <name>` | name a speaker; later memos match by voice |
-| `vtn move <id> <project>` | file a memo under another project |
-| `vtn project rename <old> <new>` | rename a project, carrying every memo in it |
-| `vtn project remove <name>` | empty a project; its memos go back to `other` |
 | `vtn tui` | browse, edit and process memos on one screen |
 
-Once a memo has been refined, every reader shows the repaired wording; `vtn show
-<id> --raw` prints the transcription as it was first heard.
+`vtn --help` lists the full set (diarize, refine, projects, speaker naming, …).
 
-Every memo belongs to a project — `--project work` when processing, `vtn move` after
-the fact — and `vtn list --project work` narrows the list to one, as does `vtn list
---tag release` for a tag the notes carry. `vtn tui` opens the lot on a single screen,
-where `e` edits a memo's notes as Markdown. The screen shows your wording from then on,
-while `vtn notes` and `--json` keep printing the model's; `vtn notes --edited` prints
-what the screen shows, and only `vtn extract --force` overwrites what you wrote.
+## Roadmap
 
-Lower case acts on the memo you are reading, upper case on its project:
-`o` add a recording · `e` edit notes · `i` details · `x` extract · `p` repair ·
-`d` diarize · `a` ask · `m` move · `r` name a speaker · `t` raw transcript ·
-`R` rename project · `X` empty project · `/` find by tag · `esc` back · `q` quit.
-The footer offers only the keys that currently apply, so the ones it shows all work.
-
-Progress goes to stderr and results to stdout, so redirecting a command captures
-only its output. `list`, `show` and `notes` also take `--json`:
-
-```sh
-vtn notes 3 --json | jq .action_items
-```
-
-Settings come from `VTN_*` environment variables or an optional `vtn.toml` in the
-project root — environment wins, then the file, then the default. See `config.py`
-for the full set (`whisper_model`, `num_speakers`, `ollama_model`, and others).
-
-## Architecture
-
-Every module is defined by what it is allowed to touch. Arrows are the imports
-each layer may make; anything not drawn here is not allowed.
-
-```mermaid
-flowchart TD
-    cli["cli.py — parse args, print"] --> services["services.py — the operations"]
-    services --> transforms["transforms/ — pure logic, no I/O"]
-    services --> storage["storage/repository.py — every SQL statement"]
-    services --> gateways["gateways/ — the outside world, no policy"]
-    gateways -.->|wire formats only| transforms
-    gateways --> ffmpeg[ffmpeg]
-    gateways --> whisper[whisper.cpp]
-    gateways --> sherpa[sherpa-onnx]
-    gateways --> llm["claude CLI / ollama"]
-```
-
-`cli.py` never queries the database and never formats a transcript — services
-does both, so there is one place each output is built. Every layer may use the
-dataclasses in `domain.py`. Data lives in `data/`: the SQLite database, and
-converted audio under `data/uploads/`.
-
-A `GatewayError` means a setup problem the user can fix, such as a missing binary
-or model, and ends the command with a single line of advice. Anything else is a
-bug and keeps its traceback, which is the only thing that locates it.
+- Custom note templates — define your own structures for extracted notes
+- Settings & configuration — choose the extraction model (Claude, Codex, and others)
+- Native recording — record audio directly on your Mac instead of importing voice memos
+- Full-text search across transcripts and notes
 
 ## Development
+
+`./run.sh` is the development entry point — it keeps the database, models
+and whisper.cpp build inside the checkout via `VTN_HOME`.
 
 ```sh
 uv run pytest -q
