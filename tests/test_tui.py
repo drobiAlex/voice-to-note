@@ -1352,6 +1352,141 @@ async def test_work_finishing_on_a_memo_you_have_left_does_not_redraw_it(repo, m
         assert "Fresh off the model" not in notes_pane(pilot).document.source
 
 
+# --- what the list says while work is running on one of its rows ----------
+
+
+def held_diarization(holding: threading.Event):
+    """A speaker pass that runs until the test lets it finish, so that a job can
+    be looked at while it is genuinely still in flight."""
+
+    def slow(_repo, _memo_id, log=None, num_speakers=None):
+        holding.wait(timeout=5)
+        return ["S1"]
+
+    return slow
+
+
+async def listed_memo(pilot, project: str, memo_id: int) -> None:
+    """Opens a memo with its project listed above it, which is what a person
+    sees: the row and the detail of the same memo."""
+    pilot.app.show_project(project)
+    await pilot.pause()
+    await open_memo(pilot, memo_id)
+
+
+@pytest.mark.asyncio
+async def test_a_memo_being_worked_on_says_so_on_its_own_row(repo, monkeypatch):
+    # the notification says it once and scrolls away; the row is where somebody
+    # looks to see whether the memo is busy or merely idle
+    work, _home = seed(repo)
+    holding = threading.Event()
+    monkeypatch.setattr(services, "rediarize", held_diarization(holding))
+
+    async with MemoApp(repo).run_test() as pilot:
+        await listed_memo(pilot, "work", work)
+        try:
+            await diarize_speakers(pilot, "2")
+            await pilot.pause()
+
+            assert "diarizing" in row_for(pilot.app, "standup.m4a")["status"]
+        finally:
+            holding.set()
+            await finish_jobs(pilot)
+
+
+@pytest.mark.asyncio
+async def test_the_row_goes_back_to_the_memos_own_state_once_the_job_is_done(
+    repo, monkeypatch
+):
+    # an indicator left behind would have the row claiming work that has stopped
+    work, _home = seed(repo)
+    holding = threading.Event()
+    monkeypatch.setattr(services, "rediarize", held_diarization(holding))
+
+    async with MemoApp(repo).run_test() as pilot:
+        await listed_memo(pilot, "work", work)
+        try:
+            await diarize_speakers(pilot, "2")
+            await pilot.pause()
+        finally:
+            holding.set()
+            await finish_jobs(pilot)
+
+        assert row_for(pilot.app, "standup.m4a")["status"] == "extracted"
+
+
+@pytest.mark.asyncio
+async def test_a_job_that_fails_leaves_nothing_running_on_the_row(repo, monkeypatch):
+    # a failure that left the indicator behind would read as work still going,
+    # and the memo would look busy for the rest of the session
+    work, _home = seed(repo)
+
+    def unavailable(_repo, _memo_id, log=None, num_speakers=None):
+        raise GatewayError("the diarizer is not installed")
+
+    monkeypatch.setattr(services, "rediarize", unavailable)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await listed_memo(pilot, "work", work)
+        await diarize_speakers(pilot, "2")
+        await finish_jobs(pilot)
+
+        assert row_for(pilot.app, "standup.m4a")["status"] == "extracted"
+        assert "the diarizer is not installed" in said(pilot)
+
+
+@pytest.mark.asyncio
+async def test_extracting_from_the_keyboard_moves_the_row_on_to_extracted(
+    repo, monkeypatch
+):
+    # the row is drawn from the database as the list was opened, so without a
+    # redraw it keeps calling the memo transcribed until the reader leaves the
+    # project and comes back
+    _work, home = seed(repo)
+
+    def extract(worker_repo, memo_id, force=False):
+        worker_repo.save_extraction(memo_id, "claude", NOTES)
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", extract)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await listed_memo(pilot, "personal", home)
+        assert row_for(pilot.app, "shopping.m4a")["status"] == "transcribed"
+
+        await pilot.press("x")
+        await finish_jobs(pilot)
+
+        assert row_for(pilot.app, "shopping.m4a")["status"] == "extracted"
+
+
+@pytest.mark.asyncio
+async def test_a_job_finishing_under_a_tag_search_redraws_the_search(repo, monkeypatch):
+    # the search is what is on screen; redrawing the project underneath it would
+    # take the results away from somebody who is still reading them
+    work, _home = seed(repo)
+
+    def refine(worker_repo, memo_id, dry_run=False):
+        (stored,) = worker_repo.segments(memo_id)
+        worker_repo.update_refinements(memo_id, {stored.id: "We ship on Friday."})
+        return services.RefineResult(changes=[], flagged=[], untouched=0)
+
+    monkeypatch.setattr(services, "refine_transcript", refine)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("personal")
+        await pilot.pause()
+        await search_tag(pilot, "release")
+        await open_memo(pilot, work)
+
+        await pilot.press("p")
+        await finish_jobs(pilot)
+
+        assert memo_names(pilot.app) == ["standup.m4a"]
+        assert pilot.app.sub_title == "tag: release"
+        assert row_for(pilot.app, "standup.m4a")["status"] == "extracted (repaired)"
+
+
 # --- asking a memo a question ---------------------------------------------
 
 

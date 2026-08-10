@@ -5,6 +5,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
+from textual.timer import Timer
 from textual.widgets import (
     DataTable,
     DirectoryTree,
@@ -553,6 +554,21 @@ MEMO_ACTIONS = frozenset(
 )
 PROJECT_ACTIONS = frozenset({"rename_project", "remove_project"})
 
+# how a row says work is running on it: a block travelling along a short bar,
+# beside the word for what is being done. The bar is drawn out of characters
+# rather than being a Rich progress bar, whose pulse is carried entirely in
+# colour — and a table row under the cursor is repainted in the cursor's own
+# colour, which would leave the memo being worked on with a bar frozen solid
+JOB_BAR = 6
+JOB_FRAME = 0.4
+
+
+def _running(doing: str, frame: int) -> str:
+    """One frame of what a row shows while it is being worked on: the block a
+    step further along the bar, and the word for the work."""
+    at = frame % JOB_BAR
+    return "".join("█" if cell == at else "░" for cell in range(JOB_BAR)) + f" {doing}"
+
 
 class MemoApp(App[None]):
     """One screen over the memo database: the projects down the side, the chosen
@@ -608,6 +624,14 @@ class MemoApp(App[None]):
         # its id, a recording still being brought in by the path it came from,
         # since its memo does not exist yet
         self.jobs: set[Hashable] = set()
+        # what each running job is doing, in the word its row shows. Kept beside
+        # the keys rather than in them so that what may run at once stays the one
+        # question the set above answers
+        self.running: dict[Hashable, str] = {}
+        # where the block has got to along the bar, and the timer moving it: one
+        # for the whole screen, since every row being worked on moves together
+        self.frame = 0
+        self.ticker: Timer | None = None
         # where the add-recording tree starts looking. Home is where recordings
         # tend to be; a VTN_BROWSE_ROOT setting would land here
         self.browse_root = Path.home()
@@ -637,8 +661,12 @@ class MemoApp(App[None]):
         """Opens on the projects that exist, with the first one already picked
         out: a list highlighting nothing makes the session's first Enter do
         nothing, which reads as the app being broken. The memo table gets its
-        headings once, since only its rows change from here on."""
-        self.query_one("#memos", DataTable).add_columns(*services.MEMO_COLUMNS)
+        headings once, since only its rows change from here on, each column
+        keyed by what it is called so that a single cell can be found again by
+        name rather than by counting along the row."""
+        memos = self.query_one("#memos", DataTable)
+        for column in services.MEMO_COLUMNS:
+            memos.add_column(column, key=column)
         self.load_projects()
         self.query_one("#projects", ListView).focus()
 
@@ -692,6 +720,28 @@ class MemoApp(App[None]):
                 row.updated,
                 key=str(row.id),
             )
+        # the rows have just come back from the database, which knows nothing of
+        # work still running, so anything busy has to say so again
+        self._draw_running()
+
+    def _draw_running(self) -> None:
+        """Puts the indicator back on the row of everything being worked on that
+        the list is showing. A recording still being brought in is keyed by the
+        path it came from and has no row yet, so it is passed over."""
+        memos = self.query_one("#memos", DataTable)
+        for key, doing in self.running.items():
+            if str(key) in memos.rows:
+                memos.update_cell(
+                    str(key), "status", _running(doing, self.frame), update_width=True
+                )
+
+    def _relist(self) -> None:
+        """Redraws whichever listing is on screen, so that the status column
+        stops describing the memos as they were when the list was opened."""
+        if self.tag is not None:
+            self.show_tagged(self.tag)
+        elif self.project is not None:
+            self.show_project(self.project)
 
     def _listed(self, memo_id: int) -> bool:
         """Whether a memo is among the rows the table is showing."""
@@ -777,7 +827,34 @@ class MemoApp(App[None]):
             return
         self.jobs.add(key)
         self.notify(f"{doing} {subject} …")
+        self._started(key, doing)
         self._run_job(key, run)
+
+    def _started(self, key: Hashable, doing: str) -> None:
+        """Marks the row of what is being worked on as busy and keeps the bar
+        moving. A still bar reads as a screen that has hung, which over a pass
+        that takes minutes is the whole thing being said."""
+        self.running[key] = doing
+        self._draw_running()
+        if self.ticker is None:
+            self.ticker = self.set_interval(JOB_FRAME, self._advance)
+
+    def _advance(self) -> None:
+        """Moves every bar on to its next frame."""
+        self.frame += 1
+        self._draw_running()
+
+    def _finished(self, key: Hashable) -> None:
+        """Takes the indicator off the row now that the work has stopped,
+        however it stopped, and puts the whole listing back in step with the
+        database: the memo that was worked on is not the only row a pass can
+        have changed. With nothing left running the bars stop moving, since a
+        timer redrawing an idle screen keeps a laptop awake for nothing."""
+        self.running.pop(key, None)
+        if not self.running and self.ticker is not None:
+            self.ticker.stop()
+            self.ticker = None
+        self._relist()
 
     def _start_memo_job(
         self, memo_id: int, doing: str, run: Callable[[Repository], str]
@@ -803,11 +880,14 @@ class MemoApp(App[None]):
 
     def _job_ended(self, key: Hashable, message: str, failed: bool) -> None:
         """Back on the main thread: frees the thing that was worked on, says how
-        it went, and redraws what the work changed — but only while that memo is
-        still the one on screen, since pulling somebody back to a memo they have
-        left is worse than letting them find it changed when they return. A key
-        that is not a memo id simply never matches the memo on screen."""
+        it went, and redraws what the work changed — the listing always, since a
+        row that still describes the memo as it was before the pass is simply
+        wrong, but the detail below it only while that memo is still the one on
+        screen, since pulling somebody back to a memo they have left is worse
+        than letting them find it changed when they return. A key that is not a
+        memo id simply never matches the memo on screen."""
         self.jobs.discard(key)
+        self._finished(key)
         self.notify(message, severity="error" if failed else "information")
         memo_id = self.memo_id
         if not failed and memo_id is not None and memo_id == key:
