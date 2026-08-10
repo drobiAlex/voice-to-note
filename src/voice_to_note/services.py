@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from . import config
 from .domain import Extraction, Memo, Speaker, SpeakerMatch, Turn
@@ -360,6 +360,90 @@ def config_rows() -> list[tuple[str, str, str, str]]:
         )
         for key, setting in config.SETTINGS.items()
     ]
+
+
+def _registered_setting(key: str) -> config.Setting:
+    """The registry entry for a key a user typed, refusing one this app does
+    not know about: `vtn config` lists every name it will accept."""
+    setting = config.SETTINGS.get(key)
+    if setting is None:
+        raise InvalidInput(f"unknown setting: {key} (see: vtn config)")
+    return setting
+
+
+def _env_override_note(key: str) -> str:
+    """Told alongside a settings write when an environment variable means the
+    value just written is not actually the one in effect: VTN_<KEY> always
+    wins over vtn.toml, so a write under it would otherwise look like it did
+    nothing."""
+    if f"VTN_{key.upper()}" not in os.environ:
+        return ""
+    return f" — note: VTN_{key.upper()} is set in the environment and still wins"
+
+
+def _write_confirmation(message: str, key: str) -> str:
+    """A settings write's confirmation line: what changed, an environment
+    override's warning if one applies, and the reminder that nothing takes
+    hold until the next start — config is read once, at import time, so this
+    process is still running on the value it started with."""
+    return f"{message}{_env_override_note(key)} (takes effect on next start)"
+
+
+def _toml_format(value: Any) -> str:
+    """One value the way vtn.toml spells it: a quoted string, or a bare
+    number — the shapes every registered setting's cast can produce."""
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _write_config_file(path: Path, settings: dict[str, Any]) -> None:
+    """Rewrites vtn.toml from a settings dict, one `key = value` line per
+    entry. Makes the app's own directory if setup has not run yet, since a
+    settings write must not depend on that having already happened."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"{key} = {_toml_format(value)}" for key, value in settings.items()]
+    path.write_text("\n".join(lines) + ("\n" if lines else ""))
+
+
+def config_set(key: str, value: str) -> str:
+    """Writes one setting into vtn.toml, cast the same way config.py reads it
+    back so a value nothing downstream could use is refused before it ever
+    reaches disk."""
+    setting = _registered_setting(key)
+    try:
+        cast_value = setting.cast(value)
+    except (ValueError, TypeError):
+        raise InvalidInput(f"not a valid {key}: {value}") from None
+    settings = config.read_config_file(config.CONFIG_PATH)
+    settings[key] = cast_value
+    _write_config_file(config.CONFIG_PATH, settings)
+    return _write_confirmation(f"{key} set to {cast_value}", key)
+
+
+def config_unset(key: str) -> str:
+    """Drops one setting from vtn.toml, so it falls back to its default (or
+    an environment override, if one is set). A key never written is left
+    exactly as it was rather than rewriting a file to say the same thing."""
+    _registered_setting(key)
+    settings = config.read_config_file(config.CONFIG_PATH)
+    if key not in settings:
+        return f"{key} is already default{_env_override_note(key)}"
+    del settings[key]
+    _write_config_file(config.CONFIG_PATH, settings)
+    return _write_confirmation(f"{key} unset", key)
+
+
+def config_reset() -> str:
+    """Clears vtn.toml of every setting this app registers, leaving any keys
+    a user wrote by hand that it does not recognise: data this app does not
+    own is not this reset's to delete."""
+    settings = config.read_config_file(config.CONFIG_PATH)
+    kept = {k: v for k, v in settings.items() if k not in config.SETTINGS}
+    _write_config_file(config.CONFIG_PATH, kept)
+    return "all settings reset to default (takes effect on next start)"
 
 
 def process_memo(

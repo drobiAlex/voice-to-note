@@ -605,6 +605,21 @@ def test_the_config_command_prints_the_rows_services_provided(monkeypatch, capsy
     assert "speaker count to assume" in out
 
 
+def test_config_set_routes_the_typed_key_and_value_to_services(monkeypatch, capsys):
+    seen = {}
+
+    def fake_config_set(key, value):
+        seen["call"] = (key, value)
+        return "whisper_model set to small"
+
+    monkeypatch.setattr(services, "config_set", fake_config_set)
+
+    run(monkeypatch, StubRepo(), "config", "set", "whisper_model", "small")
+
+    assert seen["call"] == ("whisper_model", "small")
+    assert capsys.readouterr().err == "whisper_model set to small\n"
+
+
 # --- launching bare, with no subcommand -----------------------------------
 
 

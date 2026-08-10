@@ -194,6 +194,21 @@ def cmd_config(args: argparse.Namespace) -> None:
         print(f"{key:<{key_w}}  {value:<{value_w}}  {source:<{source_w}}  {doc}")
 
 
+def cmd_config_set(args: argparse.Namespace) -> None:
+    """Writes one setting into vtn.toml."""
+    status(services.config_set(args.key, args.value))
+
+
+def cmd_config_unset(args: argparse.Namespace) -> None:
+    """Clears one setting from vtn.toml back to its default."""
+    status(services.config_unset(args.key))
+
+
+def cmd_config_reset(args: argparse.Namespace) -> None:
+    """Clears every setting from vtn.toml back to its default."""
+    status(services.config_reset())
+
+
 def cmd_tui(args: argparse.Namespace) -> None:
     """Opens the memo browser."""
     # textual costs about as much to import as the whole rest of the app, and
@@ -309,9 +324,24 @@ def main() -> None:
     )
     sp.set_defaults(fn=cmd_setup)
 
-    sub.add_parser(
-        "config", help="list settings and where each value comes from"
-    ).set_defaults(fn=cmd_config)
+    sp = sub.add_parser(
+        "config", help="list settings, or write one: config set|unset|reset"
+    )
+    sp.set_defaults(fn=cmd_config)
+    config_sub = sp.add_subparsers(dest="config_cmd")
+
+    csp = config_sub.add_parser("set", help="set a setting: config set <key> <value>")
+    csp.add_argument("key")
+    csp.add_argument("value")
+    csp.set_defaults(fn=cmd_config_set)
+
+    csp = config_sub.add_parser("unset", help="clear a setting: config unset <key>")
+    csp.add_argument("key")
+    csp.set_defaults(fn=cmd_config_unset)
+
+    config_sub.add_parser(
+        "reset", help="clear every setting back to its default"
+    ).set_defaults(fn=cmd_config_reset)
 
     sub.add_parser(
         "tui", help="browse, edit and process memos on one screen"

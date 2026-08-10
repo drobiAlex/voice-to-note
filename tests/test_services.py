@@ -1206,6 +1206,96 @@ def test_a_speaker_name_is_tidied_before_it_is_stored(repo, wav):
     assert services.speakers(repo, memo_id) == {"S1": "Alice"}
 
 
+# --- writing settings -------------------------------------------------------
+
+
+@pytest.fixture
+def config_path(monkeypatch, tmp_path):
+    """Points config_set/unset/reset at a scratch vtn.toml instead of the
+    real one, with no VTN_ environment override left over from the machine
+    running the test to confuse a test that did not ask for one."""
+    path = tmp_path / "vtn.toml"
+    monkeypatch.setattr(config, "CONFIG_PATH", path)
+    for key in config.SETTINGS:
+        monkeypatch.delenv(f"VTN_{key.upper()}", raising=False)
+    return path
+
+
+def test_setting_a_value_writes_it_to_the_config_file(config_path):
+    services.config_set("whisper_model", "small")
+
+    assert config.read_config_file(config_path) == {"whisper_model": "small"}
+
+
+def test_setting_a_value_reports_it_and_that_it_waits_for_a_restart(config_path):
+    message = services.config_set("num_speakers", "3")
+
+    assert message == "num_speakers set to 3 (takes effect on next start)"
+
+
+def test_setting_preserves_other_keys_already_in_the_file(config_path):
+    config_path.write_text('num_speakers = 2\n')
+
+    services.config_set("whisper_model", "small")
+
+    assert config.read_config_file(config_path) == {
+        "num_speakers": 2,
+        "whisper_model": "small",
+    }
+
+
+def test_setting_an_unknown_key_is_refused(config_path):
+    with pytest.raises(services.InvalidInput, match="unknown setting: bogus"):
+        services.config_set("bogus", "1")
+
+
+def test_setting_a_value_that_does_not_cast_is_refused(config_path):
+    with pytest.raises(services.InvalidInput, match="not a valid num_speakers: nope"):
+        services.config_set("num_speakers", "nope")
+
+
+def test_setting_a_value_warns_when_an_env_override_still_wins(config_path, monkeypatch):
+    monkeypatch.setenv("VTN_WHISPER_MODEL", "tiny")
+
+    message = services.config_set("whisper_model", "small")
+
+    assert "VTN_WHISPER_MODEL" in message
+    assert "still wins" in message
+
+
+def test_unsetting_a_value_removes_it_from_the_file(config_path):
+    config_path.write_text('whisper_model = "small"\nnum_speakers = 2\n')
+
+    services.config_unset("whisper_model")
+
+    assert config.read_config_file(config_path) == {"num_speakers": 2}
+
+
+def test_unsetting_a_value_never_written_says_it_was_already_default(config_path):
+    assert services.config_unset("whisper_model") == "whisper_model is already default"
+
+
+def test_unsetting_an_unknown_key_is_refused(config_path):
+    with pytest.raises(services.InvalidInput, match="unknown setting: bogus"):
+        services.config_unset("bogus")
+
+
+def test_reset_clears_every_registered_setting(config_path):
+    config_path.write_text('whisper_model = "small"\nnum_speakers = 2\n')
+
+    services.config_reset()
+
+    assert config.read_config_file(config_path) == {}
+
+
+def test_reset_keeps_keys_it_does_not_own(config_path):
+    config_path.write_text('whisper_model = "small"\nnot_a_setting = 42\n')
+
+    services.config_reset()
+
+    assert config.read_config_file(config_path) == {"not_a_setting": 42}
+
+
 # --- installing whisper.cpp and its models --------------------------------
 
 
