@@ -34,6 +34,10 @@ from .transforms.speakers import (
 )
 
 Log = Callable[[str], None]
+# how far through the pipeline a recording has got: which stage is starting, and
+# the word for it. A line of text says the same thing, but only a number can be
+# drawn as a bar that fills
+Progress = Callable[[int, str], None]
 T = TypeVar("T")
 
 
@@ -62,6 +66,11 @@ class ProcessResult:
 
 def _silent(message: str) -> None:
     """Default for callers that want the work done without progress reports."""
+    pass
+
+
+def _uncounted(stage: int, doing: str) -> None:
+    """Default for callers with nowhere to draw how far the pipeline has got."""
     pass
 
 
@@ -104,19 +113,28 @@ def _tag(tag: str | None) -> str | None:
 
 
 def process_memo(
-    repo: Repository, src: Path, project: str = "other", log: Log = _silent
+    repo: Repository,
+    src: Path,
+    project: str = "other",
+    log: Log = _silent,
+    progress: Progress = _uncounted,
 ) -> ProcessResult:
-    """The whole pipeline for a new recording: audio in, stored memo out."""
+    """The whole pipeline for a new recording: audio in, stored memo out. Each
+    stage is reported as it starts rather than as it ends, so that a screen
+    counting them off is never a stage behind the work."""
     # before the minutes of converting and transcribing, not after
     project = _project_name(project)
     wav = config.UPLOADS_DIR / f"{src.stem}-{uuid.uuid4().hex[:8]}.wav"
+    progress(1, "converting")
     log(f"converting {src.name} …")
     audio.to_wav16k(src, wav)
     duration = audio.duration_seconds(wav)
+    progress(2, "transcribing")
     log(f"transcribing ({duration:.0f}s audio) …")
     raw = whisper.transcribe(wav, duration)
     segs = segments_from_whisper(raw)
     language = raw.get("result", {}).get("language", "")
+    progress(3, "diarizing")
     log("diarizing …")
     turns = sherpa.diarize(wav)
     segs = assign_speakers(segs, turns)

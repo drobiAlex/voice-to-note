@@ -570,6 +570,28 @@ def _running(doing: str, frame: int) -> str:
     return "".join("█" if cell == at else "░" for cell in range(JOB_BAR)) + f" {doing}"
 
 
+# the stages a recording goes through on its way in: converting, transcribing,
+# diarizing, and the extraction that follows them. A bar of one slot each says
+# how much of the wait is behind you, which the travelling block of a job with
+# no known end cannot
+TOTAL_STAGES = 4
+
+
+def _importing(stage: int, doing: str, frame: int) -> str:
+    """One frame of what a recording being brought in shows: a slot per stage,
+    the stages behind it filled in, the one it is on flickering, and the word
+    for that stage."""
+    cells = []
+    for slot in range(1, TOTAL_STAGES + 1):
+        if slot < stage:
+            cells.append("█")
+        elif slot == stage:
+            cells.append("█" if frame % 2 else "▓")
+        else:
+            cells.append("░")
+    return "".join(cells) + f" {doing}"
+
+
 class MemoApp(App[None]):
     """One screen over the memo database: the projects down the side, the chosen
     project's recordings beside them, and what was said and made of the one
@@ -628,6 +650,10 @@ class MemoApp(App[None]):
         # the keys rather than in them so that what may run at once stays the one
         # question the set above answers
         self.running: dict[Hashable, str] = {}
+        # the recordings on their way in and how far each has got, keyed by the
+        # path it is coming from — which is also the key of the row standing in
+        # for it, since it has no memo to be keyed by until the pipeline ends
+        self.importing: dict[str, tuple[int, str]] = {}
         # where the block has got to along the bar, and the timer moving it: one
         # for the whole screen, since every row being worked on moves together
         self.frame = 0
@@ -721,16 +747,38 @@ class MemoApp(App[None]):
                 key=str(row.id),
             )
         # the rows have just come back from the database, which knows nothing of
-        # work still running, so anything busy has to say so again
+        # work still running or of a recording that is not stored yet, so both
+        # have to put themselves back
+        for key in self.importing:
+            self._place_importing(key)
+        self._draw_importing()
         self._draw_running()
+
+    def _place_importing(self, key: str) -> None:
+        """Stands a row in for a recording still coming in. Everything but its
+        name and its stage bar is blank, because nothing else about it is known
+        until the pipeline has read it."""
+        self.query_one("#memos", DataTable).add_row(
+            Path(key).name, "", "", "", "", "", key=key
+        )
+
+    def _draw_importing(self) -> None:
+        """Puts the stage bar back on the row of every recording on its way in."""
+        memos = self.query_one("#memos", DataTable)
+        for key, (stage, doing) in self.importing.items():
+            if key in memos.rows:
+                memos.update_cell(
+                    key, "status", _importing(stage, doing, self.frame), update_width=True
+                )
 
     def _draw_running(self) -> None:
         """Puts the indicator back on the row of everything being worked on that
-        the list is showing. A recording still being brought in is keyed by the
-        path it came from and has no row yet, so it is passed over."""
+        the list is showing. A recording still being brought in is passed over:
+        its row counts the stages of the pipeline off instead, which says more
+        than a block travelling with no end in sight."""
         memos = self.query_one("#memos", DataTable)
         for key, doing in self.running.items():
-            if str(key) in memos.rows:
+            if str(key) not in self.importing and str(key) in memos.rows:
                 memos.update_cell(
                     str(key), "status", _running(doing, self.frame), update_width=True
                 )
@@ -815,20 +863,23 @@ class MemoApp(App[None]):
 
     def _start_job(
         self, key: Hashable, subject: str, doing: str, run: Callable[[Repository], str]
-    ) -> None:
-        """Sends one piece of slow work off to a thread. The key is whatever is
-        being worked on: a memo's id for work on one already stored, and the
-        source path for a recording being brought in, which has no memo yet.
-        Either way one job at a time on the same thing — a second pass would be
-        writing over what the first is still deciding — while two different
-        things are free to run at once."""
+    ) -> bool:
+        """Sends one piece of slow work off to a thread, saying whether it went.
+        The key is whatever is being worked on: a memo's id for work on one
+        already stored, and the source path for a recording being brought in,
+        which has no memo yet. Either way one job at a time on the same thing —
+        a second pass would be writing over what the first is still deciding —
+        while two different things are free to run at once. A caller that draws
+        something of its own beside the job needs to know it was refused, so
+        that it does not draw it for work nobody is doing."""
         if key in self.jobs:
             self.notify(f"{subject} is already busy", severity="warning")
-            return
+            return False
         self.jobs.add(key)
         self.notify(f"{doing} {subject} …")
         self._started(key, doing)
         self._run_job(key, run)
+        return True
 
     def _started(self, key: Hashable, doing: str) -> None:
         """Marks the row of what is being worked on as busy and keeps the bar
@@ -842,6 +893,7 @@ class MemoApp(App[None]):
     def _advance(self) -> None:
         """Moves every bar on to its next frame."""
         self.frame += 1
+        self._draw_importing()
         self._draw_running()
 
     def _finished(self, key: Hashable) -> None:
@@ -851,6 +903,7 @@ class MemoApp(App[None]):
         have changed. With nothing left running the bars stop moving, since a
         timer redrawing an idle screen keeps a laptop awake for nothing."""
         self.running.pop(key, None)
+        self._import_ended(key)
         if not self.running and self.ticker is not None:
             self.ticker.stop()
             self.ticker = None
@@ -970,27 +1023,69 @@ class MemoApp(App[None]):
         if not src.is_file():
             raise services.InvalidInput("no recording at that path")
         name = services.project_name(project)
-        self._start_job(
+        started = self._start_job(
             src, src.name, "processing", lambda repo: self._processed(repo, src, name)
         )
+        if started:
+            self._import_started(src)
+
+    def _import_started(self, src: Path) -> None:
+        """Puts the recording on the list under its own name the moment it is
+        sent off. The pipeline runs for minutes before there is a memo to list,
+        and a list that says nothing of the recording in all that time reads as
+        one that took nothing in."""
+        self.importing[str(src)] = (1, "converting")
+        self._place_importing(str(src))
+        self._draw_importing()
+
+    def _import_at(self, src: Path, stage: int, doing: str) -> None:
+        """Moves the recording's row on to the stage the pipeline has reached,
+        from the worker thread the pipeline reports on."""
+        self.call_from_thread(self._import_stage, str(src), stage, doing)
+
+    def _import_stage(self, key: str, stage: int, doing: str) -> None:
+        """Back on the main thread: remembers how far the recording has got, so
+        that a redrawn list stands its row back up on the same stage."""
+        self.importing[key] = (stage, doing)
+        self._draw_importing()
+
+    def _import_ended(self, key: Hashable) -> None:
+        """Takes the row of a recording that is no longer coming in off the
+        list, whether it became a memo or failed on the way, and puts the
+        sidebar counts back in step with what was stored. The row is removed
+        here rather than left to the redraw that follows, since with no project
+        being browsed there is no redraw to take it away."""
+        if self.importing.pop(str(key), None) is None:
+            return
+        memos = self.query_one("#memos", DataTable)
+        if str(key) in memos.rows:
+            memos.remove_row(str(key))
+        self.load_projects()
 
     def _processed(self, repo: Repository, src: Path, project: str) -> str:
-        """Runs the whole pipeline, then draws the new memo into the lists it
-        belongs in without pulling the reader off whatever they were reading:
-        it is stored, so it will be there when they go looking. Extraction runs
-        on in the same job, but a memo already safely stored must not be undone
-        by a model that fails to answer, so its failure is only reported —
-        the same tolerance `vtn process` gives it at the command line."""
-        result = services.process_memo(repo, src, project, log=self._stage)
-        self.call_from_thread(self._reload, self.project)
+        """Runs the whole pipeline, counting its stages off on the row standing
+        in for the recording, and leaves the reader on whatever they were
+        reading: the memo is stored, so it will be there when they go looking,
+        and its row appears in place of the placeholder once the job ends.
+        Extraction runs on in the same job as a stage of its own, but a memo
+        already safely stored must not be undone by a model that fails to
+        answer, so its failure is only reported — the same tolerance `vtn
+        process` gives it at the command line."""
+        result = services.process_memo(
+            repo,
+            src,
+            project,
+            log=self._stage,
+            progress=lambda stage, doing: self._import_at(src, stage, doing),
+        )
         self._stage("extracting notes …")
+        self._import_at(src, TOTAL_STAGES, "extracting notes")
         try:
             backend = services.run_extraction(repo, result.memo_id)
         except (GatewayError, services.ExtractionError) as failed:
             self.call_from_thread(self.notify, str(failed), severity="warning")
         else:
             self._stage(f"memo {result.memo_id} extracted via {backend}")
-            self.call_from_thread(self._reload, self.project)
         return f"{src.name} is memo {result.memo_id}"
 
     def _stage(self, message: str) -> None:

@@ -94,6 +94,62 @@ def test_processing_gives_the_transcriber_the_audio_duration(repo, tmp_path, mon
     assert [s.text for s in repo.segments(result.memo_id)] == ["Hello"]
 
 
+def test_the_pipeline_says_which_stage_it_is_on_before_that_stage_runs(
+    repo, tmp_path, monkeypatch
+):
+    # a screen counting the stages off would be one behind all the way through
+    # if each stage only reported itself once its minutes of work were over
+    src = tmp_path / "standup.m4a"
+    src.write_bytes(b"fake audio")
+    seen: list = []
+    monkeypatch.setattr(services.config, "UPLOADS_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(services.audio, "to_wav16k", lambda _src, _dst: seen.append("converted"))
+    monkeypatch.setattr(services.audio, "duration_seconds", lambda _path: 1.0)
+    monkeypatch.setattr(
+        services.whisper,
+        "transcribe",
+        lambda _wav, _duration: seen.append("transcribed")
+        or {"transcription": [], "result": {"language": "en"}},
+    )
+    monkeypatch.setattr(
+        services.sherpa, "diarize", lambda _wav, num_speakers=None: seen.append("diarized") or []
+    )
+    monkeypatch.setattr(services.sherpa, "speaker_embeddings", lambda _wav, _turns: {})
+
+    services.process_memo(repo, src, progress=lambda stage, doing: seen.append((stage, doing)))
+
+    assert seen == [
+        (1, "converting"),
+        "converted",
+        (2, "transcribing"),
+        "transcribed",
+        (3, "diarizing"),
+        "diarized",
+    ]
+
+
+def test_a_pipeline_nobody_is_watching_runs_the_same_way(repo, tmp_path, monkeypatch):
+    # the command line has nowhere to draw a stage bar and passes no callback
+    src = tmp_path / "standup.m4a"
+    src.write_bytes(b"fake audio")
+    monkeypatch.setattr(services.config, "UPLOADS_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(services.audio, "to_wav16k", lambda _src, _dst: None)
+    monkeypatch.setattr(services.audio, "duration_seconds", lambda _path: 1.0)
+    monkeypatch.setattr(
+        services.whisper,
+        "transcribe",
+        lambda _wav, _duration: {
+            "transcription": [{"text": " Hello ", "offsets": {"from": 0, "to": 1000}}],
+            "result": {"language": "en"},
+        },
+    )
+    fake_diarization(monkeypatch, [Turn(0, 1000, "S1")], {"S1": ALICE_VOICE})
+
+    result = services.process_memo(repo, src)
+
+    assert repo.memo(result.memo_id).filename == "standup.m4a"
+
+
 def test_transcription_timeout_scales_with_duration_above_a_floor():
     assert whisper.timeout_for(10) == whisper.TIMEOUT_FLOOR_S
     assert whisper.timeout_for(600) == 2400

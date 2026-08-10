@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import threading
 from pathlib import Path
@@ -1742,7 +1743,7 @@ def stores_a_memo(text: str = "hello there"):
     """A stand-in pipeline that files a memo the way the real one would, through
     whatever connection the worker handed it."""
 
-    def process(worker_repo, src, project="other", log=None):
+    def process(worker_repo, src, project="other", log=None, progress=None):
         memo_id = worker_repo.create_memo(
             filename=src.name, wav_path=f"/tmp/{src.name}.wav", duration_s=1.0,
             language="en", segments=[Segment(0, 1000, text, speaker="S1")],
@@ -1918,7 +1919,7 @@ async def test_the_stages_of_a_long_job_are_said_as_they_happen(repo, tmp_path, 
     # minutes of converting and transcribing with a silent screen reads as hung
     seed(repo)
 
-    def process(worker_repo, src, project="other", log=None):
+    def process(worker_repo, src, project="other", log=None, progress=None):
         log(f"converting {src.name} …")
         log("transcribing (12s audio) …")
         return services.ProcessResult(1, 0, [], "en")
@@ -1996,7 +1997,7 @@ async def test_one_recording_is_not_brought_in_twice_at_once(repo, tmp_path, mon
     seed(repo)
     holding = threading.Event()
 
-    def slow(worker_repo, src, project="other", log=None):
+    def slow(worker_repo, src, project="other", log=None, progress=None):
         holding.wait(timeout=5)
         return services.ProcessResult(1, 0, [], "en")
 
@@ -2022,7 +2023,7 @@ async def test_a_recording_ffmpeg_cannot_read_says_so_instead_of_taking_the_app_
 ):
     seed(repo)
 
-    def unreadable(worker_repo, src, project="other", log=None):
+    def unreadable(worker_repo, src, project="other", log=None, progress=None):
         raise GatewayError("ffmpeg could not read that file")
 
     monkeypatch.setattr(services, "process_memo", unreadable)
@@ -2052,6 +2053,213 @@ async def test_leaving_the_modal_brings_nothing_in(repo, tmp_path, monkeypatch):
 
         assert not showing(pilot.app, "#source-path")
         assert ran == []
+
+
+# --- what the list says while a recording is on its way in ----------------
+
+
+def held_import(holding: threading.Event):
+    """A pipeline that runs until the test lets it finish, so that a recording
+    can be looked at while it is genuinely still being brought in."""
+    stored = stores_a_memo()
+
+    def slow(worker_repo, src, project="other", log=None, progress=None):
+        holding.wait(timeout=5)
+        return stored(worker_repo, src, project)
+
+    return slow
+
+
+def staged_import(released: dict[str, threading.Event]):
+    """A pipeline that reports a stage and then waits to be let on to the next,
+    so that each step of an import can be read off the row while it is on it."""
+    stored = stores_a_memo()
+
+    def staged(worker_repo, src, project="other", log=None, progress=None):
+        for stage, doing in ((2, "transcribing"), (3, "diarizing")):
+            progress(stage, doing)
+            released[doing].wait(timeout=5)
+        return stored(worker_repo, src, project)
+
+    return staged
+
+
+def status_of(app, name: str) -> str:
+    """What the list says is happening to one recording, and nothing at all when
+    the list has no row for it."""
+    at = memo_columns(app).index("status")
+    return next((row[at] for row in memo_rows(app) if row[0] == name), "")
+
+
+async def reaching(pilot, name: str, doing: str) -> str:
+    """The row of one recording once it says it has reached a stage, or as it
+    reads after waiting: the pipeline reports from a worker thread, so the row
+    catches up a moment after the stage itself does."""
+    for _ in range(100):
+        if doing in status_of(pilot.app, name):
+            break
+        await asyncio.sleep(0.02)
+    return status_of(pilot.app, name)
+
+
+@pytest.mark.asyncio
+async def test_a_recording_being_brought_in_is_listed_while_it_is_on_its_way(
+    repo, tmp_path, monkeypatch
+):
+    # the pipeline takes minutes, and a list with no sign of the recording in it
+    # reads as one that took nothing in
+    seed(repo)
+    holding = threading.Event()
+    monkeypatch.setattr(services, "process_memo", held_import(holding))
+    monkeypatch.setattr(services, "run_extraction", lambda _r, _i, force=False: "claude")
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        try:
+            await process_file(pilot, recording(tmp_path, "retro.m4a"), "work")
+            await pilot.pause()
+
+            assert "converting" in status_of(pilot.app, "retro.m4a")
+        finally:
+            holding.set()
+            await finish_jobs(pilot)
+
+
+@pytest.mark.asyncio
+async def test_the_row_of_a_recording_walks_the_stages_of_the_pipeline(
+    repo, tmp_path, monkeypatch
+):
+    # one word for the whole import would leave a reader unable to tell a job
+    # halfway through from one that has been stuck on its first minute
+    seed(repo)
+    released = {
+        doing: threading.Event()
+        for doing in ("transcribing", "diarizing", "extracting notes")
+    }
+    monkeypatch.setattr(services, "process_memo", staged_import(released))
+
+    def held_extraction(worker_repo, memo_id, force=False):
+        released["extracting notes"].wait(timeout=5)
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", held_extraction)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        try:
+            await process_file(pilot, recording(tmp_path, "retro.m4a"), "work")
+
+            assert "transcribing" in await reaching(pilot, "retro.m4a", "transcribing")
+            released["transcribing"].set()
+            assert "diarizing" in await reaching(pilot, "retro.m4a", "diarizing")
+            released["diarizing"].set()
+            assert "extracting notes" in await reaching(pilot, "retro.m4a", "extracting notes")
+        finally:
+            for event in released.values():
+                event.set()
+            await finish_jobs(pilot)
+
+
+@pytest.mark.asyncio
+async def test_the_row_of_a_recording_gives_way_to_the_memo_it_became(
+    repo, tmp_path, monkeypatch
+):
+    # two rows for one recording, one of them frozen mid-import, would be worse
+    # than never having shown it on its way in
+    seed(repo)
+    monkeypatch.setattr(services, "process_memo", stores_a_memo())
+    monkeypatch.setattr(services, "run_extraction", lambda _r, _i, force=False: "claude")
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        await process_file(pilot, recording(tmp_path, "retro.m4a"), "work")
+        await finish_jobs(pilot)
+
+        assert memo_names(pilot.app) == ["retro.m4a", "standup.m4a"]
+        assert status_of(pilot.app, "retro.m4a") == "transcribed"
+
+
+@pytest.mark.asyncio
+async def test_a_pipeline_that_fails_takes_the_recordings_row_with_it(
+    repo, tmp_path, monkeypatch
+):
+    # nothing was stored, so a row left behind would be pointing at no memo at
+    # all, and would go on claiming work that has stopped
+    seed(repo)
+
+    def unreadable(worker_repo, src, project="other", log=None, progress=None):
+        raise GatewayError("ffmpeg could not read that file")
+
+    monkeypatch.setattr(services, "process_memo", unreadable)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        await process_file(pilot, recording(tmp_path, "retro.m4a"), "work")
+        await finish_jobs(pilot)
+
+        assert memo_names(pilot.app) == ["standup.m4a"]
+        assert status_of(pilot.app, "retro.m4a") == ""
+        assert "ffmpeg could not read that file" in said(pilot)
+
+
+@pytest.mark.asyncio
+async def test_a_recording_on_its_way_in_survives_the_list_being_redrawn(
+    repo, tmp_path, monkeypatch
+):
+    # the rows come back from the database, which knows nothing of a recording
+    # that is still minutes away from being stored
+    seed(repo)
+    holding = threading.Event()
+    monkeypatch.setattr(services, "process_memo", held_import(holding))
+    monkeypatch.setattr(services, "run_extraction", lambda _r, _i, force=False: "claude")
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        try:
+            await process_file(pilot, recording(tmp_path, "retro.m4a"), "work")
+            await pilot.pause()
+            pilot.app.show_project("personal")
+            await pilot.pause()
+            pilot.app.show_project("work")
+            await pilot.pause()
+
+            assert "converting" in status_of(pilot.app, "retro.m4a")
+        finally:
+            holding.set()
+            await finish_jobs(pilot)
+
+
+@pytest.mark.asyncio
+async def test_a_recording_refused_as_a_duplicate_is_listed_once(
+    repo, tmp_path, monkeypatch
+):
+    # the second attempt runs nothing, so a second row for it would be a row
+    # nothing was ever going to fill in
+    seed(repo)
+    holding = threading.Event()
+    monkeypatch.setattr(services, "process_memo", held_import(holding))
+    monkeypatch.setattr(services, "run_extraction", lambda _r, _i, force=False: "claude")
+    src = recording(tmp_path, "retro.m4a")
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        try:
+            await process_file(pilot, src, "work")
+            await pilot.pause()
+            await process_file(pilot, src, "work")
+            await pilot.pause()
+
+            assert memo_names(pilot.app) == ["standup.m4a", "retro.m4a"]
+            assert "retro.m4a is already busy" in said(pilot)
+        finally:
+            holding.set()
+            await finish_jobs(pilot)
 
 
 # --- a footer offering only what applies ----------------------------------
