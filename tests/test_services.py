@@ -1,5 +1,8 @@
 import json
+import random
+import re
 import threading
+import time
 
 import numpy as np
 import pytest
@@ -383,6 +386,21 @@ def add_transcript(repo, wav, lines: list[str]) -> list[int]:
     return [memo_id, *[s.id for s in repo.segments(memo_id)]]
 
 
+def refine_targets(prompt: str) -> dict[int, str]:
+    """The lines one window asked to have repaired, by id. The context lines
+    around them are marked read-only, so a stub can answer that window with
+    exactly the ids it was asked for and no others."""
+    asked = re.findall(r"^\[(\d+)\] (?!\(read-only\))[^:]*: (.*)$", prompt, re.MULTILINE)
+    return {int(seg_id): text for seg_id, text in asked}
+
+
+def long_transcript(repo, wav, windows: int) -> int:
+    """A memo long enough to fill the given number of repair windows."""
+    lines = [f"line {i} as it was heard" for i in range(refine.CHUNK_SIZE * windows)]
+    memo_id, *_ids = add_transcript(repo, wav, lines)
+    return memo_id
+
+
 def test_refining_a_memo_stores_the_repairs_beside_the_original(repo, wav, monkeypatch):
     memo_id, first, second = add_transcript(
         repo, wav, ["so their going to ship on friday", "yeah we agreed on that"]
@@ -491,6 +509,74 @@ def test_refining_runs_on_the_cheaper_refine_model(repo, wav, monkeypatch):
     services.refine_transcript(repo, memo_id)
 
     assert seen["model"] == config.REFINE_MODEL
+
+
+def test_repair_windows_are_in_flight_at_the_same_time(repo, wav, monkeypatch):
+    # one backend round trip per window, taken in turn, is minutes of waiting on
+    # a long memo — the wall clock is what makes the feature usable at all
+    memo_id = long_transcript(repo, wav, windows=services.REFINE_WORKERS)
+    together = threading.Barrier(services.REFINE_WORKERS, timeout=5)
+
+    def claude(prompt, model=None):
+        # windows taken one after another never gather here, and the wait breaks
+        together.wait()
+        return refine_reply({i: t.capitalize() for i, t in refine_targets(prompt).items()})
+
+    monkeypatch.setattr(services.llm, "claude_available", lambda: True)
+    monkeypatch.setattr(services.llm, "ollama_available", lambda: False)
+    monkeypatch.setattr(services.llm, "claude_complete", claude)
+
+    result = services.refine_transcript(repo, memo_id)
+
+    assert len(result.changes) == refine.CHUNK_SIZE * services.REFINE_WORKERS
+
+
+def test_a_repair_lands_on_its_own_line_however_the_windows_finish(repo, wav, monkeypatch):
+    # windows come back in whatever order the backend answers them; a transcript
+    # wearing another window's words would be worse than one never repaired
+    memo_id = long_transcript(repo, wav, windows=services.REFINE_WORKERS)
+    jitter = random.Random(7)
+
+    def claude(prompt, model=None):
+        targets = refine_targets(prompt)
+        time.sleep(jitter.uniform(0, 0.05))
+        # every repair says which window it came from, so a misfiled one shows
+        return refine_reply({i: f"{t} w{min(targets)}" for i, t in targets.items()})
+
+    monkeypatch.setattr(services.llm, "claude_available", lambda: True)
+    monkeypatch.setattr(services.llm, "ollama_available", lambda: False)
+    monkeypatch.setattr(services.llm, "claude_complete", claude)
+
+    services.refine_transcript(repo, memo_id)
+
+    stored = repo.segments(memo_id)
+    expected = []
+    for start in range(0, len(stored), refine.CHUNK_SIZE):
+        window = stored[start : start + refine.CHUNK_SIZE]
+        expected += [f"{s.text} w{window[0].id}" for s in window]
+    assert [s.refined_text for s in repo.segments(memo_id)] == expected
+
+
+def test_one_window_failing_fails_the_whole_pass(repo, wav, monkeypatch):
+    # a transcript half repaired is the one outcome nobody asked for: the caller
+    # hears the failure, and what is stored is still what was transcribed
+    memo_id = long_transcript(repo, wav, windows=2)
+    doomed = repo.segments(memo_id)[refine.CHUNK_SIZE].id
+
+    def claude(prompt, model=None):
+        targets = refine_targets(prompt)
+        if doomed in targets:
+            raise llm.BackendError("claude fell over")
+        return refine_reply({i: t.capitalize() for i, t in targets.items()})
+
+    monkeypatch.setattr(services.llm, "claude_available", lambda: True)
+    monkeypatch.setattr(services.llm, "ollama_available", lambda: False)
+    monkeypatch.setattr(services.llm, "claude_complete", claude)
+
+    with pytest.raises(services.ExtractionError, match="refinement failed"):
+        services.refine_transcript(repo, memo_id)
+
+    assert all(s.refined_text is None for s in repo.segments(memo_id))
 
 
 def test_the_diff_reads_as_one_before_and_after_per_line():

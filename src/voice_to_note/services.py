@@ -3,6 +3,7 @@ import os
 import time
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
@@ -15,6 +16,7 @@ from .storage.repository import Repository
 from .transforms.notes import SCHEMA, parse_notes, render_notes, render_notes_markdown
 from .transforms.refine import (
     REFINE_SCHEMA,
+    Chunk,
     accept_repairs,
     chunk_segments,
     merge_refinements,
@@ -564,26 +566,42 @@ class RefineResult:
     untouched: int
 
 
+# how many repair windows are asked for at once. A window is almost entirely
+# time spent waiting on a backend, so four of them together turn the minutes a
+# long memo used to take into roughly a quarter of that, while staying modest
+# enough to be a fair neighbour on a subscription CLI. The local fallback queues
+# requests on its own server regardless, so this can only ever help it.
+REFINE_WORKERS = 4
+
+
+def _repair_window(chunk: Chunk) -> dict[int, str]:
+    """The repairs one window comes back with, keyed by the line they belong to.
+    A window is answered on its own, which is what lets several be asked at
+    once; a window nobody can answer ends the pass rather than leaving the
+    transcript repaired in parts."""
+    return _complete(
+        llm.refine_prompt(chunk),
+        schema=REFINE_SCHEMA,
+        parse=partial(parse_refinements, expected_ids=chunk.target_ids),
+        failure="refinement failed",
+        unavailable="no refinement backend",
+        model=config.REFINE_MODEL,
+    )[1]
+
+
 def refine_transcript(repo: Repository, memo_id: int, dry_run: bool = False) -> RefineResult:
-    """Repairs transcription errors a window at a time, reading each line in the
-    company of its neighbours. A line the model changed past recognition keeps
-    the words that were actually transcribed, and is reported instead.
-    A pass replaces the memo's whole refinement, so running it again reverts any
-    line this pass does not repair the same way."""
+    """Repairs transcription errors a window at a time, several windows at once,
+    reading each line in the company of its neighbours. A line the model changed
+    past recognition keeps the words that were actually transcribed, and is
+    reported instead. A pass replaces the memo's whole refinement, so running it
+    again reverts any line this pass does not repair the same way."""
     require_memo(repo, memo_id)
     segments = repo.segments(memo_id)
     chunks = chunk_segments(segments)
-    replies = [
-        _complete(
-            llm.refine_prompt(chunk),
-            schema=REFINE_SCHEMA,
-            parse=partial(parse_refinements, expected_ids=chunk.target_ids),
-            failure="refinement failed",
-            unavailable="no refinement backend",
-            model=config.REFINE_MODEL,
-        )[1]
-        for chunk in chunks
-    ]
+    with ThreadPoolExecutor(max_workers=REFINE_WORKERS) as pool:
+        # map hands the replies back in window order, which is the order
+        # merge_refinements pairs them against the windows in
+        replies = list(pool.map(_repair_window, chunks))
     final, flagged = accept_repairs(segments, merge_refinements(chunks, replies))
     changes = [
         Change(s.id, s.text, final[s.id])
