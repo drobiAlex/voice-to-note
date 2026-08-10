@@ -51,10 +51,25 @@ Running `vtn` with no command opens the TUI too, once setup has run.
 
 ## Roadmap
 
-- Custom note templates — define your own structures for extracted notes
-- Settings & configuration — choose the extraction model (Claude, Codex, and others)
-- Native recording — record audio directly on your Mac instead of importing voice memos
-- Full-text search across transcripts and notes
+Shipped:
+- [x] Local pipeline: transcript, named speakers, structured notes (whisper.cpp + sherpa-onnx + SQLite)
+- [x] Projects, tags and notes you can edit
+- [x] Speaker recognition across memos — name a voice once, later memos match it
+- [x] Transcript repair pass (`vtn refine`)
+- [x] Questions against a memo (`vtn ask`)
+- [x] TUI with live job progress
+- [x] One-command install, with a mock preview mode
+
+Next — working with to-dos (every memo produces them):
+- [ ] To-dos as first-class items: every action item a memo produced, listed and addressable
+- [ ] Cross-memo to-do board: open items from all projects in one place
+- [ ] Edit, check off and carry over to-dos as work happens
+
+Later:
+- [ ] Custom note templates — define your own structures for extracted notes
+- [ ] Settings & configuration — choose the extraction model (Claude, Codex, and others)
+- [ ] Native recording — record directly on your Mac instead of importing voice memos
+- [ ] Full-text search across transcripts and notes
 
 ## Development
 
