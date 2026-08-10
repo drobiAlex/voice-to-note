@@ -8,7 +8,33 @@ Your audio never leaves the machine: ffmpeg normalises it, whisper.cpp transcrib
 sherpa-onnx separates the speakers, all into a local SQLite file. Only the notes need an
 LLM — `claude` if you have it, or a local Ollama model; the transcript needs neither.
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/drobiAlex/voice-to-note/main/install.sh | bash
+```
+
+This installs `uv` if you don't have it, installs the `vtn` CLI with `uv tool
+install`, then builds whisper.cpp against Metal and downloads every model into
+`~/Library/Application Support/vtn`. It's idempotent — re-run it any time to upgrade.
+
+Needs macOS, the Xcode Command Line Tools (for `git`), `cmake` and `ffmpeg`; the
+installer names whichever of these is missing and how to get it.
+
+To upgrade later, re-run the installer, or run `uv tool upgrade --reinstall
+voice-to-note`. If you'd rather install without the script, `uv tool install
+git+https://github.com/drobiAlex/voice-to-note` followed by `vtn setup` does the
+same thing.
+
+```sh
+vtn process ~/memos/standup.m4a
+```
+
 ## Quickstart
+
+For development, `./run.sh` is the entry point instead — a source checkout keeps
+the database, models and whisper.cpp build inside the repo via `VTN_HOME`, and
+`run.sh` calls `vtn setup` under the hood.
 
 ```sh
 ./run.sh                            # checks tools, builds whisper.cpp, fetches models
@@ -19,6 +45,7 @@ LLM — `claude` if you have it, or a local Ollama model; the transcript needs n
 
 | Command | What it does |
 |---|---|
+| `vtn setup` | install whisper.cpp and all models (idempotent) |
 | `vtn process <file>` | convert, transcribe, diarize, store, extract notes |
 | `vtn list` | list stored memos |
 | `vtn show <id>` | print a memo's transcript |
