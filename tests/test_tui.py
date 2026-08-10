@@ -255,6 +255,24 @@ async def test_a_link_out_to_the_web_still_opens_out_there(repo, monkeypatch):
         assert pilot.app.is_running
 
 
+@pytest.mark.asyncio
+async def test_a_long_note_scrolls_down_as_far_as_its_last_line(repo):
+    # a pane taller than the terminal it is drawn on runs out of note while its
+    # own last rows are still below the bottom of the screen: scrolled as far as
+    # it will go, the end of the note has still never been shown
+    work, _home = seed(repo)
+    services.save_notes(repo, work, LONG_NOTE)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_memo(work)
+        await pilot.pause()
+        notes_pane(pilot).scroll_end(animate=False)
+        await pilot.pause()
+
+        last_line = notes_pane(pilot).document.children[-1]
+        assert pilot.app.screen.region.contains_region(last_line.region)
+
+
 # --- editing a note ------------------------------------------------------
 
 

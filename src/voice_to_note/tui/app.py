@@ -524,6 +524,12 @@ class MemoApp(App[None]):
     CSS = """
     #projects { width: 26; border-right: solid $panel; }
     #memos { height: 40%; border-bottom: solid $panel; }
+    /* the tabs take the room the memo list leaves, and no more. Left to size
+       itself to its contents a TabbedContent claims the whole column, memo list
+       included, and hangs that far off the bottom of the terminal: the panes
+       inside then scroll to a last row nobody can see, so the end of a long
+       note or transcript is never reachable */
+    TabbedContent { height: 1fr; }
     #source-tree { height: 1fr; }
     """
     BINDINGS = [
