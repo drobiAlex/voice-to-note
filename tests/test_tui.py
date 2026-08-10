@@ -1659,6 +1659,7 @@ async def test_the_project_falls_back_to_other_before_one_is_chosen(repo, tmp_pa
 async def test_a_processed_recording_joins_the_project_on_screen(repo, tmp_path, monkeypatch):
     seed(repo)
     monkeypatch.setattr(services, "process_memo", stores_a_memo())
+    monkeypatch.setattr(services, "run_extraction", lambda _r, _i, force=False: "claude")
 
     async with MemoApp(repo).run_test() as pilot:
         pilot.app.show_project("work")
@@ -1685,6 +1686,7 @@ async def test_a_processed_recording_does_not_pull_you_off_what_you_are_reading(
     # it is the same rudeness a finished repair would be
     work, _home = seed(repo)
     monkeypatch.setattr(services, "process_memo", stores_a_memo())
+    monkeypatch.setattr(services, "run_extraction", lambda _r, _i, force=False: "claude")
 
     async with MemoApp(repo).run_test() as pilot:
         pilot.app.show_project("work")
@@ -1694,6 +1696,57 @@ async def test_a_processed_recording_does_not_pull_you_off_what_you_are_reading(
 
         assert pilot.app.memo_id == work
         assert "we ship on friday" in transcript(pilot)
+
+
+@pytest.mark.asyncio
+async def test_a_processed_recording_gets_its_notes_extracted_in_the_same_job(
+    repo, tmp_path, monkeypatch
+):
+    # the same job that brought the recording in, not a second key press
+    seed(repo)
+    monkeypatch.setattr(services, "process_memo", stores_a_memo())
+    extracted: list[int] = []
+
+    def extract(worker_repo, memo_id, force=False):
+        extracted.append(memo_id)
+        worker_repo.save_extraction(memo_id, "claude", {**NOTES, "title": "From upload"})
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", extract)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        await process_file(pilot, recording(tmp_path), "work")
+        await finish_jobs(pilot)
+
+        assert extracted != []
+        assert "From upload" in services.notes_markdown(repo, extracted[0])
+
+
+@pytest.mark.asyncio
+async def test_extraction_failing_after_a_recording_is_stored_still_leaves_it_listed(
+    repo, tmp_path, monkeypatch
+):
+    # a model that cannot answer must not undo a memo already safely stored
+    seed(repo)
+    monkeypatch.setattr(services, "process_memo", stores_a_memo())
+
+    def unavailable(worker_repo, memo_id, force=False):
+        raise GatewayError("ollama is not running")
+
+    monkeypatch.setattr(services, "run_extraction", unavailable)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        await process_file(pilot, recording(tmp_path), "work")
+        await finish_jobs(pilot)
+
+        assert memo_names(pilot.app) == ["standup.m4a", "standup.m4a"]
+        assert "ollama is not running" in said(pilot)
+        assert any("is memo" in message for message in said(pilot))
+        assert pilot.app.jobs == set()
 
 
 @pytest.mark.asyncio
@@ -1707,6 +1760,7 @@ async def test_the_stages_of_a_long_job_are_said_as_they_happen(repo, tmp_path, 
         return services.ProcessResult(1, 0, [], "en")
 
     monkeypatch.setattr(services, "process_memo", process)
+    monkeypatch.setattr(services, "run_extraction", lambda _r, _i, force=False: "claude")
 
     async with MemoApp(repo).run_test() as pilot:
         await process_file(pilot, recording(tmp_path))
@@ -1783,6 +1837,7 @@ async def test_one_recording_is_not_brought_in_twice_at_once(repo, tmp_path, mon
         return services.ProcessResult(1, 0, [], "en")
 
     monkeypatch.setattr(services, "process_memo", slow)
+    monkeypatch.setattr(services, "run_extraction", lambda _r, _i, force=False: "claude")
     src = recording(tmp_path)
 
     async with MemoApp(repo).run_test() as pilot:
@@ -2120,6 +2175,7 @@ async def test_a_recording_picked_from_the_tree_goes_the_same_way_as_a_typed_one
     seed(repo)
     one_recording_among(tmp_path)
     monkeypatch.setattr(services, "process_memo", stores_a_memo())
+    monkeypatch.setattr(services, "run_extraction", lambda _r, _i, force=False: "claude")
 
     async with MemoApp(repo).run_test() as pilot:
         pilot.app.show_project("work")

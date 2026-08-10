@@ -847,9 +847,19 @@ class MemoApp(App[None]):
     def _processed(self, repo: Repository, src: Path, project: str) -> str:
         """Runs the whole pipeline, then draws the new memo into the lists it
         belongs in without pulling the reader off whatever they were reading:
-        it is stored, so it will be there when they go looking."""
+        it is stored, so it will be there when they go looking. Extraction runs
+        on in the same job, but a memo already safely stored must not be undone
+        by a model that fails to answer, so its failure is only reported —
+        the same tolerance `vtn process` gives it at the command line."""
         result = services.process_memo(repo, src, project, log=self._stage)
         self.call_from_thread(self._reload, self.project)
+        self._stage("extracting notes …")
+        try:
+            backend = services.run_extraction(repo, result.memo_id)
+        except (GatewayError, services.ExtractionError) as failed:
+            self.call_from_thread(self.notify, str(failed), severity="warning")
+        else:
+            self._stage(f"memo {result.memo_id} extracted via {backend}")
         return f"{src.name} is memo {result.memo_id}"
 
     def _stage(self, message: str) -> None:
