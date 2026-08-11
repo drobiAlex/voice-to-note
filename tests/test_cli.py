@@ -360,6 +360,23 @@ def test_processing_without_a_project_files_it_under_other(tmp_path, monkeypatch
     assert seen["project"] == "other"
 
 
+def test_processing_with_an_unknown_template_never_reaches_the_pipeline(
+    tmp_path, monkeypatch, capsys
+):
+    src = tmp_path / "standup.m4a"
+    src.write_bytes(b"fake audio")
+
+    def process_memo(*a, **k):
+        raise AssertionError("process_memo must not run for an unknown template")
+
+    monkeypatch.setattr(services, "process_memo", process_memo)
+
+    with pytest.raises(SystemExit) as err:
+        run(monkeypatch, StubRepo(), "process", str(src), "--template", "bogus")
+
+    assert "unknown note template" in str(err.value.code)
+
+
 def test_listing_can_be_narrowed_to_one_project(monkeypatch, capsys):
     seen: dict = {}
 
@@ -514,7 +531,7 @@ def test_the_tui_command_opens_the_browser_on_the_memo_database(monkeypatch):
 def test_re_extracting_can_be_told_to_overwrite_an_edited_note(monkeypatch, capsys):
     seen: dict = {}
 
-    def run_extraction(_repo, memo_id, force=False):
+    def run_extraction(_repo, memo_id, force=False, template="notes"):
         seen["memo_id"], seen["force"] = memo_id, force
         return "claude"
 

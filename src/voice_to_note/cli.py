@@ -53,10 +53,13 @@ def cmd_setup(args: argparse.Namespace) -> None:
 
 
 def cmd_process(args: argparse.Namespace) -> None:
-    """Takes a recording all the way to notes on screen."""
+    """Takes a recording all the way to notes on screen. The note template is
+    checked before the file is even touched: a typo must not survive minutes
+    of converting, transcribing and diarizing only to fail at the last step."""
     src = Path(args.file).expanduser().resolve()
     if not src.exists():
         sys.exit(f"no such file: {src}")
+    services.note_template(args.template)
     with Repository() as repo:
         result = services.process_memo(repo, src, project=args.project, log=status)
         status(
@@ -65,7 +68,7 @@ def cmd_process(args: argparse.Namespace) -> None:
         )
         try:
             status("extracting notes …")
-            backend = services.run_extraction(repo, result.memo_id)
+            backend = services.run_extraction(repo, result.memo_id, template=args.template)
             status(f"extracted via {backend}\n")
             print(services.notes(repo, result.memo_id))
         except services.ExtractionError as e:
@@ -160,7 +163,7 @@ def cmd_extract(args: argparse.Namespace) -> None:
     with Repository() as repo:
         services.require_memo(repo, args.id)
         status(f"extracting memo {args.id} …")
-        backend = services.run_extraction(repo, args.id, force=args.force)
+        backend = services.run_extraction(repo, args.id, force=args.force, template=args.template)
         status(f"done via {backend}\n")
         print(services.notes(repo, args.id))
 
@@ -259,6 +262,11 @@ def main() -> None:
     sp = sub.add_parser("process", help="transcribe an audio file")
     sp.add_argument("file")
     sp.add_argument("--project", default="other", help="file the memo under a project")
+    sp.add_argument(
+        "--template",
+        default="notes",
+        help="note template to extract with (see: vtn template)",
+    )
     sp.set_defaults(fn=cmd_process)
 
     sp = sub.add_parser("list", help="list memos")
@@ -319,6 +327,11 @@ def main() -> None:
     sp.add_argument("id", type=int)
     sp.add_argument(
         "--force", action="store_true", help="replace notes you have edited by hand"
+    )
+    sp.add_argument(
+        "--template",
+        default="notes",
+        help="note template to extract with (see: vtn template)",
     )
     sp.set_defaults(fn=cmd_extract)
 

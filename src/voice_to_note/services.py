@@ -497,13 +497,43 @@ def _registered_template(name: str) -> None:
         )
 
 
+def note_templates() -> list[str]:
+    """Every template that can shape a note extraction: the built-in "notes"
+    first, then any other `*.md` file a user has dropped into
+    config.TEMPLATES_DIR that is not one of the app's own template names
+    (refine and ask shape other calls, not this one). Sorted so the list —
+    and the order `vtn template` prints it in — does not depend on directory
+    order, which differs by filesystem."""
+    names = ["notes"]
+    if config.TEMPLATES_DIR.is_dir():
+        names += sorted(
+            p.stem for p in config.TEMPLATES_DIR.glob("*.md") if p.stem not in llm.TEMPLATES
+        )
+    return names
+
+
+def note_template(name: str) -> str:
+    """Refuses a note template name that does not exist, kept separate from
+    the extraction itself so a typo is caught before a caller pays for
+    minutes of transcription only to have the extraction fail at the end."""
+    if name not in note_templates():
+        raise InvalidInput(
+            f"unknown note template: {name} — valid names: {', '.join(note_templates())}"
+        )
+    return name
+
+
 def template_rows() -> list[tuple[str, str]]:
     """Every prompt template this app ships, and whether a saved override is
-    shadowing its built-in text."""
-    return [
+    shadowing its built-in text — followed by every custom note template a
+    user has dropped into config.TEMPLATES_DIR, which has no built-in text to
+    shadow and so is always its own file."""
+    rows = [
         (name, "overridden" if _template_override_path(name).exists() else "built-in")
         for name in llm.TEMPLATES
     ]
+    rows += [(name, "custom") for name in note_templates() if name not in llm.TEMPLATES]
+    return rows
 
 
 # one line on what each template is for, alongside the settings a doc column
@@ -521,25 +551,44 @@ def template_infos() -> list[tuple[str, str, str, str]]:
     """Every prompt template in the shape config_rows() lists settings in, so
     a screen already drawing one table of those can draw the other the same
     way: the template's name, whether it is built-in or a saved override, that
-    same state again standing in for a source, and what it is for."""
+    same state again standing in for a source, and what it is for. A custom
+    note template has no built-in doc to fall back on, so it is pointed at
+    its own file instead."""
     return [
-        (name, state, state, _TEMPLATE_DOCS.get(name, ""))
+        (
+            name,
+            state,
+            state,
+            _TEMPLATE_DOCS.get(name, f"your note template (templates/{name}.md)"),
+        )
         for name, state in template_rows()
     ]
+
+
+def _custom_note_template(name: str) -> bool:
+    """Whether a name is one of the user's own note templates rather than one
+    of the prompts this app ships with — the two are told apart because only
+    the latter is registered in llm.TEMPLATES."""
+    return name not in llm.TEMPLATES and name in note_templates()
 
 
 def template_override_path(name: str) -> Path:
     """Where a saved override for one prompt template goes, for a caller that
     can only point someone at the file rather than write it here: a template
     has no in-app editor, since it lives on disk to be edited like any other
-    text file."""
-    _registered_template(name)
+    text file. A custom note template's file lives at this same path — it has
+    no separate built-in text underneath for the file to override."""
+    if not _custom_note_template(name):
+        _registered_template(name)
     return _template_override_path(name)
 
 
 def template_text(name: str) -> str:
     """One template's effective text: a saved override if the user wrote one,
-    else the text this app ships with."""
+    else the text this app ships with. A custom note template has no
+    built-in text underneath, so its file is simply read as written."""
+    if _custom_note_template(name):
+        return _template_override_path(name).read_text()
     _registered_template(name)
     return llm.template(name)
 
@@ -547,7 +596,14 @@ def template_text(name: str) -> str:
 def template_reset(name: str) -> str:
     """Deletes a template's override file, restoring the built-in text. A
     template already at its built-in text is left alone rather than reporting
-    a restore that did nothing."""
+    a restore that did nothing. A custom note template has no built-in text to
+    restore — the file is the whole of it — so resetting one only explains
+    that deleting the file is what removing the template means."""
+    if _custom_note_template(name):
+        return (
+            f"{name} is a custom template — delete {_template_override_path(name)}"
+            " to remove it"
+        )
     _registered_template(name)
     path = _template_override_path(name)
     if not path.exists():
@@ -765,17 +821,23 @@ def _complete(
     )
 
 
-def run_extraction(repo: Repository, memo_id: int, force: bool = False) -> str:
-    """Turns a memo into structured notes and files them against it. A memo whose
-    notes somebody has since edited by hand is left alone unless the caller says
-    outright to overwrite: an afternoon of editing must not go under a rerun."""
+def run_extraction(
+    repo: Repository, memo_id: int, force: bool = False, template: str = "notes"
+) -> str:
+    """Turns a memo into structured notes, shaped by the named note template,
+    and files them against it. A memo whose notes somebody has since edited by
+    hand is left alone unless the caller says outright to overwrite: an
+    afternoon of editing must not go under a rerun. The template name is
+    checked before anything else, so a typo is caught before the transcript is
+    even fetched, let alone sent to a backend."""
+    note_template(template)
     if not force and repo.notes_md(memo_id):
         raise InvalidInput(
             f"memo {memo_id} has notes you edited by hand;"
             " re-extract with --force to replace them"
         )
     backend, data = _complete(
-        llm.notes_prompt(transcript(repo, memo_id)),
+        llm.notes_prompt(transcript(repo, memo_id), template),
         schema=SCHEMA,
         parse=parse_notes,
         failure="extraction failed",

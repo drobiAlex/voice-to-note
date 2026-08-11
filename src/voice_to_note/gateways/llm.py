@@ -89,9 +89,12 @@ class BackendError(GatewayError):
     """A backend was installed but the call to it failed."""
 
 
-def notes_prompt(transcript: str) -> str:
-    """Asks for the notes in the exact shape the app can store."""
-    return template("notes") + transcript
+def notes_prompt(transcript: str, template_name: str = "notes") -> str:
+    """Asks for the notes in the exact shape the app can store. The caller
+    picks which note template shapes the extraction — a saved override, or
+    one of the user's own templates dropped beside them — while the reply is
+    still held to the one JSON shape the parser downstream accepts."""
+    return template(template_name) + transcript
 
 
 def ask_prompt(transcript: str, question: str) -> str:

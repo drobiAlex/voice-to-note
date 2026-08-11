@@ -389,6 +389,31 @@ def test_extraction_without_a_backend_says_how_to_get_one(repo, wav, monkeypatch
         services.run_extraction(repo, memo_id)
 
 
+def test_extraction_with_a_custom_template_sends_its_text_in_the_prompt(
+    repo, wav, monkeypatch, templates_dir
+):
+    templates_dir.mkdir()
+    (templates_dir / "standup.md").write_text("Summarize this standup:\n")
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Ship it", speaker="S1")])
+    prompts = fake_llm(monkeypatch, claude=json.dumps(NOTES))
+
+    services.run_extraction(repo, memo_id, template="standup")
+
+    assert "Summarize this standup:" in prompts[0]
+
+
+def test_extraction_refuses_an_unknown_template_before_any_backend_is_called(
+    repo, wav, monkeypatch, templates_dir
+):
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Ship it", speaker="S1")])
+    prompts = fake_llm(monkeypatch, claude=json.dumps(NOTES))
+
+    with pytest.raises(services.InvalidInput, match="unknown note template"):
+        services.run_extraction(repo, memo_id, template="bogus")
+
+    assert prompts == []
+
+
 def test_ask_returns_the_first_working_backend(repo, wav, monkeypatch):
     memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Ship it", speaker="S1")])
     prompts = fake_llm(monkeypatch, claude="  They ship on Friday.  ")
@@ -1406,6 +1431,51 @@ def test_resetting_a_template_already_built_in_reports_so_without_erroring(templ
     message = services.template_reset("refine")
 
     assert "already built-in" in message
+
+
+# --- custom note templates ---------------------------------------------------
+
+
+def test_note_templates_is_just_notes_when_the_directory_is_empty_or_missing(templates_dir):
+    assert services.note_templates() == ["notes"]
+
+
+def test_note_templates_includes_a_custom_file_dropped_beside_the_others(templates_dir):
+    templates_dir.mkdir()
+    (templates_dir / "standup.md").write_text("Summarize the standup")
+
+    assert services.note_templates() == ["notes", "standup"]
+
+
+def test_note_templates_excludes_overrides_of_the_non_note_builtins(templates_dir):
+    # refine.md and ask.md shadow other prompts, not this one — they must not
+    # show up as a note template a user could pick to extract with
+    templates_dir.mkdir()
+    (templates_dir / "refine.md").write_text("override")
+    (templates_dir / "ask.md").write_text("override")
+
+    assert services.note_templates() == ["notes"]
+
+
+def test_template_text_reads_a_custom_note_template_file_directly(templates_dir):
+    templates_dir.mkdir()
+    (templates_dir / "standup.md").write_text("Summarize the standup")
+
+    assert services.template_text("standup") == "Summarize the standup"
+
+
+def test_resetting_a_custom_note_template_explains_deleting_the_file_without_touching_it(
+    templates_dir,
+):
+    templates_dir.mkdir()
+    custom = templates_dir / "standup.md"
+    custom.write_text("Summarize the standup")
+
+    message = services.template_reset("standup")
+
+    assert custom.exists()
+    assert "standup" in message
+    assert "custom template" in message
 
 
 def test_unsetting_a_value_removes_it_from_the_file(config_path):
