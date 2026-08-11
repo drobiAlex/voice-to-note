@@ -3,6 +3,7 @@ import random
 import re
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -221,6 +222,59 @@ def test_a_pipeline_nobody_is_watching_runs_the_same_way(repo, tmp_path, monkeyp
     assert repo.memo(result.memo_id).filename == "standup.m4a"
 
 
+def _process_setup(tmp_path, monkeypatch) -> Path:
+    """Wires every stage of process_memo up to diarization, so a test can
+    focus on what diarize=False or a pinned speaker count changes without
+    repeating the conversion and transcription plumbing."""
+    src = tmp_path / "standup.m4a"
+    src.write_bytes(b"fake audio")
+    monkeypatch.setattr(services.config, "UPLOADS_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(services.audio, "to_wav16k", lambda _src, _dst: None)
+    monkeypatch.setattr(services.audio, "duration_seconds", lambda _path: 1.0)
+    monkeypatch.setattr(
+        services.whisper,
+        "transcribe",
+        lambda _wav, _duration: {
+            "transcription": [{"text": " Hello ", "offsets": {"from": 0, "to": 1000}}],
+            "result": {"language": "en"},
+        },
+    )
+    return src
+
+
+def test_skipping_speaker_detection_never_reaches_sherpa(repo, tmp_path, monkeypatch):
+    # a memo imported with just its transcript has nothing for sherpa to do;
+    # calling it at all would be minutes of work nobody asked for
+    src = _process_setup(tmp_path, monkeypatch)
+
+    def refused(*_a, **_k):
+        raise AssertionError("sherpa.diarize must not run when diarize=False")
+
+    monkeypatch.setattr(services.sherpa, "diarize", refused)
+    monkeypatch.setattr(services.sherpa, "speaker_embeddings", refused)
+
+    result = services.process_memo(repo, src, diarize=False)
+
+    assert result.labels == []
+    assert repo.display_names(result.memo_id) == {}
+
+
+def test_a_pinned_speaker_count_reaches_diarization(repo, tmp_path, monkeypatch):
+    src = _process_setup(tmp_path, monkeypatch)
+    seen: dict = {}
+
+    def diarize(_wav, num_speakers=None):
+        seen["num_speakers"] = num_speakers
+        return [Turn(0, 1000, "S1")]
+
+    monkeypatch.setattr(services.sherpa, "diarize", diarize)
+    monkeypatch.setattr(services.sherpa, "speaker_embeddings", lambda _wav, _turns: {})
+
+    services.process_memo(repo, src, num_speakers=2)
+
+    assert seen["num_speakers"] == 2
+
+
 def test_transcription_timeout_scales_with_duration_above_a_floor():
     assert whisper.timeout_for(10) == whisper.TIMEOUT_FLOOR_S
     assert whisper.timeout_for(600) == 2400
@@ -322,6 +376,20 @@ def test_speaker_count_parses_what_was_typed(typed, expected):
 def test_speaker_count_refuses_what_it_cannot_use(typed):
     with pytest.raises(services.InvalidInput):
         services.speaker_count(typed)
+
+
+def test_process_steps_parses_the_default():
+    assert services.process_steps("speakers,notes") == frozenset({"speakers", "notes"})
+
+
+@pytest.mark.parametrize("typed", ["", "   "])
+def test_process_steps_of_blank_text_is_a_transcript_only_import(typed):
+    assert services.process_steps(typed) == frozenset()
+
+
+def test_process_steps_refuses_an_unknown_token():
+    with pytest.raises(services.InvalidInput, match="bogus"):
+        services.process_steps("speakers,bogus")
 
 
 def test_unparseable_claude_output_falls_back_to_ollama(repo, wav, monkeypatch):

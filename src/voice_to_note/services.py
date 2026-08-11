@@ -612,16 +612,45 @@ def template_reset(name: str) -> str:
     return f"{name} restored to built-in"
 
 
+# the optional stages a new recording can go through, in the order they run.
+# a caller says which ones it wants with process_steps() before any of them
+# start, so a typo is refused before a single minute of audio work happens.
+PROCESS_STEPS: tuple[str, ...] = ("speakers", "refine", "notes")
+
+
+def process_steps(text: str) -> frozenset[str]:
+    """Which optional stages a new recording goes through, as a caller types
+    them: comma-separated, in any mix of speakers/refine/notes. Kept apart
+    from the pipeline itself so a typo is refused before any audio work
+    starts rather than partway through it. Blank text asks for none of them —
+    a memo imported with just its transcript, to be finished later a step at
+    a time."""
+    steps = {t.strip() for t in text.split(",") if t.strip()}
+    unknown = steps - set(PROCESS_STEPS)
+    if unknown:
+        raise InvalidInput(
+            f"unknown step: {', '.join(sorted(unknown))}"
+            f" — valid steps: {', '.join(PROCESS_STEPS)}"
+        )
+    return frozenset(steps)
+
+
 def process_memo(
     repo: Repository,
     src: Path,
     project: str = "other",
     log: Log = _silent,
     progress: Progress = _uncounted,
+    num_speakers: int | None = None,
+    diarize: bool = True,
 ) -> ProcessResult:
     """The whole pipeline for a new recording: audio in, stored memo out. Each
     stage is reported as it starts rather than as it ends, so that a screen
-    counting them off is never a stage behind the work."""
+    counting them off is never a stage behind the work. Speaker detection can
+    be skipped outright, or pinned to a known voice count instead of guessed —
+    a memo stored without it is legal and simply carries no speaker labels
+    until a later `vtn diarize` adds them."""
+    num_speakers = _speaker_count(num_speakers)
     # before the minutes of converting and transcribing, not after
     project = _project_name(project)
     wav = config.UPLOADS_DIR / f"{src.stem}-{uuid.uuid4().hex[:8]}.wav"
@@ -634,11 +663,17 @@ def process_memo(
     raw = whisper.transcribe(wav, duration)
     segs = segments_from_whisper(raw)
     language = raw.get("result", {}).get("language", "")
-    progress(3, "diarizing")
-    log("diarizing …")
-    turns = sherpa.diarize(wav)
-    segs = assign_speakers(segs, turns)
-    labels, speakers, matches = _identify(repo, wav, turns, keep_names={})
+    labels: list[str] = []
+    speakers: list[Speaker] = []
+    matches: dict[str, SpeakerMatch] = {}
+    if diarize:
+        progress(3, "diarizing")
+        log("diarizing …")
+        turns = sherpa.diarize(wav, num_speakers)
+        segs = assign_speakers(segs, turns)
+        labels, speakers, matches = _identify(repo, wav, turns, keep_names={})
+    else:
+        log("skipping speaker detection …")
     memo_id = repo.create_memo(
         filename=src.name,
         wav_path=str(wav),

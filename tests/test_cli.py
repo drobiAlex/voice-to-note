@@ -329,7 +329,7 @@ def test_processing_files_the_new_memo_under_a_project(tmp_path, monkeypatch, ca
     src.write_bytes(b"fake audio")
     seen: dict = {}
 
-    def process_memo(_repo, _src, project="other", log=None):
+    def process_memo(_repo, _src, project="other", log=None, num_speakers=None, diarize=True):
         seen["project"] = project
         return services.ProcessResult(1, 0, [], "en")
 
@@ -347,7 +347,7 @@ def test_processing_without_a_project_files_it_under_other(tmp_path, monkeypatch
     src.write_bytes(b"fake audio")
     seen: dict = {}
 
-    def process_memo(_repo, _src, project="other", log=None):
+    def process_memo(_repo, _src, project="other", log=None, num_speakers=None, diarize=True):
         seen["project"] = project
         return services.ProcessResult(1, 0, [], "en")
 
@@ -375,6 +375,68 @@ def test_processing_with_an_unknown_template_never_reaches_the_pipeline(
         run(monkeypatch, StubRepo(), "process", str(src), "--template", "bogus")
 
     assert "unknown note template" in str(err.value.code)
+
+
+def test_processing_with_an_unknown_step_never_reaches_the_pipeline(
+    tmp_path, monkeypatch, capsys
+):
+    src = tmp_path / "standup.m4a"
+    src.write_bytes(b"fake audio")
+
+    def process_memo(*a, **k):
+        raise AssertionError("process_memo must not run for an unknown step")
+
+    monkeypatch.setattr(services, "process_memo", process_memo)
+
+    with pytest.raises(SystemExit) as err:
+        run(monkeypatch, StubRepo(), "process", str(src), "--steps", "speakers,bogus")
+
+    assert "unknown step" in str(err.value.code)
+
+
+def test_an_empty_step_list_stores_only_the_transcript(tmp_path, monkeypatch, capsys):
+    src = tmp_path / "standup.m4a"
+    src.write_bytes(b"fake audio")
+
+    def process_memo(_repo, _src, project="other", log=None, num_speakers=None, diarize=True):
+        return services.ProcessResult(1, 0, [], "en")
+
+    def run_extraction(*a, **k):
+        raise AssertionError("run_extraction must not run when notes is not among the steps")
+
+    monkeypatch.setattr(services, "process_memo", process_memo)
+    monkeypatch.setattr(services, "run_extraction", run_extraction)
+
+    run(monkeypatch, StubRepo(), "process", str(src), "--steps", "")
+
+    assert "vtn extract 1" in capsys.readouterr().err
+
+
+def test_refine_runs_before_extraction_when_both_are_asked_for(tmp_path, monkeypatch, capsys):
+    src = tmp_path / "standup.m4a"
+    src.write_bytes(b"fake audio")
+    order: list[str] = []
+
+    def process_memo(_repo, _src, project="other", log=None, num_speakers=None, diarize=True):
+        order.append("process")
+        return services.ProcessResult(1, 0, [], "en")
+
+    def refine_transcript(_repo, _memo_id, dry_run=False):
+        order.append("refine")
+        return services.RefineResult(changes=[], flagged=[], untouched=0)
+
+    def run_extraction(_repo, _memo_id, force=False, template="notes"):
+        order.append("extract")
+        return "claude"
+
+    monkeypatch.setattr(services, "process_memo", process_memo)
+    monkeypatch.setattr(services, "refine_transcript", refine_transcript)
+    monkeypatch.setattr(services, "run_extraction", run_extraction)
+    monkeypatch.setattr(services, "notes", lambda *a, **k: "the notes")
+
+    run(monkeypatch, StubRepo(), "process", str(src), "--steps", "speakers,refine,notes")
+
+    assert order == ["process", "refine", "extract"]
 
 
 def test_listing_can_be_narrowed_to_one_project(monkeypatch, capsys):

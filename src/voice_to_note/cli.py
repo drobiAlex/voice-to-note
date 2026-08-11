@@ -53,27 +53,50 @@ def cmd_setup(args: argparse.Namespace) -> None:
 
 
 def cmd_process(args: argparse.Namespace) -> None:
-    """Takes a recording all the way to notes on screen. The note template is
-    checked before the file is even touched: a typo must not survive minutes
-    of converting, transcribing and diarizing only to fail at the last step."""
+    """Takes a recording all the way to notes on screen. The note template,
+    the step list and the speaker count are all checked before the file is
+    even touched: a typo in any of them must not survive minutes of
+    converting, transcribing and diarizing only to fail at the last step."""
     src = Path(args.file).expanduser().resolve()
     if not src.exists():
         sys.exit(f"no such file: {src}")
     services.note_template(args.template)
+    steps = services.process_steps(args.steps)
+    count = services.speaker_count(args.speakers)
     with Repository() as repo:
-        result = services.process_memo(repo, src, project=args.project, log=status)
+        result = services.process_memo(
+            repo,
+            src,
+            project=args.project,
+            log=status,
+            num_speakers=count,
+            diarize="speakers" in steps,
+        )
         status(
             f"memo {result.memo_id} — {result.segment_count} segments,"
             f" {len(result.labels)} speakers, language={result.language}"
         )
-        try:
-            status("extracting notes …")
-            backend = services.run_extraction(repo, result.memo_id, template=args.template)
-            status(f"extracted via {backend}\n")
-            print(services.notes(repo, result.memo_id))
-        except services.ExtractionError as e:
-            status(f"extraction skipped: {e}")
-            status(f"retry later with: vtn extract {result.memo_id}")
+        if "refine" in steps:
+            try:
+                status("refining transcript …")
+                refined = services.refine_transcript(repo, result.memo_id)
+                status(
+                    f"refined — {len(refined.changes)} repaired,"
+                    f" {len(refined.flagged)} flagged"
+                )
+            except services.ExtractionError as e:
+                status(f"refine skipped: {e}")
+        if "notes" in steps:
+            try:
+                status("extracting notes …")
+                backend = services.run_extraction(repo, result.memo_id, template=args.template)
+                status(f"extracted via {backend}\n")
+                print(services.notes(repo, result.memo_id))
+            except services.ExtractionError as e:
+                status(f"extraction skipped: {e}")
+                status(f"retry later with: vtn extract {result.memo_id}")
+        else:
+            status(f"transcript stored — run `vtn extract {result.memo_id}` for notes")
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -266,6 +289,19 @@ def main() -> None:
         "--template",
         default="notes",
         help="note template to extract with (see: vtn template)",
+    )
+    sp.add_argument(
+        "--speakers",
+        default="auto",
+        metavar="N",
+        help='how many voices are on the recording; "auto" guesses',
+    )
+    sp.add_argument(
+        "--steps",
+        default="speakers,notes",
+        metavar="STEPS",
+        help='comma-separated optional stages to run: speakers,refine,notes'
+        ' (default: speakers,notes; "" imports just the transcript)',
     )
     sp.set_defaults(fn=cmd_process)
 
