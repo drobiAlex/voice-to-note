@@ -1,4 +1,5 @@
 from collections.abc import Callable, Hashable, Iterable
+from dataclasses import dataclass
 from pathlib import Path, PurePath
 
 from rich.text import Text
@@ -216,15 +217,52 @@ class AudioTree(DirectoryTree):
         ]
 
 
+@dataclass(frozen=True)
+class ImportOptions:
+    """How one recording is brought in, past the file and the project it is
+    filed under: how many voices to look for — left to a guess when it is not
+    known — which note template shapes its extraction, and which of the
+    optional pipeline stages actually run over it."""
+
+    num_speakers: int | None
+    template: str
+    steps: frozenset[str]
+
+
+# the steps a form left untouched runs, reproducing `vtn process`'s own
+# default exactly: speakers guessed and detected, notes extracted, no repair
+# pass unless it is asked for
+_DEFAULT_STEPS = frozenset({"speakers", "notes"})
+
+
 class ProcessMemo(ModalScreen[None]):
-    """A recording to bring in, and the project to file it under. There are two
-    ways to name the file because there are two ways people have it: pasted from
-    a file manager, or somewhere they would have to go and find. Both end up in
-    the same line, which is the only thing the modal reads when it submits."""
+    """Everything about bringing one recording in, decided in one place: where
+    the file is, what to file it under, how many voices to look for, which
+    note template shapes its extraction, and which of the optional stages —
+    speaker detection, transcript repair, note extraction — actually run.
+    Every control past the two Inputs opens on the default that reproduces
+    `vtn process`'s own, so pressing straight through, path and project typed
+    and Enter struck, means the standard pipeline and nothing more has to be
+    decided to bring a recording in.
 
-    BINDINGS = [("escape", "cancel", "Cancel")]
+    There are two ways to name the file because there are two ways people
+    have it: pasted from a file manager, or somewhere they would have to go
+    and find. Both end up in the same line, which is what the modal reads
+    when it submits, alongside every other control on screen."""
 
-    def __init__(self, root: Path, project: str, store: Callable[[str, str], None]) -> None:
+    BINDINGS = [
+        # a Select consumes its own enter to open its menu and a SelectionList
+        # consumes its own space to toggle the option under the cursor, so
+        # neither passes a bare enter through to on_input_submitted the way an
+        # Input does. Priority is what lets ctrl+s start the run regardless of
+        # which control the cursor is actually resting on.
+        Binding("ctrl+s", "start", "Start", priority=True),
+        ("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(
+        self, root: Path, project: str, store: Callable[[str, str, ImportOptions], None]
+    ) -> None:
         """Opens on the folder to browse from, the project being browsed, and
         the way to bring a file in."""
         super().__init__()
@@ -233,10 +271,30 @@ class ProcessMemo(ModalScreen[None]):
         self.store = store
 
     def compose(self) -> ComposeResult:
-        """Where the recording is, what to file it under, and somewhere to go
-        looking if the path is not already to hand."""
+        """Where the recording is, what to file it under, how it should be run
+        through the pipeline — every one of those controls opening on the
+        choice that reproduces today's default — and somewhere to go looking
+        if the path is not already to hand."""
         yield Input(placeholder="path to a recording", id="source-path")
         yield Input(self.project, id="source-project")
+        with Horizontal(id="speakers-row"):
+            yield Switch(value=True, id="speakers-auto")
+            yield Label("auto-detect speakers", id="speakers-auto-label")
+            yield Input(placeholder="3", id="speakers-count", disabled=True)
+        yield Select(
+            [(name, name) for name in services.note_templates()],
+            value="notes",
+            id="note-template",
+        )
+        with Horizontal(id="steps-row"):
+            yield Switch(value=False, id="custom-steps")
+            yield Label("custom steps", id="custom-steps-label")
+        step_list = SelectionList(
+            *[(step, step, step in _DEFAULT_STEPS) for step in services.PROCESS_STEPS],
+            id="step-list",
+        )
+        step_list.display = False
+        yield step_list
         yield AudioTree(self.root, id="source-tree")
 
     def on_mount(self) -> None:
@@ -251,17 +309,61 @@ class ProcessMemo(ModalScreen[None]):
         self.query_one("#source-path", Input).value = str(event.path)
         self.query_one("#source-path", Input).focus()
 
+    def on_switch_changed(self, event: Switch.Changed) -> None:
+        """Keeps each switch's own control in step with it: auto-detect
+        disables the speaker count beside it, since a number typed there would
+        mean nothing next to the guess the pipeline is about to make instead;
+        custom steps reveals the list of stages to choose between, since the
+        two defaults need no picking from at all."""
+        if event.switch.id == "speakers-auto":
+            count = self.query_one("#speakers-count", Input)
+            count.disabled = event.value
+            if not event.value:
+                count.focus()
+        elif event.switch.id == "custom-steps":
+            self.query_one("#step-list", SelectionList).display = event.value
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Enter from either line brings the recording in."""
+        """Enter from any line brings the recording in."""
         self._process()
 
+    def action_start(self) -> None:
+        """The same run a bare Enter starts from a line, reachable from a
+        control that keeps its own Enter, Space or arrow keys for itself."""
+        self._process()
+
+    def _options(self) -> ImportOptions:
+        """Reads the run-shaping choices off their own widgets: the pinned
+        speaker count when auto-detect is off, refused here rather than after
+        the modal has already closed on the typing; the note template picked;
+        and which optional stages run, defaulting to the same two `vtn
+        process` runs unless the step list has been opened and its own
+        selection made."""
+        auto = self.query_one("#speakers-auto", Switch).value
+        num_speakers = (
+            None
+            if auto
+            else services.speaker_count(self.query_one("#speakers-count", Input).value)
+        )
+        template = self.query_one("#note-template", Select).value
+        if template is Select.NULL:
+            template = "notes"
+        if self.query_one("#custom-steps", Switch).value:
+            steps = frozenset(self.query_one("#step-list", SelectionList).selected)
+        else:
+            steps = _DEFAULT_STEPS
+        return ImportOptions(num_speakers=num_speakers, template=str(template), steps=steps)
+
     def _process(self) -> None:
-        """Closes only once the recording has actually been sent off, so a path
-        with a typo in it can be corrected where it was typed."""
+        """Closes only once the recording has actually been sent off, so a
+        path with a typo in it — or a speaker count that isn't one — can be
+        corrected where it was typed."""
         try:
+            options = self._options()
             self.store(
                 self.query_one("#source-path", Input).value,
                 self.query_one("#source-project", Input).value,
+                options,
             )
         except services.InvalidInput as refused:
             self.notify(str(refused), severity="warning")
@@ -987,6 +1089,12 @@ class MemoApp(App[None]):
        note or transcript is never reachable */
     TabbedContent { height: 1fr; }
     #source-tree { height: 1fr; }
+    /* a Horizontal claims a fraction of the screen unless told otherwise,
+       and a one-line switch row given a third of the terminal reads as a
+       broken form; the file tree is what should soak up the leftover room */
+    #speakers-row, #steps-row { height: auto; }
+    #speakers-count { width: 12; }
+    #step-list { height: auto; }
     """
     BINDINGS = [
         ("e", "edit_notes", "Edit notes"),
@@ -1395,7 +1503,7 @@ class MemoApp(App[None]):
             ProcessMemo(self.browse_root, self.project or "other", self._process)
         )
 
-    def _process(self, path: str, project: str) -> None:
+    def _process(self, path: str, project: str, options: ImportOptions) -> None:
         """Refuses what is plainly not a recording, and a project with no name,
         here and now so the modal keeps what was typed. Past that the pipeline
         decides: a file ffmpeg cannot make sense of fails the way any gateway
@@ -1405,7 +1513,10 @@ class MemoApp(App[None]):
             raise services.InvalidInput("no recording at that path")
         name = services.project_name(project)
         started = self._start_job(
-            src, src.name, "processing", lambda repo: self._processed(repo, src, name)
+            src,
+            src.name,
+            "processing",
+            lambda repo: self._processed(repo, src, name, options),
         )
         if started:
             self._import_started(src)
@@ -1443,30 +1554,48 @@ class MemoApp(App[None]):
             memos.remove_row(str(key))
         self.load_projects()
 
-    def _processed(self, repo: Repository, src: Path, project: str) -> str:
+    def _processed(
+        self, repo: Repository, src: Path, project: str, options: ImportOptions
+    ) -> str:
         """Runs the whole pipeline, counting its stages off on the row standing
         in for the recording, and leaves the reader on whatever they were
         reading: the memo is stored, so it will be there when they go looking,
         and its row appears in place of the placeholder once the job ends.
-        Extraction runs on in the same job as a stage of its own, but a memo
-        already safely stored must not be undone by a model that fails to
-        answer, so its failure is only reported — the same tolerance `vtn
-        process` gives it at the command line."""
+        Repair and extraction run on in the same job as stages of their own,
+        repair first so a following extraction reads the repaired transcript
+        rather than the raw one, and each only when it was actually asked
+        for — a memo brought in with just its transcript is left to be
+        finished a step at a time later. Either stage failing must not undo a
+        memo already safely stored, so a failure in either is only reported —
+        the same tolerance `vtn process` gives both at the command line."""
         result = services.process_memo(
             repo,
             src,
             project,
             log=self._stage,
             progress=lambda stage, doing: self._import_at(src, stage, doing),
+            num_speakers=options.num_speakers,
+            diarize="speakers" in options.steps,
         )
-        self._stage("extracting notes …")
-        self._import_at(src, TOTAL_STAGES, "extracting notes")
-        try:
-            backend = services.run_extraction(repo, result.memo_id)
-        except (GatewayError, services.ExtractionError) as failed:
-            self.call_from_thread(self.notify, str(failed), severity="warning")
+        if "refine" in options.steps:
+            self._stage("refining transcript …")
+            try:
+                refined = services.refine_transcript(repo, result.memo_id)
+            except (GatewayError, services.ExtractionError) as failed:
+                self.call_from_thread(self.notify, str(failed), severity="warning")
+            else:
+                self._stage(f"memo {result.memo_id} repaired {len(refined.changes)} lines")
+        if "notes" in options.steps:
+            self._stage("extracting notes …")
+            self._import_at(src, TOTAL_STAGES, "extracting notes")
+            try:
+                backend = services.run_extraction(repo, result.memo_id, template=options.template)
+            except (GatewayError, services.ExtractionError) as failed:
+                self.call_from_thread(self.notify, str(failed), severity="warning")
+            else:
+                self._stage(f"memo {result.memo_id} extracted via {backend}")
         else:
-            self._stage(f"memo {result.memo_id} extracted via {backend}")
+            self._stage("transcript stored — extract notes any time")
         return f"{src.name} is memo {result.memo_id}"
 
     def _stage(self, message: str) -> None:
