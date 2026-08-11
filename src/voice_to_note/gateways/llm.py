@@ -129,6 +129,20 @@ def gemini_available() -> bool:
     return shutil.which("gemini") is not None
 
 
+def ollama_models() -> list[str]:
+    """The models an installed ollama has actually pulled, for a picker to
+    offer instead of a blank line: empty when the server cannot be reached,
+    the same failure ollama_available answers with a plain no rather than
+    letting it end a run or block a settings screen from opening."""
+    try:
+        with urllib.request.urlopen(
+            f"{config.OLLAMA_URL}/api/tags", timeout=AVAILABILITY_TIMEOUT_S
+        ) as r:
+            return [m["name"] for m in json.loads(r.read()).get("models", [])]
+    except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError, AttributeError):
+        return []
+
+
 def ollama_available() -> bool:
     """Whether the local fallback is running and has the model pulled."""
     try:

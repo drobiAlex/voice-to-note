@@ -383,6 +383,31 @@ def setting_info(key: str) -> config.Setting:
     return _registered_setting(key)
 
 
+def _emb_model_choices() -> tuple[str, ...]:
+    """The embedding models actually sitting on disk, for a picker to offer
+    instead of a blank line. Nothing found reads as nothing installed yet
+    rather than as a picker that has broken."""
+    try:
+        return tuple(sorted(p.name for p in config.MODELS_DIR.glob("*.onnx")))
+    except OSError:
+        return ()
+
+
+def setting_choices(key: str) -> tuple[str, ...]:
+    """The values a picker should offer for one setting: the registry's own
+    fixed choices for most kinds, refreshed against this machine for the two
+    whose choices are not the registry's to know — an installed ollama's own
+    models, and the embedding models actually on disk. Empty when there is
+    nothing to offer, which is what tells an editor to fall back to a typed
+    line rather than draw a menu with nothing in it."""
+    setting = _registered_setting(key)
+    if key == "ollama_model":
+        return tuple(llm.ollama_models())
+    if key == "emb_model":
+        return _emb_model_choices()
+    return setting.choices
+
+
 def _env_override_note(key: str) -> str:
     """Told alongside a settings write when an environment variable means the
     value just written is not actually the one in effect: VTN_<KEY> always

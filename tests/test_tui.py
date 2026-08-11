@@ -12,7 +12,10 @@ from textual.widgets import (
     ListView,
     Markdown,
     MarkdownViewer,
+    Select,
+    SelectionList,
     Static,
+    Switch,
     TabbedContent,
     TextArea,
     Tree,
@@ -2617,14 +2620,14 @@ async def test_editing_a_setting_writes_it_through_services(repo, monkeypatch):
         await pilot.press("S")
         await pilot.pause()
         table = settings_table(pilot)
-        table.move_cursor(row=table.get_row_index("num_speakers"))
+        table.move_cursor(row=table.get_row_index("refine_workers"))
         await pilot.press("enter")
         await pilot.pause()
         pilot.app.screen.query_one("#setting-value", Input).value = "3"
         await pilot.press("enter")
         await pilot.pause()
 
-        assert written == {"num_speakers": "3"}
+        assert written == {"refine_workers": "3"}
 
 
 @pytest.mark.asyncio
@@ -2692,10 +2695,91 @@ async def test_an_invalid_int_is_refused_without_writing(repo, monkeypatch):
     )
 
     async with MemoApp(repo).run_test() as pilot:
-        await open_setting(pilot, "num_speakers")
+        await open_setting(pilot, "refine_workers")
         pilot.app.screen.query_one("#setting-value", Input).value = "abc"
         await pilot.press("enter")
         await pilot.pause()
 
         assert written == {}
         assert showing(pilot.app, "#setting-value")
+
+
+# --- settings whose values are enumerable, picked rather than typed --------
+
+
+@pytest.mark.asyncio
+async def test_a_choice_setting_offers_a_picker_and_choosing_stores_it(repo, monkeypatch):
+    written: dict = {}
+    monkeypatch.setattr(
+        services,
+        "config_set",
+        lambda key, value: written.setdefault(key, value) or f"{key} set to {value}",
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_setting(pilot, "whisper_model")
+        select = pilot.app.screen.query_one("#setting-value", Select)
+
+        select.value = "small"
+        await pilot.pause()
+
+        assert written == {"whisper_model": "small"}
+        assert not showing(pilot.app, "#setting-value")
+
+
+@pytest.mark.asyncio
+async def test_the_multichoice_picker_applies_the_chosen_backends_in_order(repo, monkeypatch):
+    # claude,ollama is the default; toggling codex on should join them in the
+    # registry's own order rather than the order it was picked in
+    written: dict = {}
+    monkeypatch.setattr(
+        services,
+        "config_set",
+        lambda key, value: written.setdefault(key, value) or f"{key} set to {value}",
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_setting(pilot, "llm_backends")
+        pilot.app.screen.query_one("#setting-value", SelectionList).focus()
+        await pilot.pause()
+        await pilot.press("down")  # claude -> codex
+        await pilot.press("space")  # toggles codex on
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        assert written == {"llm_backends": "claude,codex,ollama"}
+
+
+@pytest.mark.asyncio
+async def test_num_speakers_left_on_auto_stores_negative_one(repo, monkeypatch):
+    written: dict = {}
+    monkeypatch.setattr(
+        services,
+        "config_set",
+        lambda key, value: written.setdefault(key, value) or f"{key} set to {value}",
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        # the registry default is -1, so the switch opens already on auto
+        await open_setting(pilot, "num_speakers")
+        assert pilot.app.screen.query_one("#setting-auto", Switch).value is True
+
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        assert written == {"num_speakers": "-1"}
+
+
+@pytest.mark.asyncio
+async def test_ollama_model_with_stubbed_choices_renders_a_picker(repo, monkeypatch):
+    # ollama's own model list is fetched over the network, which a unit test
+    # has no business doing; standing in for it here is what makes the
+    # picker-vs-plain-line choice testable at all
+    monkeypatch.setattr(
+        services, "setting_choices", lambda key: ("qwen3:8b", "llama3") if key == "ollama_model" else ()
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_setting(pilot, "ollama_model")
+
+        assert isinstance(pilot.app.screen.query_one("#setting-value"), Select)

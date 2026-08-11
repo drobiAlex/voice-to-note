@@ -19,7 +19,10 @@ from textual.widgets import (
     ListView,
     Markdown,
     MarkdownViewer,
+    Select,
+    SelectionList,
     Static,
+    Switch,
     TabbedContent,
     TabPane,
     TextArea,
@@ -512,9 +515,10 @@ class ConfirmRemove(ModalScreen[bool]):
 
 
 # the check run against a value as it is typed, keyed by the registry's kind
-# for that setting. Kinds with no entry here — text, choice, multichoice — take
-# a typed widget in a later increment rather than a freeform check that could
-# only ever approve or reject what the widget will not let you type wrong.
+# for that setting. Kinds with no entry here — choice, multichoice, and a
+# "text" setting whose choices come from this machine rather than the
+# registry — take a picker instead: a Select or a SelectionList cannot hold a
+# value there would ever be anything here to reject.
 _KIND_VALIDATORS: dict[str, Callable[[], list[Validator]]] = {
     "int": lambda: [Integer()],
     "float01": lambda: [Number(minimum=0, maximum=1)],
@@ -532,10 +536,21 @@ def _validators(kind: str) -> list[Validator]:
 
 
 class EditSetting(ModalScreen[None]):
-    """One setting's value, open to be typed over. Opens on what is actually
-    in effect now, what it does, its default, and where the value came from —
-    vtn.toml, the environment, or the setting's own default — checking what is
-    typed against the shape the registry says this setting takes."""
+    """One setting's value, open to be changed: typed over for a setting whose
+    shape is any text, picked from a menu for one whose values are known ahead
+    of time or read off this machine, or turned auto on and off for the one
+    setting a guess can stand in for. Opens on what is actually in effect now,
+    what it does, its default, and where the value came from — vtn.toml, the
+    environment, or the setting's own default — checking what is typed against
+    the shape the registry says this setting takes.
+
+    A Select and a SelectionList both consume their own enter — one to open
+    its menu, the other to toggle the highlighted option — so neither can
+    submit the way a typed line does through on_input_submitted: a Select
+    saves the moment it changes, since picking one value out of a menu is
+    already the whole decision, while a SelectionList and the num_speakers
+    switch save through ctrl+s, the same key NoteEditor already uses to
+    confirm something a bare enter cannot."""
 
     # a bare "d" would never reach this screen: the Input focused below
     # consumes every printable key itself, the same reason NoteEditor binds
@@ -543,6 +558,7 @@ class EditSetting(ModalScreen[None]):
     # the Input's own binding on the same chord, ctrl+d for delete-right.
     BINDINGS = [
         Binding("ctrl+d", "restore_default", "Restore default", priority=True),
+        ("ctrl+s", "save", "Save"),
         ("escape", "cancel", "Cancel"),
     ]
 
@@ -563,13 +579,17 @@ class EditSetting(ModalScreen[None]):
         self.store = store
         self.restore = restore
         self.setting = services.setting_info(key)
+        # fetched once on open rather than on every redraw: the two dynamic
+        # keys cost a network call or a directory listing, and a picker
+        # already open has nothing left to gain from asking again
+        self.choices = services.setting_choices(key)
 
     def compose(self) -> ComposeResult:
         """What the setting is called, what it does, its default and where the
-        value in effect now came from, the value itself ready to be typed
-        over, and how to leave. An env override is called out on its own line:
-        without it, an edit here would look like it took hold when nothing
-        downstream will ever read it."""
+        value in effect now came from, the control it is actually edited
+        through, and how to leave. An env override is called out on its own
+        line: without it, an edit here would look like it took hold when
+        nothing downstream will ever read it."""
         yield Static(self.key, id="setting-title")
         yield Static(self.setting.doc, id="setting-doc")
         yield Static(
@@ -582,16 +602,64 @@ class EditSetting(ModalScreen[None]):
                 " won't take effect until it's unset",
                 id="setting-env-warning",
             )
+        yield from self._value_widgets()
+        yield Static(self._hint(), id="setting-hint")
+
+    def _value_widgets(self) -> ComposeResult:
+        """The one control this setting is actually edited through: a menu
+        when its values are fixed by the registry or read off this machine, a
+        switch beside a count for the one setting a guess can stand in for,
+        and a typed line for everything else."""
+        if self.setting.kind == "multichoice":
+            chosen = {c.strip() for c in self.current.split(",") if c.strip()}
+            yield SelectionList(
+                *[(c, c, c in chosen) for c in self.choices], id="setting-value"
+            )
+            return
+        if self.key == "num_speakers":
+            auto = self.current == "-1"
+            with Horizontal(id="setting-auto-row"):
+                yield Switch(value=auto, id="setting-auto")
+                yield Label("auto-detect", id="setting-auto-label")
+            yield Input(
+                "" if auto else self.current,
+                id="setting-value",
+                disabled=auto,
+                validators=[Integer(minimum=1)],
+            )
+            return
+        if self.setting.kind == "choice" or self.choices:
+            yield Select(
+                [(c, c) for c in self.choices],
+                value=self.current if self.current in self.choices else Select.NULL,
+                allow_blank=self.current not in self.choices,
+                id="setting-value",
+            )
+            return
         yield Input(
-            self.current,
-            id="setting-value",
-            validators=_validators(self.setting.kind),
+            self.current, id="setting-value", validators=_validators(self.setting.kind)
         )
-        yield Static("enter save · ctrl+d restore default · esc cancel", id="setting-hint")
+
+    def _hint(self) -> str:
+        """What this control is actually confirmed with, since a menu, a
+        switch and a typed line are none of them driven by the same key."""
+        if self.setting.kind == "multichoice":
+            return "space toggle · ctrl+s apply · ctrl+d restore default · esc cancel"
+        if self.key == "num_speakers":
+            return "enter save · ctrl+s save · ctrl+d restore default · esc cancel"
+        if self.setting.kind == "choice" or self.choices:
+            return "enter pick · ctrl+d restore default · esc cancel"
+        return "enter save · ctrl+d restore default · esc cancel"
 
     def on_mount(self) -> None:
-        """Puts the cursor in the value."""
-        self.query_one("#setting-value", Input).focus()
+        """Puts the cursor on whichever control actually takes typing: the
+        value itself for most kinds, or — when num_speakers opens already on
+        auto — the switch that turns the count back on, since the line beside
+        it is disabled and cannot be focused at all."""
+        if self.key == "num_speakers" and self.query_one("#setting-value", Input).disabled:
+            self.query_one("#setting-auto", Switch).focus()
+        else:
+            self.query_one("#setting-value").focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Writes whatever they left on the line, unless it fails the check
@@ -602,6 +670,49 @@ class EditSetting(ModalScreen[None]):
             self.notify("; ".join(result.failure_descriptions), severity="warning")
             return
         self._submit(event.value)
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        """Saves the moment a menu is picked from: choosing one value out of
+        a fixed list is already the whole decision, with nothing left to
+        confirm. Guarded against the setting's own opening value, since a
+        Select posts one of these the instant it mounts on a value that is
+        not blank — without the guard every one of these modals would save
+        and close itself before anyone had touched anything — and against the
+        blank entry itself, which means nothing was actually chosen."""
+        if event.select.id != "setting-value":
+            return
+        if event.value is Select.NULL or event.value == self.current:
+            return
+        self._submit(str(event.value))
+
+    def on_switch_changed(self, event: Switch.Changed) -> None:
+        """Keeps the count in step with the switch: turned to auto it is
+        disabled, since a number typed there would mean nothing next to the
+        guess the pipeline is about to make instead."""
+        if event.switch.id != "setting-auto":
+            return
+        count = self.query_one("#setting-value", Input)
+        count.disabled = event.value
+        if not event.value:
+            count.focus()
+
+    def action_save(self) -> None:
+        """Confirms a SelectionList or the num_speakers switch, the two
+        controls that consume their own enter — one to toggle the highlighted
+        option, the other to flip itself — and so cannot submit the way a
+        typed line or a Select already does on their own."""
+        if self.setting.kind == "multichoice":
+            selected = set(self.query_one("#setting-value", SelectionList).selected)
+            # the registry's own order, not the order things were picked in:
+            # a comma list this app writes is read back in this order, and a
+            # picker's business is only ever which of them made it in
+            ordered = [c for c in self.choices if c in selected]
+            self._submit(",".join(ordered))
+        elif self.key == "num_speakers":
+            if self.query_one("#setting-auto", Switch).value:
+                self._submit("-1")
+            else:
+                self._submit(self.query_one("#setting-value", Input).value)
 
     def _submit(self, typed: str) -> None:
         """Closes only once the setting has actually been written."""
