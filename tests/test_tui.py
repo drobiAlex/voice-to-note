@@ -4,6 +4,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from rich.text import Text
 from textual.widgets import (
     DataTable,
     DirectoryTree,
@@ -2648,6 +2649,64 @@ async def test_pressing_u_restores_the_highlighted_setting_to_default(repo, monk
         await pilot.pause()
 
         assert unset == ["num_speakers"]
+
+
+@pytest.mark.asyncio
+async def test_a_setting_written_over_its_default_is_visually_marked(repo, monkeypatch):
+    # source "file" means vtn.toml carries this one over the registry's own
+    # default — the divergence the key and source cells are meant to flag
+    monkeypatch.setattr(
+        services,
+        "config_rows",
+        lambda: [("refine_workers", "3", "file", "how many refine workers run at once")],
+    )
+    monkeypatch.setattr(services, "template_infos", lambda: [])
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("S")
+        await pilot.pause()
+        row = settings_table(pilot).get_row_at(0)
+
+        assert isinstance(row[0], Text) and str(row[0]) == "refine_workers"
+        assert isinstance(row[2], Text) and str(row[2]) == "file"
+
+
+@pytest.mark.asyncio
+async def test_shift_r_confirmed_resets_every_setting(repo, monkeypatch):
+    reset: list = []
+    monkeypatch.setattr(
+        services, "config_reset", lambda: reset.append(True) or "all settings reset to default"
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("S")
+        await pilot.pause()
+        await pilot.press("R")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+
+        assert reset == [True]
+
+
+@pytest.mark.asyncio
+async def test_pressing_u_on_a_template_row_resets_its_override(repo, monkeypatch):
+    reset: list = []
+    monkeypatch.setattr(
+        services,
+        "template_reset",
+        lambda name: reset.append(name) or f"{name} restored to built-in",
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("S")
+        await pilot.pause()
+        table = settings_table(pilot)
+        table.move_cursor(row=table.get_row_index("template:notes"))
+        await pilot.press("u")
+        await pilot.pause()
+
+        assert reset == ["notes"]
 
 
 async def open_setting(pilot, key: str) -> None:

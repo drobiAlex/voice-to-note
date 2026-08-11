@@ -1,6 +1,7 @@
 from collections.abc import Callable, Hashable, Iterable
 from pathlib import Path, PurePath
 
+from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -514,6 +515,28 @@ class ConfirmRemove(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class ConfirmResetAll(ModalScreen[bool]):
+    """Stands between a stray keypress and every setting in vtn.toml being
+    cleared at once — the one settings-screen action that touches all of them
+    together rather than the row under the cursor."""
+
+    BINDINGS = [("y,enter", "reset", "Reset all"), ("n,escape", "keep", "Keep them")]
+
+    def compose(self) -> ComposeResult:
+        """Says what is about to be cleared, then asks."""
+        yield Static(
+            "Reset every setting to its default?  (y / n)", id="confirm-reset-all"
+        )
+
+    def action_reset(self) -> None:
+        """Lets the reset go ahead."""
+        self.dismiss(True)
+
+    def action_keep(self) -> None:
+        """Leaves every setting as it was."""
+        self.dismiss(False)
+
+
 # the check run against a value as it is typed, keyed by the registry's kind
 # for that setting. Kinds with no entry here — choice, multichoice, and a
 # "text" setting whose choices come from this machine rather than the
@@ -734,23 +757,37 @@ class EditSetting(ModalScreen[None]):
         self.dismiss(None)
 
 
+# a template's row is keyed like this rather than by its bare name, so a
+# selection or a restore on the settings table can tell the two kinds of row
+# apart without a second lookup back into either registry
+_TEMPLATE_KEY_PREFIX = "template:"
+
+# how a row's key and source cells are picked out once they no longer match
+# what a fresh install would show — a setting written over its default, or a
+# template shadowed by a saved override
+_DIVERGED_STYLE = "bold yellow"
+
+
 class SettingsScreen(ModalScreen[None]):
-    """Every setting `vtn config` lists, open to be read and changed from
-    inside the app: its key, the value actually in effect, where that value
-    came from, and what it does."""
+    """Every setting `vtn config` lists and every prompt template `vtn
+    template` lists, open to be read from inside the app: each one's key, the
+    value actually in effect, where that value came from, and what it does. A
+    setting can be changed here; a template can only be reset, since it lives
+    on disk as a file meant to be edited outside the app."""
 
     BINDINGS = [
         ("u", "restore_default", "Restore default"),
+        ("R", "reset_all", "Reset all"),
         ("escape", "close", "Close"),
     ]
 
     def compose(self) -> ComposeResult:
-        """A table of every setting, one row each."""
+        """A table of every setting and template, one row each."""
         yield DataTable(id="settings", cursor_type="row")
 
     def on_mount(self) -> None:
         """Lays out the columns once, since only the rows change from here on,
-        and draws the settings as they stand right now."""
+        and draws the settings and templates as they stand right now."""
         table = self.query_one("#settings", DataTable)
         for column in ("key", "value", "source", "doc"):
             table.add_column(column, key=column)
@@ -759,19 +796,44 @@ class SettingsScreen(ModalScreen[None]):
 
     def _refresh(self) -> None:
         """Redraws every row from what is actually in effect now, each one
-        keyed by the setting's own name so the row under the cursor can still
-        be read back once the table under it has changed."""
+        keyed by its own name — a template's prefixed, so the two registries
+        cannot collide — so the row under the cursor can still be read back
+        once the table under it has changed."""
         table = self.query_one("#settings", DataTable)
         table.clear()
         for key, value, source, doc in services.config_rows():
-            table.add_row(key, value, source, doc, key=key)
+            self._add_row(table, key, value, source, doc, diverged=source != "default")
+        for name, state, source, doc in services.template_infos():
+            self._add_row(
+                table, _TEMPLATE_KEY_PREFIX + name, state, source, doc,
+                diverged=state != "built-in",
+            )
+
+    def _add_row(
+        self, table: DataTable, key: str, value: str, source: str, doc: str, *, diverged: bool
+    ) -> None:
+        """Draws one row, its key and source styled the moment they diverge
+        from a fresh install so a glance says what has been touched without
+        opening anything. Styled through a Text object rather than markup in
+        the cell string, so a plain str(cell) read back off the table — the
+        way a row is picked back apart once selected — still comes back
+        clean."""
+        key_cell: str | Text = Text(key, style=_DIVERGED_STYLE) if diverged else key
+        source_cell: str | Text = Text(source, style=_DIVERGED_STYLE) if diverged else source
+        table.add_row(key_cell, value, source_cell, doc, key=key)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Opens the highlighted setting for editing."""
+        """Opens the highlighted setting for editing, or — on a template row,
+        which has no in-app editor — says where its override file would go."""
         # the app behind this modal listens for row selections of its own,
         # on the memo table this screen has nothing to do with
         event.stop()
         key = str(event.row_key.value)
+        if key.startswith(_TEMPLATE_KEY_PREFIX):
+            name = key.removeprefix(_TEMPLATE_KEY_PREFIX)
+            path = services.template_override_path(name)
+            self.notify(f"templates are edited as files — write one at {path}")
+            return
         table = self.query_one("#settings", DataTable)
         current = str(table.get_cell(event.row_key, "value"))
         source = str(table.get_cell(event.row_key, "source"))
@@ -789,13 +851,38 @@ class SettingsScreen(ModalScreen[None]):
         self.notify(services.config_unset(key))
         self._refresh()
 
+    def _reset_template(self, name: str) -> None:
+        """Deletes one template's saved override, then redraws the table so
+        its row says built-in again."""
+        self.notify(services.template_reset(name))
+        self._refresh()
+
     def action_restore_default(self) -> None:
-        """Drops the highlighted setting back to its default."""
+        """Drops the highlighted row back to its default: a setting through
+        config_unset, a template through template_reset, whichever the
+        cursor is actually resting on."""
         table = self.query_one("#settings", DataTable)
         if table.row_count == 0:
             return
         key = str(table.ordered_rows[table.cursor_row].key.value)
-        self._unset(key)
+        if key.startswith(_TEMPLATE_KEY_PREFIX):
+            self._reset_template(key.removeprefix(_TEMPLATE_KEY_PREFIX))
+        else:
+            self._unset(key)
+
+    def action_reset_all(self) -> None:
+        """Asks before clearing every setting at once — a single keystroke
+        undoing every override in vtn.toml is worth the same confirmation
+        emptying a project already gets, and for the same reason: nothing
+        this wide should go through on a stray keypress."""
+        self.app.push_screen(ConfirmResetAll(), self._reset_all_confirmed)
+
+    def _reset_all_confirmed(self, confirmed: bool | None) -> None:
+        """Clears vtn.toml once they have said to; leaves it alone otherwise."""
+        if not confirmed:
+            return
+        self.notify(services.config_reset())
+        self._refresh()
 
     def action_close(self) -> None:
         """Puts the app back in front of them."""

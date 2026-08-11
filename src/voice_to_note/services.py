@@ -506,6 +506,37 @@ def template_rows() -> list[tuple[str, str]]:
     ]
 
 
+# one line on what each template is for, alongside the settings a doc column
+# already carries for every registered setting — kept here rather than beside
+# the prompt text itself, since it is written for the person picking a
+# template to look at, not for the model reading the prompt
+_TEMPLATE_DOCS: dict[str, str] = {
+    "notes": "extracts title, summary, action items and decisions from a transcript",
+    "refine": "repairs mishearings and misplaced sentence breaks in transcribed lines",
+    "ask": "answers a question about a memo using only its transcript",
+}
+
+
+def template_infos() -> list[tuple[str, str, str, str]]:
+    """Every prompt template in the shape config_rows() lists settings in, so
+    a screen already drawing one table of those can draw the other the same
+    way: the template's name, whether it is built-in or a saved override, that
+    same state again standing in for a source, and what it is for."""
+    return [
+        (name, state, state, _TEMPLATE_DOCS.get(name, ""))
+        for name, state in template_rows()
+    ]
+
+
+def template_override_path(name: str) -> Path:
+    """Where a saved override for one prompt template goes, for a caller that
+    can only point someone at the file rather than write it here: a template
+    has no in-app editor, since it lives on disk to be edited like any other
+    text file."""
+    _registered_template(name)
+    return _template_override_path(name)
+
+
 def template_text(name: str) -> str:
     """One template's effective text: a saved override if the user wrote one,
     else the text this app ships with."""
