@@ -25,6 +25,13 @@ DB_PATH = DATA_DIR / "voice_to_note.db"
 CONFIG_PATH = ROOT / "vtn.toml"
 TEMPLATES_DIR = ROOT / "templates"
 
+# the meeting-capture helper ships as source inside this package and is compiled
+# into VTN_HOME by setup, since a native binary cannot ride along in a wheel
+NATIVE_DIR = Path(__file__).resolve().parent / "native"
+CAPTURE_SRC = NATIVE_DIR / "capture.swift"
+CAPTURE_PLIST = NATIVE_DIR / "Info.plist"
+CAPTURE_BIN = ROOT / "bin" / "vtn-capture"
+
 T = TypeVar("T")
 
 

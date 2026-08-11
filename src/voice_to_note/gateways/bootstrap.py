@@ -63,6 +63,43 @@ def build_whisper(vendor: Path) -> None:
     _run(["cmake", "--build", str(build), "-j", "--config", "Release"], "building whisper.cpp")
 
 
+def build_capture(source: Path, plist: Path, dst: Path) -> None:
+    """Compiles the meeting-capture helper this app records through, which ships
+    as Swift source rather than as a binary so that nothing unsigned and
+    prebuilt ever lands on a user's machine."""
+    if shutil.which("swiftc") is None:
+        raise GatewayError("missing: swiftc — install: xcode-select --install")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    # the Info.plist is linked into the binary itself: a bundle-less CLI has
+    # nowhere else to keep one, and without it macOS asks for microphone and
+    # audio access on behalf of an unnamed program the user cannot recognise
+    _run(
+        [
+            "swiftc",
+            str(source),
+            "-O",
+            "-o",
+            str(dst),
+            "-Xlinker",
+            "-sectcreate",
+            "-Xlinker",
+            "__TEXT",
+            "-Xlinker",
+            "__info_plist",
+            "-Xlinker",
+            str(plist),
+        ],
+        "building vtn-capture",
+    )
+    # signed under a fixed identifier rather than the ad-hoc default, whose hash
+    # changes with every build: macOS attaches the granted permissions to that
+    # identifier, so a rebuild under a new one would ask for them all again
+    _run(
+        ["codesign", "--force", "--sign", "-", "--identifier", "app.vtn.capture", str(dst)],
+        "signing vtn-capture",
+    )
+
+
 def download_model_script(vendor: Path, script: str, args: list[str]) -> None:
     """Runs one of whisper.cpp's own model-download scripts, which ship inside
     its clone rather than in this project. Left to print straight to the

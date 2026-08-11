@@ -85,6 +85,42 @@ def test_a_failing_build_is_a_gateway_error(monkeypatch, tmp_path):
         bootstrap.build_whisper(tmp_path / "vendor")
 
 
+# --- building the meeting-capture helper -----------------------------------
+
+
+def test_building_the_capture_helper_without_swiftc_names_how_to_get_it(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _tool: None)
+
+    with pytest.raises(GatewayError, match="swiftc"):
+        bootstrap.build_capture(
+            tmp_path / "capture.swift", tmp_path / "Info.plist", tmp_path / "bin" / "vtn-capture"
+        )
+
+
+def test_building_the_capture_helper_embeds_its_plist_then_signs_it(monkeypatch, tmp_path):
+    seen = []
+
+    def run(cmd, **kwargs):
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _tool: "/usr/bin/swiftc")
+    monkeypatch.setattr(bootstrap.subprocess, "run", run)
+    plist = tmp_path / "Info.plist"
+    dst = tmp_path / "bin" / "vtn-capture"
+
+    bootstrap.build_capture(tmp_path / "capture.swift", plist, dst)
+
+    # the linked-in plist is what makes macOS name this helper in its
+    # permission prompts, and the fixed identifier is what keeps the answer
+    assert seen[0][0] == "swiftc"
+    assert "__info_plist" in seen[0] and str(plist) in seen[0]
+    assert seen[1] == [
+        "codesign", "--force", "--sign", "-", "--identifier", "app.vtn.capture", str(dst),
+    ]
+    assert dst.parent.is_dir()
+
+
 def test_a_model_download_script_runs_with_its_own_arguments_and_streams_output(
     monkeypatch, tmp_path
 ):

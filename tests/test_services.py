@@ -1600,7 +1600,16 @@ def configured_paths(monkeypatch, tmp_path):
         models / "sherpa-onnx-pyannote-segmentation-3-0" / "model.onnx",
     )
     monkeypatch.setattr(services.config, "EMB_MODEL_PATH", models / "nemo_en_titanet_large.onnx")
+    monkeypatch.setattr(services.config, "CAPTURE_BIN", tmp_path / "bin" / "vtn-capture")
     return vendor
+
+
+def _write_capture_helper() -> None:
+    """Puts a runnable meeting-capture helper where setup looks for one."""
+    binary = services.config.CAPTURE_BIN
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text("bin")
+    binary.chmod(0o755)
 
 
 def stub_bootstrap(monkeypatch, *, vad_fails=False, cloned_urls: list | None = None) -> list:
@@ -1632,9 +1641,19 @@ def stub_bootstrap(monkeypatch, *, vad_fails=False, cloned_urls: list | None = N
     def fetch(url, dst, tick=lambda read, total: None):
         calls.append("emb")
 
+    def build_capture(source, plist, dst):
+        calls.append("capture")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text("bin")
+        dst.chmod(0o755)
+
+    # setup's last step only runs on a Mac, so the platform is pinned rather
+    # than left to whichever machine the suite happens to run on
+    monkeypatch.setattr(services.sys, "platform", "darwin")
     monkeypatch.setattr(services.bootstrap, "require_tools", lambda: calls.append("tools"))
     monkeypatch.setattr(services.bootstrap, "clone_whisper", clone)
     monkeypatch.setattr(services.bootstrap, "build_whisper", build)
+    monkeypatch.setattr(services.bootstrap, "build_capture", build_capture)
     monkeypatch.setattr(services.bootstrap, "download_model_script", download)
     monkeypatch.setattr(services.bootstrap, "fetch_tar_bz2", fetch_tar_bz2)
     monkeypatch.setattr(services.bootstrap, "fetch", fetch)
@@ -1650,7 +1669,7 @@ def test_setup_runs_every_step_when_nothing_is_on_disk(monkeypatch, tmp_path):
     assert result == "setup complete"
     assert calls == [
         "tools", "clone", "build",
-        "download-ggml-model.sh", "download-vad-model.sh", "seg", "emb",
+        "download-ggml-model.sh", "download-vad-model.sh", "seg", "emb", "capture",
     ]
     assert services.config.MODELS_DIR.is_dir()
     assert services.config.DATA_DIR.is_dir()
@@ -1676,18 +1695,20 @@ def test_setup_numbers_and_times_each_step_it_actually_runs(monkeypatch, tmp_pat
 
     services.setup(log=logged.append, now=lambda: next(clock))
 
-    assert logged[0] == "[1/6] cloning whisper.cpp …"
+    assert logged[0] == "[1/7] cloning whisper.cpp …"
     assert logged[1] == "      done in 3s"
-    assert logged[2] == "[2/6] building whisper.cpp (Metal — takes a few minutes) …"
+    assert logged[2] == "[2/7] building whisper.cpp (Metal — takes a few minutes) …"
     assert logged[3] == "      done in 3s"
-    assert logged[4] == f"[3/6] downloading whisper model {config.WHISPER_MODEL} …"
+    assert logged[4] == f"[3/7] downloading whisper model {config.WHISPER_MODEL} …"
     assert logged[5] == "      done in 3s"
-    assert logged[6] == "[4/6] downloading VAD model …"
+    assert logged[6] == "[4/7] downloading VAD model …"
     assert logged[7] == "      done in 3s"
-    assert logged[8] == "[5/6] downloading speaker segmentation model (~6 MB) …"
+    assert logged[8] == "[5/7] downloading speaker segmentation model (~6 MB) …"
     assert logged[9] == "      done in 3s"
-    assert logged[10] == "[6/6] downloading speaker embedding model (~97 MB) …"
+    assert logged[10] == "[6/7] downloading speaker embedding model (~97 MB) …"
     assert logged[11] == "      done in 3s"
+    assert logged[12] == "[7/7] building meeting-capture helper …"
+    assert logged[13] == "      done in 3s"
 
 
 def test_setup_reports_a_skipped_step_without_running_or_timing_it(monkeypatch, tmp_path):
@@ -1703,18 +1724,20 @@ def test_setup_reports_a_skipped_step_without_running_or_timing_it(monkeypatch, 
     services.config.SEG_MODEL_PATH.parent.mkdir(parents=True)
     services.config.SEG_MODEL_PATH.write_text("seg")
     (services.config.MODELS_DIR / "nemo_en_titanet_large.onnx").write_text("emb")
+    _write_capture_helper()
     stub_bootstrap(monkeypatch)
     logged: list = []
 
     services.setup(log=logged.append)
 
     assert logged == [
-        "[1/6] whisper.cpp source — already installed",
-        "[2/6] whisper.cpp build — already installed",
-        "[3/6] whisper model — already installed",
-        "[4/6] VAD model — already installed",
-        "[5/6] speaker segmentation model — already installed",
-        "[6/6] speaker embedding model — already installed",
+        "[1/7] whisper.cpp source — already installed",
+        "[2/7] whisper.cpp build — already installed",
+        "[3/7] whisper model — already installed",
+        "[4/7] VAD model — already installed",
+        "[5/7] speaker segmentation model — already installed",
+        "[6/7] speaker embedding model — already installed",
+        "[7/7] meeting-capture helper — already installed",
     ]
 
 
@@ -1765,6 +1788,7 @@ def test_setup_skips_steps_whose_artifact_already_exists(monkeypatch, tmp_path):
     services.config.SEG_MODEL_PATH.parent.mkdir(parents=True)
     services.config.SEG_MODEL_PATH.write_text("seg")
     (services.config.MODELS_DIR / "nemo_en_titanet_large.onnx").write_text("emb")
+    _write_capture_helper()
     calls = stub_bootstrap(monkeypatch)
 
     services.setup()
@@ -1805,6 +1829,21 @@ def test_a_vad_download_failure_is_tolerated_rather_than_failing_setup(monkeypat
     assert any("VAD download failed" in line for line in logged)
 
 
+def test_setup_skips_the_capture_helper_away_from_a_mac(monkeypatch, tmp_path):
+    # recording a meeting is a macOS-only feature; the rest of the pipeline
+    # still installs on any machine rather than failing on a helper it cannot
+    # build there
+    configured_paths(monkeypatch, tmp_path)
+    calls = stub_bootstrap(monkeypatch)
+    monkeypatch.setattr(services.sys, "platform", "linux")
+    logged: list = []
+
+    services.setup(log=logged.append)
+
+    assert "capture" not in calls
+    assert "[7/7] meeting-capture helper — macOS only, skipped" in logged
+
+
 def test_mock_world_previews_setup_without_touching_the_network_or_disk(monkeypatch, tmp_path):
     # a preview has to fail early the same way a real run would (require_tools
     # stays real) but must never reach git, cmake, curl or an actual download
@@ -1813,8 +1852,10 @@ def test_mock_world_previews_setup_without_touching_the_network_or_disk(monkeypa
     def gateway_called(*_a, **_k):
         raise AssertionError("real gateway called")
 
+    monkeypatch.setattr(services.sys, "platform", "darwin")
     monkeypatch.setattr(services.bootstrap, "clone_whisper", gateway_called)
     monkeypatch.setattr(services.bootstrap, "build_whisper", gateway_called)
+    monkeypatch.setattr(services.bootstrap, "build_capture", gateway_called)
     monkeypatch.setattr(services.bootstrap, "download_model_script", gateway_called)
     monkeypatch.setattr(services.bootstrap, "fetch", gateway_called)
     monkeypatch.setattr(services.bootstrap, "fetch_tar_bz2", gateway_called)
@@ -1829,9 +1870,9 @@ def test_mock_world_previews_setup_without_touching_the_network_or_disk(monkeypa
     )
 
     assert result == "setup complete"
-    for n in range(1, 7):
-        assert any(line.startswith(f"[{n}/6]") for line in logged)
-    assert sum(line.startswith("      done in") for line in logged) == 6
+    for n in range(1, 8):
+        assert any(line.startswith(f"[{n}/7]") for line in logged)
+    assert sum(line.startswith("      done in") for line in logged) == 7
     assert any("%" in line and "MB" in line for line in downloaded)
     assert not services.config.MODELS_DIR.exists()
     assert not services.config.DATA_DIR.exists()
