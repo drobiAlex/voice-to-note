@@ -38,7 +38,7 @@ To upgrade, re-run the installer.
 | Command | What it does |
 |---|---|
 | `vtn setup` | install whisper.cpp and all models (idempotent) |
-| `vtn process <file>` | convert, transcribe, diarize, store, extract notes |
+| `vtn process <file>` | convert, transcribe, diarize, store, extract notes — shape the run with --speakers, --steps, --template |
 | `vtn list` | list stored memos |
 | `vtn show <id>` | print a memo's transcript |
 | `vtn notes <id>` | print the extracted notes |
@@ -59,6 +59,9 @@ Shipped:
 - [x] Questions against a memo (`vtn ask`)
 - [x] TUI with live job progress
 - [x] One-command install, with a mock preview mode
+- [x] Settings & configuration — every knob in vtn.toml, editable from the TUI settings screen or `vtn config`
+- [x] Custom note templates — write your own beside the built-ins, pick one per recording
+- [x] Add-recording form — speaker count, template and pipeline steps chosen per recording
 
 Next — working with to-dos (every memo produces them):
 - [ ] To-dos as first-class items: every action item a memo produced, listed and addressable
@@ -66,8 +69,6 @@ Next — working with to-dos (every memo produces them):
 - [ ] Edit, check off and carry over to-dos as work happens
 
 Later:
-- [ ] Custom note templates — define your own structures for extracted notes
-- [ ] Settings & configuration — choose the extraction model (Claude, Codex, and others)
 - [ ] Native recording — record directly on your Mac instead of importing voice memos
 - [ ] Full-text search across transcripts and notes
 
