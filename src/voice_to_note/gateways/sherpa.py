@@ -1,8 +1,10 @@
 import multiprocessing
+import sys
 import wave
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TypeVar
 
@@ -51,6 +53,28 @@ def _embedding_config() -> sherpa_onnx.SpeakerEmbeddingExtractorConfig:
     )
 
 
+@contextmanager
+def _spawn_safe_stderr() -> Iterator[None]:
+    """Starting a child process hands sys.stderr's file descriptor to the
+    helper multiprocessing spawns; a full-screen UI replaces stderr with a
+    capture object whose fileno() is -1, and the spawn refuses that outright.
+    Puts the interpreter's original stream back for the moment processes are
+    being started, so there is a real descriptor to hand over."""
+    try:
+        usable = sys.stderr.fileno() >= 0
+    except (AttributeError, OSError, ValueError):
+        usable = False
+    if usable:
+        yield
+        return
+    captured = sys.stderr
+    sys.stderr = sys.__stderr__
+    try:
+        yield
+    finally:
+        sys.stderr = captured
+
+
 def _isolated(fn: Callable[..., T], /, *args: object) -> T:
     """Runs one piece of work in a child process of its own and waits for the
     answer. The wait is on inter-process communication, which leaves the
@@ -60,8 +84,11 @@ def _isolated(fn: Callable[..., T], /, *args: object) -> T:
     # spawn, not fork: fork copies a process that has already loaded onnx
     # runtime threads into a child that cannot safely use them
     ctx = multiprocessing.get_context("spawn")
-    with ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
-        return pool.submit(fn, *args).result()
+    with _spawn_safe_stderr():
+        pool = ProcessPoolExecutor(max_workers=1, mp_context=ctx)
+        future = pool.submit(fn, *args)
+    with pool:
+        return future.result()
 
 
 def diarize(wav: Path, num_speakers: int | None = None) -> list[Turn]:

@@ -1,3 +1,4 @@
+import sys
 import wave
 from concurrent.futures.process import BrokenProcessPool
 
@@ -153,3 +154,37 @@ def test_a_child_that_dies_outright_is_reported_as_a_failed_diarization(
 
     with pytest.raises(GatewayError, match="diarization crashed — terminated abruptly"):
         sherpa.diarize(tmp_path / "memo.wav")
+
+
+class StderrCapture:
+    """A stderr stand-in like a TUI's: swallows writes, has no descriptor."""
+
+    def write(self, s: str) -> None:
+        pass
+
+    def flush(self) -> None:
+        pass
+
+    def fileno(self) -> int:
+        return -1
+
+
+def test_a_captured_stderr_is_swapped_for_the_real_one_while_spawning(monkeypatch):
+    capture = StderrCapture()
+    monkeypatch.setattr(sys, "stderr", capture)
+    with sherpa._spawn_safe_stderr():
+        assert sys.stderr is sys.__stderr__
+    assert sys.stderr is capture
+
+
+def test_a_usable_stderr_is_left_alone_while_spawning(tmp_path, monkeypatch):
+    with open(tmp_path / "err", "w") as real:
+        monkeypatch.setattr(sys, "stderr", real)
+        with sherpa._spawn_safe_stderr():
+            assert sys.stderr is real
+        assert sys.stderr is real
+
+
+def test_child_work_still_runs_when_a_ui_has_captured_stderr(monkeypatch):
+    monkeypatch.setattr(sys, "stderr", StderrCapture())
+    assert sherpa._isolated(double, 21) == 42
