@@ -2645,3 +2645,57 @@ async def test_pressing_u_restores_the_highlighted_setting_to_default(repo, monk
         await pilot.pause()
 
         assert unset == ["num_speakers"]
+
+
+async def open_setting(pilot, key: str) -> None:
+    """Opens one setting's edit modal, the way picking its row does."""
+    await pilot.press("S")
+    await pilot.pause()
+    table = settings_table(pilot)
+    table.move_cursor(row=table.get_row_index(key))
+    await pilot.press("enter")
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_the_edit_modal_shows_the_settings_default(repo):
+    async with MemoApp(repo).run_test() as pilot:
+        await open_setting(pilot, "num_speakers")
+
+        meta = str(pilot.app.screen.query_one("#setting-meta", Static).content)
+        assert "default: -1" in meta
+
+
+@pytest.mark.asyncio
+async def test_ctrl_d_in_the_edit_modal_restores_the_default(repo, monkeypatch):
+    unset: list = []
+    monkeypatch.setattr(
+        services, "config_unset", lambda key: unset.append(key) or f"{key} unset"
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_setting(pilot, "num_speakers")
+        await pilot.press("ctrl+d")
+        await pilot.pause()
+
+        assert unset == ["num_speakers"]
+        assert not showing(pilot.app, "#setting-value")
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_int_is_refused_without_writing(repo, monkeypatch):
+    written: dict = {}
+    monkeypatch.setattr(
+        services,
+        "config_set",
+        lambda key, value: written.setdefault(key, value) or f"{key} set to {value}",
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_setting(pilot, "num_speakers")
+        pilot.app.screen.query_one("#setting-value", Input).value = "abc"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert written == {}
+        assert showing(pilot.app, "#setting-value")

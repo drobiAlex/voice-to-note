@@ -63,42 +63,92 @@ def source(key: str, env: Mapping[str, str], settings: Mapping[str, Any]) -> str
 
 @dataclass(frozen=True)
 class Setting:
-    """One configurable value, complete enough to resolve and to describe: its
-    default, how to parse it out of text, and what it does. A default and its
-    parser live in the same place, so they cannot drift apart."""
+    """One configurable value, complete enough to resolve, to describe, and to
+    edit: its default, how to parse it out of text, what it does, and what
+    shape of value it takes. A default and its parser live in the same place,
+    so they cannot drift apart. `kind` and `choices` drive an editor's UI
+    only — config_set's cast stays the source of truth for what is actually
+    accepted."""
 
     default: Any
     cast: Callable[[Any], Any]
     doc: str
+    kind: str = "text"
+    choices: tuple[str, ...] = ()
 
 
 SETTINGS: dict[str, Setting] = {
-    "whisper_model": Setting("large-v3-turbo", str, "whisper.cpp model used to transcribe"),
+    "whisper_model": Setting(
+        "large-v3-turbo",
+        str,
+        "whisper.cpp model used to transcribe",
+        kind="choice",
+        choices=("tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"),
+    ),
     "emb_model": Setting(
         "nemo_en_titanet_large.onnx", str, "model used to embed a voice for speaker matching"
     ),
-    "num_speakers": Setting(-1, int, "speaker count to assume; -1 auto-detects"),
+    "num_speakers": Setting(-1, int, "speaker count to assume; -1 auto-detects", kind="int"),
     "diar_threshold": Setting(
-        0.5, float, "similarity above which two turns count as the same speaker"
+        0.5,
+        float,
+        "similarity above which two turns count as the same speaker",
+        kind="float01",
     ),
     "match_threshold": Setting(
-        0.5, float, "similarity above which a voice matches a known speaker"
+        0.5,
+        float,
+        "similarity above which a voice matches a known speaker",
+        kind="float01",
     ),
-    "claude_model": Setting("sonnet", str, "claude model used for extraction and Q&A"),
-    "refine_model": Setting("haiku", str, "claude model used for transcript repair"),
-    "ollama_url": Setting("http://localhost:11434", str, "ollama server used as a local fallback"),
+    "claude_model": Setting(
+        "sonnet",
+        str,
+        "claude model used for extraction and Q&A",
+        kind="choice",
+        choices=("sonnet", "haiku", "opus"),
+    ),
+    "refine_model": Setting(
+        "haiku",
+        str,
+        "claude model used for transcript repair",
+        kind="choice",
+        choices=("sonnet", "haiku", "opus"),
+    ),
+    "ollama_url": Setting(
+        "http://localhost:11434", str, "ollama server used as a local fallback", kind="url"
+    ),
     "ollama_model": Setting("qwen3:8b", str, "ollama model used as a local fallback"),
-    "llm_backends": Setting("claude,ollama", str, "comma-ordered LLM backends to try"),
+    "llm_backends": Setting(
+        "claude,ollama",
+        str,
+        "comma-ordered LLM backends to try",
+        kind="multichoice",
+        choices=("claude", "codex", "gemini", "ollama"),
+    ),
     "codex_model": Setting("", str, "codex model override; empty uses the CLI's own default"),
     "gemini_model": Setting("", str, "gemini model override; empty uses the CLI's own default"),
-    "claude_timeout_s": Setting(600, int, "seconds before a stuck claude call is given up on"),
-    "ollama_timeout_s": Setting(1800, int, "seconds before a stuck ollama call is given up on"),
-    "codex_timeout_s": Setting(600, int, "seconds before a stuck codex call is given up on"),
-    "gemini_timeout_s": Setting(600, int, "seconds before a stuck gemini call is given up on"),
-    "refine_workers": Setting(4, int, "repair windows a refine pass runs at once"),
-    "refine_window": Setting(20, int, "transcript lines repaired together in one refine window"),
+    "claude_timeout_s": Setting(
+        600, int, "seconds before a stuck claude call is given up on", kind="int"
+    ),
+    "ollama_timeout_s": Setting(
+        1800, int, "seconds before a stuck ollama call is given up on", kind="int"
+    ),
+    "codex_timeout_s": Setting(
+        600, int, "seconds before a stuck codex call is given up on", kind="int"
+    ),
+    "gemini_timeout_s": Setting(
+        600, int, "seconds before a stuck gemini call is given up on", kind="int"
+    ),
+    "refine_workers": Setting(4, int, "repair windows a refine pass runs at once", kind="int"),
+    "refine_window": Setting(
+        20, int, "transcript lines repaired together in one refine window", kind="int"
+    ),
     "whisper_repo_url": Setting(
-        "https://github.com/ggml-org/whisper.cpp", str, "whisper.cpp source cloned during setup"
+        "https://github.com/ggml-org/whisper.cpp",
+        str,
+        "whisper.cpp source cloned during setup",
+        kind="url",
     ),
 }
 

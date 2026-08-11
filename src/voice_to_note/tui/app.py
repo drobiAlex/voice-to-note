@@ -3,9 +3,11 @@ from pathlib import Path, PurePath
 
 from textual import work
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.timer import Timer
+from textual.validation import Function, Integer, Number, Validator
 from textual.widgets import (
     DataTable,
     DirectoryTree,
@@ -509,30 +511,96 @@ class ConfirmRemove(ModalScreen[bool]):
         self.dismiss(False)
 
 
+# the check run against a value as it is typed, keyed by the registry's kind
+# for that setting. Kinds with no entry here — text, choice, multichoice — take
+# a typed widget in a later increment rather than a freeform check that could
+# only ever approve or reject what the widget will not let you type wrong.
+_KIND_VALIDATORS: dict[str, Callable[[], list[Validator]]] = {
+    "int": lambda: [Integer()],
+    "float01": lambda: [Number(minimum=0, maximum=1)],
+    "url": lambda: [
+        Function(lambda v: v.startswith(("http://", "https://")), "must be an http(s) URL")
+    ],
+}
+
+
+def _validators(kind: str) -> list[Validator]:
+    """The checks a value must pass before this kind of setting will let it be
+    written, empty for a kind whose shape a typed widget will enforce instead."""
+    build = _KIND_VALIDATORS.get(kind)
+    return build() if build else []
+
+
 class EditSetting(ModalScreen[None]):
     """One setting's value, open to be typed over. Opens on what is actually
-    in effect now, whether that came from vtn.toml, the environment, or the
-    setting's own default."""
+    in effect now, what it does, its default, and where the value came from —
+    vtn.toml, the environment, or the setting's own default — checking what is
+    typed against the shape the registry says this setting takes."""
 
-    BINDINGS = [("escape", "cancel", "Cancel")]
+    # a bare "d" would never reach this screen: the Input focused below
+    # consumes every printable key itself, the same reason NoteEditor binds
+    # save to ctrl+s rather than a bare "s". Priority is what lets it pre-empt
+    # the Input's own binding on the same chord, ctrl+d for delete-right.
+    BINDINGS = [
+        Binding("ctrl+d", "restore_default", "Restore default", priority=True),
+        ("escape", "cancel", "Cancel"),
+    ]
 
-    def __init__(self, key: str, current: str, store: Callable[[str, str], None]) -> None:
-        """Opens on one setting's current value and the way to write over it."""
+    def __init__(
+        self,
+        key: str,
+        current: str,
+        source: str,
+        store: Callable[[str, str], None],
+        restore: Callable[[str], None],
+    ) -> None:
+        """Opens on one setting's current value, where it came from, and the
+        two ways to leave it changed: written over, or dropped to default."""
         super().__init__()
         self.key = key
         self.current = current
+        self.source = source
         self.store = store
+        self.restore = restore
+        self.setting = services.setting_info(key)
 
     def compose(self) -> ComposeResult:
-        """The value, ready to be typed over."""
-        yield Input(self.current, id="setting-value")
+        """What the setting is called, what it does, its default and where the
+        value in effect now came from, the value itself ready to be typed
+        over, and how to leave. An env override is called out on its own line:
+        without it, an edit here would look like it took hold when nothing
+        downstream will ever read it."""
+        yield Static(self.key, id="setting-title")
+        yield Static(self.setting.doc, id="setting-doc")
+        yield Static(
+            f"default: {self.setting.default}   current source: {self.source}",
+            id="setting-meta",
+        )
+        if self.source == "env":
+            yield Static(
+                f"env override active — VTN_{self.key.upper()} is set and this edit"
+                " won't take effect until it's unset",
+                id="setting-env-warning",
+            )
+        yield Input(
+            self.current,
+            id="setting-value",
+            validators=_validators(self.setting.kind),
+        )
+        yield Static("enter save · ctrl+d restore default · esc cancel", id="setting-hint")
 
     def on_mount(self) -> None:
         """Puts the cursor in the value."""
         self.query_one("#setting-value", Input).focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Writes whatever they left on the line."""
+        """Writes whatever they left on the line, unless it fails the check
+        for what this setting's kind can even hold — refused here, the same
+        as config_set would refuse it, but before it ever costs a write."""
+        result = event.validation_result
+        if result is not None and not result.is_valid:
+            self.notify("; ".join(result.failure_descriptions), severity="warning")
+            return
         self._submit(event.value)
 
     def _submit(self, typed: str) -> None:
@@ -542,6 +610,12 @@ class EditSetting(ModalScreen[None]):
         except services.InvalidInput as refused:
             self.notify(str(refused), severity="warning")
             return
+        self.dismiss(None)
+
+    def action_restore_default(self) -> None:
+        """Drops this setting back to its default, leaving whatever was typed
+        over it behind."""
+        self.restore(self.key)
         self.dismiss(None)
 
     def action_cancel(self) -> None:
@@ -587,13 +661,21 @@ class SettingsScreen(ModalScreen[None]):
         # on the memo table this screen has nothing to do with
         event.stop()
         key = str(event.row_key.value)
-        current = str(self.query_one("#settings", DataTable).get_cell(event.row_key, "value"))
-        self.app.push_screen(EditSetting(key, current, self._set))
+        table = self.query_one("#settings", DataTable)
+        current = str(table.get_cell(event.row_key, "value"))
+        source = str(table.get_cell(event.row_key, "source"))
+        self.app.push_screen(EditSetting(key, current, source, self._set, self._unset))
 
     def _set(self, key: str, value: str) -> None:
         """Writes the setting, then redraws the table so its row says where
         the value now comes from."""
         self.notify(services.config_set(key, value))
+        self._refresh()
+
+    def _unset(self, key: str) -> None:
+        """Drops one setting back to its default, then redraws the table so
+        its row says where the value now comes from."""
+        self.notify(services.config_unset(key))
         self._refresh()
 
     def action_restore_default(self) -> None:
@@ -602,8 +684,7 @@ class SettingsScreen(ModalScreen[None]):
         if table.row_count == 0:
             return
         key = str(table.ordered_rows[table.cursor_row].key.value)
-        self.notify(services.config_unset(key))
-        self._refresh()
+        self._unset(key)
 
     def action_close(self) -> None:
         """Puts the app back in front of them."""

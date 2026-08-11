@@ -375,6 +375,14 @@ def _registered_setting(key: str) -> config.Setting:
     return setting
 
 
+def setting_info(key: str) -> config.Setting:
+    """One setting's registry entry — its default, kind and choices — for a
+    screen building an editor around it, without reaching into config on its
+    own. The key always comes from a listing config_rows() already produced,
+    so it is always one this app knows about."""
+    return _registered_setting(key)
+
+
 def _env_override_note(key: str) -> str:
     """Told alongside a settings write when an environment variable means the
     value just written is not actually the one in effect: VTN_<KEY> always
