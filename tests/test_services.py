@@ -993,7 +993,7 @@ def test_the_info_for_a_memo_gathers_what_a_reader_would_ask(repo, wav):
 
     info = services.memo_info(repo, memo_id)
 
-    assert (info.filename, info.project, info.duration) == ("standup.m4a", "work", "75s")
+    assert (info.filename, info.project, info.duration) == ("standup.m4a", "work", "1m 15s")
     assert (info.language, info.status) == ("en", "transcribed")
     assert (info.speakers, info.refined, info.edited) == (1, False, False)
 
@@ -1061,7 +1061,7 @@ def test_the_memo_table_puts_a_memos_state_in_columns_beside_its_name(repo, wav)
         "name", "duration", "speakers", "status", "created", "updated",
     )
     assert row.id == memo_id
-    assert (row.name, row.duration, row.speakers) == ("standup.m4a", "75s", "2")
+    assert (row.name, row.duration, row.speakers) == ("standup.m4a", "1m 15s", "2")
     assert row.status == "transcribed"
     assert row.created != ""
     assert row.updated == row.created
@@ -1730,3 +1730,14 @@ def test_ready_is_false_when_one_required_artifact_is_missing(monkeypatch, tmp_p
     _write_ready_artifacts(skip=skip)
 
     assert services.ready() is False
+
+
+def test_durations_read_like_a_person_says_them():
+    assert services._duration(None) == "?"
+    assert services._duration(0) == "?"
+    assert services._duration(42) == "42s"
+    assert services._duration(75) == "1m 15s"
+    assert services._duration(119.6) == "2m"
+    assert services._duration(3600) == "1h"
+    assert services._duration(3661) == "1h 1m 1s"
+    assert services._duration(90061) == "1d 1h 1m 1s"

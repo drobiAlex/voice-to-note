@@ -32,7 +32,7 @@ def run(monkeypatch, repo, *argv) -> None:
 def listing_line(memo, dur: str) -> str:
     """The one memo-per-line shape `vtn list` has always printed."""
     return (
-        f"{memo.id:>4}  {memo.created_at}  {dur:>6}  {memo.language or '?':<3}"
+        f"{memo.id:>4}  {memo.created_at}  {dur:>10}  {memo.language or '?':<3}"
         f"  {memo.status:<12} {memo.project:<8} {memo.filename}"
     )
 

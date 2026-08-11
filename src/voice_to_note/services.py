@@ -574,7 +574,7 @@ def process_memo(
     audio.to_wav16k(src, wav)
     duration = audio.duration_seconds(wav)
     progress(2, "transcribing")
-    log(f"transcribing ({duration:.0f}s audio) …")
+    log(f"transcribing ({_duration(duration)} audio) …")
     raw = whisper.transcribe(wav, duration)
     segs = segments_from_whisper(raw)
     language = raw.get("result", {}).get("language", "")
@@ -669,10 +669,25 @@ def transcript(repo: Repository, memo_id: int) -> str:
 
 
 def _duration(duration_s: float | None) -> str:
-    """A recording's length in whole seconds, or a shrug when it was never
-    measured. A zero-length recording reads as unmeasured too, which is right:
-    nothing was captured either way."""
-    return f"{duration_s:.0f}s" if duration_s else "?"
+    """Renders a length of audio the way a person says it — "1h 4m 12s",
+    not a raw second count. Units that would read as zero are dropped from
+    the front and the back, so short memos stay short: "42s", "2m"."""
+    if not duration_s:
+        return "?"
+    total = round(duration_s)
+    days, rest = divmod(total, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes, seconds = divmod(rest, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if seconds or not parts:
+        parts.append(f"{seconds}s")
+    return " ".join(parts)
 
 
 def memos_text(repo: Repository, project: str | None = None, tag: str | None = None) -> str:
@@ -681,7 +696,7 @@ def memos_text(repo: Repository, project: str | None = None, tag: str | None = N
     time when asked for, and both together when both are. Empty when nothing is
     stored, and equally empty when nothing matches."""
     return "\n".join(
-        f"{m.id:>4}  {m.created_at}  {_duration(m.duration_s):>6}  {m.language or '?':<3}"
+        f"{m.id:>4}  {m.created_at}  {_duration(m.duration_s):>10}  {m.language or '?':<3}"
         f"  {m.status:<12} {m.project:<8} {m.filename}"
         for m in memos(repo, project, tag)
     )

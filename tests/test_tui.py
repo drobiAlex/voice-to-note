@@ -2514,7 +2514,7 @@ async def test_the_memo_list_shows_each_memos_state_beside_its_name(repo):
         info = services.memo_info(repo, memo_id)
         assert row_for(pilot.app, "interview.m4a") == {
             "name": "interview.m4a",
-            "duration": "75s",
+            "duration": "1m 15s",
             "speakers": "2",
             "status": "extracted",
             "created": info.created,
