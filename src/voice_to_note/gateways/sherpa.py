@@ -19,7 +19,7 @@ from ..transforms.speakers import (
     select_fingerprint_turns,
     turns_from_clusters,
 )
-from . import GatewayError
+from . import GatewayError, qos
 
 SAMPLE_RATE = 16000
 SAMPLE_WIDTH_BYTES = 2
@@ -85,7 +85,7 @@ def _isolated(fn: Callable[..., T], /, *args: object) -> T:
     # runtime threads into a child that cannot safely use them
     ctx = multiprocessing.get_context("spawn")
     with _spawn_safe_stderr():
-        pool = ProcessPoolExecutor(max_workers=1, mp_context=ctx)
+        pool = ProcessPoolExecutor(max_workers=1, mp_context=ctx, initializer=qos.lower_priority)
         future = pool.submit(fn, *args)
     with pool:
         return future.result()

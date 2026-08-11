@@ -6,7 +6,7 @@ from typing import cast
 
 from .. import config
 from ..transforms.segments import WhisperTranscription
-from . import GatewayError
+from . import GatewayError, qos
 
 # transcription runs faster than real time even on CPU; this is a stuck-process
 # guard, not a performance target
@@ -38,6 +38,7 @@ def transcribe(wav: Path, duration_s: float) -> WhisperTranscription:
         ]
         if config.VAD_MODEL_PATH.exists():
             cmd += ["--vad", "--vad-model", str(config.VAD_MODEL_PATH)]
+        cmd = qos.background(cmd)
         timeout = timeout_for(duration_s)
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
