@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +34,42 @@ import sys
 sys.stderr.write("open System Settings\\n")
 sys.exit(3)
 """
+
+LISTS_DEVICES = """
+print("in\\tBuiltInMicrophoneDevice\\tMacBook Pro Microphone")
+print("out\\tBuiltInSpeakerDevice\\tMacBook Pro Speakers")
+"""
+
+CANNOT_READ_DEVICES = """
+import sys
+
+sys.stderr.write("cannot read this Mac's audio devices\\n")
+sys.exit(4)
+"""
+
+
+def records_how_it_was_called(log: Path) -> str:
+    """A fake helper that writes down the arguments it was given and stops at
+    once, for a test about what the recording was asked for rather than what
+    came of it."""
+    return f"""
+import json, sys
+
+with open({str(log)!r}, "w") as f:
+    json.dump(sys.argv[1:], f)
+print("recording", flush=True)
+"""
+
+
+class StoppedAtOnce:
+    """A recording that is over as soon as it begins, standing in for the
+    helper where a test only cares how the recording was set up."""
+
+    def wait(self) -> int:
+        return 0
+
+    def stop(self) -> None:
+        pass
 
 
 def helper(tmp_path: Path, body: str) -> Path:
@@ -90,6 +127,91 @@ def test_recording_before_setup_has_built_the_helper_says_to_run_setup(tmp_path,
 
     with pytest.raises(GatewayError, match="vtn setup"):
         capture.start(tmp_path / "system.wav", tmp_path / "mic.wav")
+
+
+# --- choosing what to record from ------------------------------------------
+
+
+def test_choosing_no_device_leaves_both_sides_to_whatever_the_mac_is_set_to(
+    tmp_path, monkeypatch
+):
+    # the common case is that nobody has been asked to choose, and that has to
+    # keep recording the whole system mix and the default microphone
+    log = tmp_path / "argv.json"
+    monkeypatch.setattr(
+        capture.config, "CAPTURE_BIN", helper(tmp_path, records_how_it_was_called(log))
+    )
+    system, mic = tmp_path / "system.wav", tmp_path / "mic.wav"
+
+    capture.start(system, mic).stop()
+
+    assert json.loads(log.read_text()) == [str(system), str(mic)]
+
+
+def test_a_chosen_output_and_microphone_are_both_named_to_the_helper(tmp_path, monkeypatch):
+    log = tmp_path / "argv.json"
+    monkeypatch.setattr(
+        capture.config, "CAPTURE_BIN", helper(tmp_path, records_how_it_was_called(log))
+    )
+
+    capture.start(
+        tmp_path / "system.wav",
+        tmp_path / "mic.wav",
+        output_uid="BlackHole2ch",
+        input_uid="Scarlett2i2",
+    ).stop()
+
+    assert json.loads(log.read_text())[2:] == [
+        "--output-uid",
+        "BlackHole2ch",
+        "--input-uid",
+        "Scarlett2i2",
+    ]
+
+
+def test_choosing_one_side_says_nothing_about_the_other(tmp_path, monkeypatch):
+    # naming a microphone must not also pin the output: an unasked-for choice
+    # would record one device's playback where the whole mix was wanted
+    log = tmp_path / "argv.json"
+    monkeypatch.setattr(
+        capture.config, "CAPTURE_BIN", helper(tmp_path, records_how_it_was_called(log))
+    )
+
+    capture.start(tmp_path / "system.wav", tmp_path / "mic.wav", input_uid="Scarlett2i2").stop()
+
+    assert json.loads(log.read_text())[2:] == ["--input-uid", "Scarlett2i2"]
+
+
+def test_listing_devices_offers_every_direction_a_device_works_in(tmp_path, monkeypatch):
+    monkeypatch.setattr(capture.config, "CAPTURE_BIN", helper(tmp_path, LISTS_DEVICES))
+
+    assert capture.devices() == (
+        "in\tBuiltInMicrophoneDevice\tMacBook Pro Microphone\n"
+        "out\tBuiltInSpeakerDevice\tMacBook Pro Speakers\n"
+    )
+
+
+def test_devices_that_cannot_be_read_are_reported_rather_than_shown_as_none(
+    tmp_path, monkeypatch
+):
+    # a failed read and a Mac with no devices both print nothing, and a picker
+    # offering nothing at all would look like a correct answer
+    monkeypatch.setattr(capture.config, "CAPTURE_BIN", helper(tmp_path, CANNOT_READ_DEVICES))
+
+    with pytest.raises(GatewayError, match="cannot read this Mac's audio devices"):
+        capture.devices()
+
+
+def test_listing_devices_before_setup_has_built_the_helper_says_to_run_setup(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(capture.config, "CAPTURE_BIN", tmp_path / "never-built")
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    with pytest.raises(SystemExit) as err:
+        run(monkeypatch, StubRepo(), "devices")
+
+    assert "vtn setup" in str(err.value.code)
 
 
 # --- folding the two tracks into one recording -----------------------------
@@ -158,3 +280,44 @@ def test_an_unknown_template_is_refused_before_the_tape_ever_rolls(monkeypatch):
         run(monkeypatch, StubRepo(), "record", "--template", "bogus")
 
     assert "unknown note template" in str(err.value.code)
+
+
+def taped_nothing(monkeypatch) -> dict:
+    """Runs a recording that captures nothing, reporting only which devices it
+    was pointed at. Ending with empty tracks is what `record` exits over, and
+    that exit is what keeps the test off the rest of the pipeline."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    seen: dict = {}
+
+    def start(_system, _mic, output_uid=None, input_uid=None):
+        seen.update(output_uid=output_uid, input_uid=input_uid)
+        return StoppedAtOnce()
+
+    monkeypatch.setattr(cli.capture, "start", start)
+    return seen
+
+
+def test_the_devices_a_person_chose_are_the_ones_the_meeting_is_taped_from(monkeypatch):
+    seen = taped_nothing(monkeypatch)
+
+    with pytest.raises(SystemExit):
+        run(
+            monkeypatch,
+            StubRepo(),
+            "record",
+            "--output-device",
+            "BlackHole2ch",
+            "--input-device",
+            "Scarlett2i2",
+        )
+
+    assert seen == {"output_uid": "BlackHole2ch", "input_uid": "Scarlett2i2"}
+
+
+def test_recording_without_choosing_devices_pins_neither(monkeypatch):
+    seen = taped_nothing(monkeypatch)
+
+    with pytest.raises(SystemExit):
+        run(monkeypatch, StubRepo(), "record")
+
+    assert seen == {"output_uid": None, "input_uid": None}

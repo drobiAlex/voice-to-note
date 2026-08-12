@@ -137,7 +137,9 @@ def cmd_record(args: argparse.Namespace) -> None:
     system_wav, mic_wav = tracks / "system.wav", tracks / "mic.wav"
     merged = config.RECORDINGS_DIR / f"meeting-{stamp}.m4a"
 
-    recording = capture.start(system_wav, mic_wav)
+    recording = capture.start(
+        system_wav, mic_wav, output_uid=args.output_device, input_uid=args.input_device
+    )
     status(f"recording — press Ctrl+C to stop ({tracks})")
     try:
         code = recording.wait()
@@ -169,6 +171,25 @@ def cmd_menubar(args: argparse.Namespace) -> None:
     if not config.MENUBAR_BIN.exists():
         sys.exit("menu bar recorder not built — run: vtn setup")
     subprocess.run(["open", str(config.MENUBAR_APP)], check=False)
+
+
+def cmd_devices(args: argparse.Namespace) -> None:
+    """Lists the audio devices a recording can be pointed at, so the UID that
+    `record --output-device` and `--input-device` want can be copied from
+    somewhere rather than guessed at. Printed as it comes: the helper already
+    formats one device per line."""
+    if sys.platform != "darwin":
+        sys.exit("audio devices are listed on macOS only")
+    print(capture.devices(), end="")
+
+
+def cmd_projects(args: argparse.Namespace) -> None:
+    """Lists every project and how many memos are filed under it, one per line
+    and tab-separated, so the same list serves a person reading it and anything
+    that has to offer the projects as a choice."""
+    with Repository() as repo:
+        for name, count in services.projects(repo):
+            print(f"{name}\t{count}")
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -454,11 +475,30 @@ def main() -> None:
         help='comma-separated optional stages to run: speakers,refine,notes'
         ' (default: speakers,notes; "" imports just the transcript)',
     )
+    sp.add_argument(
+        "--output-device",
+        metavar="UID",
+        help="record this output device's playback instead of everything the Mac plays"
+        " (see: vtn devices)",
+    )
+    sp.add_argument(
+        "--input-device",
+        metavar="UID",
+        help="record this microphone instead of the default one (see: vtn devices)",
+    )
     sp.set_defaults(fn=cmd_record)
 
     sub.add_parser(
         "menubar", help="open the menu bar recorder"
     ).set_defaults(fn=cmd_menubar)
+
+    sub.add_parser(
+        "devices", help="list the audio devices a recording can be pointed at"
+    ).set_defaults(fn=cmd_devices)
+
+    sub.add_parser(
+        "projects", help="list every project and how many memos it holds"
+    ).set_defaults(fn=cmd_projects)
 
     sp = sub.add_parser("list", help="list memos")
     sp.add_argument("--json", action="store_true", help="print memos as JSON")

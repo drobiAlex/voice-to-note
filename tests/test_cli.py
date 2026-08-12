@@ -325,6 +325,18 @@ def test_the_notes_command_still_prints_the_extraction_by_default(monkeypatch, c
 # --- projects ------------------------------------------------------------
 
 
+def test_listing_projects_prints_each_with_how_many_memos_it_holds(repo, monkeypatch, capsys):
+    # one line per project, tab-separated: the same answer serves a person
+    # reading it and anything that has to offer the projects as a choice
+    add_memo(repo, filename="standup.m4a")
+    moved = add_memo(repo, filename="review.m4a")
+    services.move_memo(repo, moved, "work")
+
+    run(monkeypatch, repo, "projects")
+
+    assert capsys.readouterr().out == "other\t1\nwork\t1\n"
+
+
 def test_processing_files_the_new_memo_under_a_project(tmp_path, monkeypatch, capsys):
     src = tmp_path / "standup.m4a"
     src.write_bytes(b"fake audio")

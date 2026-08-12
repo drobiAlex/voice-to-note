@@ -19,6 +19,14 @@ DENIED = {
 }
 
 
+def _built() -> None:
+    """Refuses anything needing the native helper before setup has compiled it,
+    naming the command that would. Shared by every entry point into the helper,
+    so none of them can fail as a bare missing-file traceback instead."""
+    if not config.CAPTURE_BIN.exists():
+        raise GatewayError(BUILD_HINT)
+
+
 def _readline(proc: "subprocess.Popen[str]") -> str:
     """One word the helper said, or nothing at all once it has closed stdout —
     which is how a helper that gave up announces itself."""
@@ -68,26 +76,53 @@ class Recording:
             self._proc.wait()
 
 
-def start(system: Path, mic: Path) -> Recording:
+def start(
+    system: Path,
+    mic: Path,
+    output_uid: str | None = None,
+    input_uid: str | None = None,
+) -> Recording:
     """Starts taping this Mac: what it is playing into one file, what the
     microphone hears into the other. Returns only once both streams are
     actually live, so a caller may tell the user the meeting is being recorded
     and be telling the truth. The helper keeps its own stderr, which is where
     its permission advice appears as it happens.
 
+    A side left unnamed is recorded from whatever the Mac itself is set to use,
+    which is what most people mean and what happens when nobody has chosen.
+
     Waiting for that deliberately has no deadline: the first ever run stops at
     the macOS permission prompts, and a person may take minutes to answer them.
     A helper that failed closes stdout, and that silence — not a clock — is
     what says it failed."""
-    if not config.CAPTURE_BIN.exists():
-        raise GatewayError(BUILD_HINT)
+    _built()
     system.parent.mkdir(parents=True, exist_ok=True)
     mic.parent.mkdir(parents=True, exist_ok=True)
-    proc = subprocess.Popen(
-        [str(config.CAPTURE_BIN), str(system), str(mic)],
-        stdout=subprocess.PIPE,
-        text=True,
-    )
+    argv = [str(config.CAPTURE_BIN), str(system), str(mic)]
+    if output_uid:
+        argv += ["--output-uid", output_uid]
+    if input_uid:
+        argv += ["--input-uid", input_uid]
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, text=True)
     if _readline(proc) != "recording":
         raise _failure(proc)
     return Recording(proc)
+
+
+def devices() -> str:
+    """Every audio device a recording could be pointed at, as the helper lists
+    them: one tab-separated `direction UID name` line each, in and out counted
+    separately. Only the helper can see Core Audio, but asking it what exists
+    records nothing and prompts for nothing, so a picker can be filled in
+    before anyone has granted permission to record."""
+    _built()
+    result = subprocess.run(
+        [str(config.CAPTURE_BIN), "--list-devices"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise GatewayError(
+            result.stderr.strip() or f"vtn-capture exited with code {result.returncode}"
+        )
+    return result.stdout
