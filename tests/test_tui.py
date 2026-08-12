@@ -1141,6 +1141,47 @@ async def test_leaving_the_info_puts_the_memo_back_in_front_of_you(repo):
         assert "we ship on friday" in transcript(pilot)
 
 
+# --- everything that can be done to a memo, in one list -------------------
+
+
+@pytest.mark.asyncio
+async def test_pressing_space_lists_what_can_be_done_to_the_pointed_at_memo(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await point_at_memo(pilot, "work")
+        await pilot.press("space")
+        await pilot.pause()
+        title = str(pilot.app.screen.query_one("#action-menu", Static).content)
+        assert "standup.m4a" in title
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert not showing(pilot.app, "#action-menu")
+        assert len(pilot.app.screen_stack) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_key_pressed_inside_the_menu_does_what_it_does_outside_it(repo):
+    # the menu is how the keys are learnt, so it has to answer them itself
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("space")
+        await pilot.pause()
+
+        await pilot.press("i")
+        await pilot.pause()
+
+        shown = str(pilot.app.screen.query_one("#memo-info", Static).content)
+        assert "standup.m4a" in shown
+        # the menu closed on the way, rather than the key sailing past it onto
+        # the screen underneath and leaving it stacked up behind the answer
+        assert len(pilot.app.screen_stack) == 2
+
+
 # --- finding memos by tag -------------------------------------------------
 
 
@@ -2728,8 +2769,9 @@ async def offered(pilot, keys: list[str]) -> list[str]:
 # which is the only way left to hold the case where one is reached anyway.
 
 MEMO_ACTIONS = [
-    "edit_notes", "memo_info", "move_memo", "title_memo", "delete_memo",
-    "rename_speaker", "toggle_raw", "extract", "repair", "diarize", "ask",
+    "action_menu", "edit_notes", "memo_info", "move_memo", "title_memo",
+    "delete_memo", "rename_speaker", "toggle_raw", "extract", "repair",
+    "diarize", "ask",
 ]
 
 

@@ -1275,6 +1275,97 @@ class TodoBoard(ModalScreen[int | None]):
         self.dismiss(None)
 
 
+# every key the main screen answers about the memo being pointed at: the keys
+# that run it, the action they name, and the words for it. Both the lines of the
+# menu and the keys the menu itself answers are built from this, so it cannot
+# offer a key it would then ignore. Both delete keys are named here, unlike in
+# the footer where only one is worth the room: a menu is where somebody finds
+# out that the other one works too
+_MENU_ROWS: tuple[tuple[tuple[str, ...], str, str], ...] = (
+    (("e",), "edit_notes", "Edit notes"),
+    (("i",), "memo_info", "Info"),
+    (("m",), "move_memo", "Move"),
+    (("n",), "title_memo", "Rename"),
+    (("delete", "backspace"), "delete_memo", "Delete"),
+    (("r",), "rename_speaker", "Rename speaker"),
+    (("t",), "toggle_raw", "Raw transcript"),
+    (("x",), "extract", "Extract"),
+    (("p",), "repair", "Repair"),
+    (("d",), "diarize", "Diarize"),
+    (("a",), "ask", "Ask"),
+    (("c",), "check_tasks", "Tasks"),
+)
+
+# how the keys of one line are written when there is more than one of them, and
+# how wide that column is: every label starts in the same place, or the list
+# reads as prose rather than as a menu
+_MENU_KEY_SEPARATOR = "/"
+_MENU_KEY_WIDTH = max(
+    len(_MENU_KEY_SEPARATOR.join(keys)) for keys, _action, _label in _MENU_ROWS
+)
+
+
+class ActionMenu(ModalScreen[str | None]):
+    """Everything that can be done to one memo, as a list to read down rather
+    than a row of keys to have memorised. The footer offers the same keys, but
+    only as far as the terminal is wide, and a key whose word has been cut off
+    the end of it is a key nobody finds.
+
+    Every key still works from inside the menu, so looking one up and using it
+    are the same keypress — which is how the menu stops being needed.
+
+    It hands back the name of the action rather than running it: what these keys
+    mean belongs to the app, and a menu that acted on the memo itself would be a
+    second place for that to be decided."""
+
+    BINDINGS = [
+        *(
+            Binding(key, f"choose('{action}')", label, show=False)
+            for keys, action, label in _MENU_ROWS
+            for key in keys
+        ),
+        Binding("escape", "close", "Close"),
+    ]
+
+    def __init__(self, filename: str) -> None:
+        """Opens on the memo it is about. The name is on the screen because the
+        row a memo key acts on is not always the row somebody thinks they are
+        pointing at, and this is the last place to notice before one runs."""
+        super().__init__()
+        self.filename = filename
+
+    def compose(self) -> ComposeResult:
+        """The memo's name over what can be done to it."""
+        yield Static(f"{self.filename} — actions", id="action-menu")
+        yield ListView(id="action-choices")
+
+    def on_mount(self) -> None:
+        """Fills the list and picks the first line out, keyboard and all: a menu
+        opening on nothing highlighted makes its first enter do nothing, and a
+        menu is opened by people who are guessing."""
+        choices = self.query_one("#action-choices", ListView)
+        for keys, action, label in _MENU_ROWS:
+            shown = _MENU_KEY_SEPARATOR.join(keys).ljust(_MENU_KEY_WIDTH)
+            choices.append(ListItem(Label(f"{shown}  {label}"), name=action))
+        choices.index = 0
+        choices.focus()
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """Runs whatever the cursor came to rest on."""
+        # the screen behind this modal listens for list selections of its own
+        event.stop()
+        self.dismiss(event.item.name)
+
+    def action_choose(self, action: str) -> None:
+        """Runs an action off its own key, without walking down to its line."""
+        self.dismiss(action)
+
+    def action_close(self) -> None:
+        """Leaves the memo as it was. Nothing has been done to it yet: the menu
+        only ever names actions, so there is nothing here to confirm."""
+        self.dismiss(None)
+
+
 class NotesPane(MarkdownViewer):
     """One memo's notes, with their headings listed beside them so a long note
     can be jumped around rather than scrolled through.
@@ -1307,6 +1398,8 @@ class NotesPane(MarkdownViewer):
 # should be offering the key that runs it
 MEMO_ACTIONS = frozenset(
     {
+        # the menu over the rest of them, which needs the memo they need
+        "action_menu",
         "edit_notes",
         "memo_info",
         "move_memo",
@@ -1384,6 +1477,10 @@ class MemoApp(App[None]):
     #step-list { height: auto; }
     """
     BINDINGS = [
+        # every key below, laid out as a list to pick from. Space because it is
+        # the one key that says "the thing I am pointing at" without saying what
+        # to do with it, and because no memo key is spelled with it
+        ("space", "action_menu", "Actions"),
         ("e", "edit_notes", "Edit notes"),
         ("i", "memo_info", "Info"),
         ("m", "move_memo", "Move"),
@@ -2035,6 +2132,29 @@ class MemoApp(App[None]):
             self.refresh_bindings()
         else:
             self.show_project(self.project)
+
+    def action_action_menu(self) -> None:
+        """Lays out everything that can be done to the memo being pointed at, if
+        any memo is: the memo keys are worth learning and unguessable, and a
+        footer only names as many of them as the terminal is wide enough for."""
+        memo_id = self._target_memo()
+        if memo_id is None:
+            return
+        self.push_screen(
+            ActionMenu(services.require_memo(self.repo, memo_id).filename),
+            self._run_chosen,
+        )
+
+    async def _run_chosen(self, action: str | None) -> None:
+        """Runs whatever the menu was closed on, as though its key had been
+        pressed out here: the menu names the actions and this screen owns them,
+        so picking one off the list and pressing its key cannot come apart.
+
+        Awaited rather than called, because dispatching an action is
+        asynchronous — a callback that dropped the coroutine would close the
+        menu on nothing happening at all."""
+        if action is not None:
+            await self.run_action(action)
 
     def action_memo_info(self) -> None:
         """Says what state the memo being pointed at is in, if any memo is."""
