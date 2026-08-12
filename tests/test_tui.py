@@ -668,17 +668,20 @@ async def test_moving_the_cursor_moves_what_the_memo_keys_act_on(repo):
 
 
 @pytest.mark.asyncio
-async def test_the_footer_offers_the_memo_keys_as_soon_as_a_row_is_pointed_at(repo):
-    # they act on the highlighted row, and a footer that waits for a memo to be
-    # opened before offering them is hiding keys that would work
+async def test_the_footer_offers_the_actions_menu_as_soon_as_a_row_is_pointed_at(repo):
+    # the memo keys still act on the highlighted row, but the footer names only
+    # the menu that lists them: eleven keys along the bottom of the screen is a
+    # wall to read, one entry that opens them is an offer to take
     seed(repo)
 
     async with MemoApp(repo).run_test() as pilot:
+        assert "space" in await missing(pilot, ["space"])
         assert await missing(pilot, MEMO_KEYS) == MEMO_KEYS
 
         await point_at_memo(pilot, "work")
 
-        assert await offered(pilot, MEMO_KEYS) == MEMO_KEYS
+        assert await offered(pilot, ["space"]) == ["space"]
+        assert await missing(pilot, MEMO_KEYS) == MEMO_KEYS
 
 
 @pytest.mark.asyncio
@@ -1281,9 +1284,9 @@ async def test_escape_from_inside_the_notes_pane_closes_the_note_rather_than_jus
 
 @pytest.mark.asyncio
 async def test_escape_closes_an_open_memo_before_moving_focus_off_the_table(repo):
-    # the panes must empty the moment the memo closes. The memo keys stay in the
-    # footer, and are not stale for staying: the row the memo was opened from is
-    # still under the cursor, which is all they need to land on something
+    # the panes must empty the moment the memo closes. The actions menu stays
+    # offered, and is not stale for staying: the row the memo was opened from is
+    # still under the cursor, which is all its keys need to land on something
     seed(repo)
 
     async with MemoApp(repo).run_test() as pilot:
@@ -1298,7 +1301,7 @@ async def test_escape_closes_an_open_memo_before_moving_focus_off_the_table(repo
 
         assert pilot.app.memo_id is None
         assert "no memo shown" in notes_pane(pilot).document.source
-        assert await offered(pilot, MEMO_KEYS) == MEMO_KEYS
+        assert await offered(pilot, ["space"]) == ["space"]
         assert pilot.app.focused is memo_table(pilot.app)
 
 

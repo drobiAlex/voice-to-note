@@ -1481,33 +1481,33 @@ class MemoApp(App[None]):
         # the one key that says "the thing I am pointing at" without saying what
         # to do with it, and because no memo key is spelled with it
         ("space", "action_menu", "Actions"),
-        ("e", "edit_notes", "Edit notes"),
-        ("i", "memo_info", "Info"),
-        ("m", "move_memo", "Move"),
-        ("n", "title_memo", "Rename"),
+        Binding("e", "edit_notes", "Edit notes", show=False),
+        Binding("i", "memo_info", "Info", show=False),
+        Binding("m", "move_memo", "Move", show=False),
+        Binding("n", "title_memo", "Rename", show=False),
         # the two keys a file manager deletes with, since either is what a hand
-        # reaches for; only one of them is worth a slot in the footer
-        Binding("delete", "delete_memo", "Delete"),
+        # reaches for; the action menu under space is where they are spelled out
+        Binding("delete", "delete_memo", "Delete", show=False),
         Binding("backspace", "delete_memo", "Delete", show=False),
         # "r" rather than "n": renaming the memo has n, and n means "no" in
         # every dialog that asks
-        ("r", "rename_speaker", "Rename speaker"),
-        ("t", "toggle_raw", "Raw transcript"),
-        ("x", "extract", "Extract"),
+        Binding("r", "rename_speaker", "Rename speaker", show=False),
+        Binding("t", "toggle_raw", "Raw transcript", show=False),
+        Binding("x", "extract", "Extract", show=False),
         # the domain calls refinement a repair pass, and r already renames
-        ("p", "repair", "Repair"),
-        ("d", "diarize", "Diarize"),
-        ("a", "ask", "Ask"),
+        Binding("p", "repair", "Repair", show=False),
+        Binding("d", "diarize", "Diarize", show=False),
+        Binding("a", "ask", "Ask", show=False),
         # the memo's own to-dos, beside the note that states them; the whole
         # board across every memo is upper case T
-        ("c", "check_tasks", "Tasks"),
+        Binding("c", "check_tasks", "Tasks", show=False),
         # neither half of the case rule: this acts on no memo and on no project,
         # it brings something new into the app
         ("o", "process", "Add recording"),
         # lower case acts on the one memo, upper case on the whole project the
         # sidebar cursor is resting on
-        ("R", "rename_project", "Rename project"),
-        ("X", "remove_project", "Empty project"),
+        Binding("R", "rename_project", "Rename project", show=False),
+        Binding("X", "remove_project", "Empty project", show=False),
         ("slash", "find_tag", "Find tag"),
         # upper case here means neither half of the case rule, only that the
         # lower case key is taken by the raw transcript. Like the settings under
