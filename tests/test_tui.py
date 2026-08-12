@@ -23,7 +23,7 @@ from textual.widgets import (
     Tree,
 )
 
-from voice_to_note import services
+from voice_to_note import config, services
 from voice_to_note.domain import Segment, Speaker
 from voice_to_note.gateways import GatewayError
 from voice_to_note.tui import app as tui_app
@@ -3290,6 +3290,57 @@ async def test_ollama_model_with_stubbed_choices_renders_a_picker(repo, monkeypa
         await open_setting(pilot, "ollama_model")
 
         assert isinstance(pilot.app.screen.query_one("#setting-value"), Select)
+
+
+# --- the theme, remembered between sessions --------------------------------
+
+
+@pytest.fixture
+def theme_writes(monkeypatch) -> dict:
+    """Catches what the app would write to vtn.toml, so a theme test can say
+    what was stored without going near the real settings file."""
+    written: dict = {}
+    monkeypatch.setattr(
+        services,
+        "config_set",
+        lambda key, value: written.setdefault(key, value) or f"{key} set to {value}",
+    )
+    return written
+
+
+@pytest.mark.asyncio
+async def test_the_app_opens_in_the_theme_last_picked(repo, monkeypatch, theme_writes):
+    monkeypatch.setattr(config, "TUI_THEME", "nord")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.pause()
+
+        assert pilot.app.theme == "nord"
+        # applying the stored theme moves the same reactive a reader's own
+        # pick moves; writing it back would overwrite the stored choice with
+        # whatever the app happened to start under
+        assert theme_writes == {}
+
+
+@pytest.mark.asyncio
+async def test_a_theme_this_textual_no_longer_has_opens_on_a_theme_it_does(repo, monkeypatch):
+    monkeypatch.setattr(config, "TUI_THEME", "a-theme-from-an-older-textual")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.pause()
+
+        assert pilot.app.theme in pilot.app.available_themes
+
+
+@pytest.mark.asyncio
+async def test_changing_the_theme_writes_it_down_for_the_next_launch(repo, theme_writes):
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.pause()
+
+        pilot.app.theme = "gruvbox"
+        await pilot.pause()
+
+        assert theme_writes == {"tui_theme": "gruvbox"}
 
 
 # --- the to-do board, everything outstanding on one screen -----------------

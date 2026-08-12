@@ -167,6 +167,23 @@ SETTINGS: dict[str, Setting] = {
         "whisper.cpp source cloned during setup",
         kind="url",
     ),
+    # Textual's built-in theme names, copied rather than imported: every
+    # command reads this module, and only `vtn tui` is worth the cost of
+    # importing Textual. A name Textual later drops falls back at start-up
+    # rather than breaking the app, so the copy going stale is survivable
+    "tui_theme": Setting(
+        "textual-dark",
+        str,
+        "colour theme the TUI opens with",
+        kind="choice",
+        choices=(
+            "ansi-dark", "ansi-light", "atom-one-dark", "atom-one-light",
+            "catppuccin-frappe", "catppuccin-latte", "catppuccin-macchiato",
+            "catppuccin-mocha", "dracula", "flexoki", "gruvbox", "monokai", "nord",
+            "rose-pine", "rose-pine-dawn", "rose-pine-moon", "solarized-dark",
+            "solarized-light", "textual-dark", "textual-light", "tokyo-night",
+        ),
+    ),
 }
 
 _SETTINGS = read_config_file(CONFIG_PATH)
@@ -210,3 +227,5 @@ REFINE_WORKERS: int = _setting("refine_workers")
 REFINE_WINDOW: int = _setting("refine_window")
 
 WHISPER_REPO_URL: str = _setting("whisper_repo_url")
+
+TUI_THEME: str = _setting("tui_theme")

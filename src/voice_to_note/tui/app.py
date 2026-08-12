@@ -30,7 +30,7 @@ from textual.widgets import (
     TextArea,
 )
 
-from .. import services
+from .. import config, services
 from ..gateways import GatewayError
 from ..storage.repository import Repository
 
@@ -1550,6 +1550,13 @@ class MemoApp(App[None]):
         # a way of reading transcripts rather than a property of any one memo:
         # somebody checking a repair pass is checking all of it, memo after memo
         self.raw = False
+        # whether a theme change is now the reader's doing and worth storing.
+        # Applying the stored theme at start-up moves the same reactive a
+        # reader's own pick moves, and writing that back would be the app
+        # answering itself — harmlessly on most launches, but destructively
+        # when the theme in effect came from VTN_TUI_THEME, which would end up
+        # frozen into vtn.toml as though it had been chosen
+        self._theme_restored = False
 
     def compose(self) -> ComposeResult:
         """Projects beside the memo list, the memo list above its detail."""
@@ -1576,11 +1583,30 @@ class MemoApp(App[None]):
         headings once, since only its rows change from here on, each column
         keyed by what it is called so that a single cell can be found again by
         name rather than by counting along the row."""
+        self._restore_theme()
         memos = self.query_one("#memos", DataTable)
         for column in services.MEMO_COLUMNS:
             memos.add_column(column, key=column)
         self.load_projects()
         self.query_one("#projects", ListView).focus()
+
+    def _restore_theme(self) -> None:
+        """Opens in the theme last picked, and in Textual's own default when
+        that name means nothing to this Textual: setting an unregistered theme
+        raises, so a name an upgrade has since dropped would take the whole app
+        down at start-up rather than costing a reader their colours. From here
+        on a theme change is somebody's choice and gets written down."""
+        if config.TUI_THEME in self.available_themes:
+            self.theme = config.TUI_THEME
+        self._theme_restored = True
+
+    def watch_theme(self, theme_name: str) -> None:
+        """Stores a theme picked from the command palette, which otherwise
+        lasts only as long as the process. Silently: the new colours are the
+        confirmation, and config_set's "takes effect on next start" line would
+        be untrue of a change already on screen."""
+        if self._theme_restored:
+            services.config_set("tui_theme", theme_name)
 
     def _target_memo(self) -> int | None:
         """The memo a memo key acts on: the one open below the list when there
