@@ -1060,6 +1060,156 @@ class SettingsScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
+# what the board calls each of its columns and the key each one is found again
+# by. The first has no heading because the box under it needs none, and its key
+# is spelled out rather than left blank so that a cell lookup reads as English
+_TODO_COLUMNS = (
+    ("", "done"),
+    ("task", "task"),
+    ("owner", "owner"),
+    ("due", "deadline"),
+    ("project", "project"),
+    ("memo", "memo"),
+)
+
+# how a row says whether the task is finished, in the same two boxes the command
+# line's to-do list draws
+_DONE_BOX = "[x]"
+_OPEN_BOX = "[ ]"
+
+# what stands where the board would be when it has nothing to show
+_NOTHING_TO_DO = "nothing to do"
+
+
+class TodoBoard(ModalScreen[int | None]):
+    """Everything every memo has committed to, gathered off the memos and onto
+    one screen, to be worked down and checked off. Deliberately not filtered to
+    the project being browsed: what a person owes is one list however many piles
+    the recordings behind it are filed in.
+
+    Closing it hands back the memo a to-do was committed in, when one was asked
+    for, since acting on a task usually means going and reading what was
+    actually said about it."""
+
+    BINDINGS = [
+        ("space", "toggle_done", "Done/undone"),
+        ("a", "show_done", "Show done"),
+        # ahead of the table, which answers enter itself with a binding of its
+        # own that says nothing in the footer: leaving the table to it would
+        # hide from a reader the one key that gets them off the board
+        Binding("enter", "open_memo", "Open memo", priority=True),
+        ("escape", "close", "Close"),
+    ]
+
+    def __init__(self, repo: Repository) -> None:
+        """Reads and writes through the database the app is already holding
+        open, so that a task checked off here is checked off everywhere the app
+        counts them."""
+        super().__init__()
+        self.repo = repo
+        # whether the finished ones are on the board too. Off to begin with: the
+        # board is what is left to do, and a list that grows forever as work gets
+        # done stops being that
+        self.show_done = False
+        # what each row is standing for, keyed the way the row is. The table
+        # holds cells, and a checked-off row has to be turned back into the
+        # to-do's id and the memo behind it
+        self.listed: dict[str, services.TodoRow] = {}
+
+    def compose(self) -> ComposeResult:
+        """The board, and the line that stands in for it while it is empty. Only
+        ever one of the two is on screen.
+
+        A footer of its own, unlike the modals that fill the terminal: a board of
+        three rows leaves the app's own footer showing underneath it, offering
+        keys that do nothing while this screen has the keyboard."""
+        yield DataTable(id="todos", cursor_type="row")
+        yield Static(_NOTHING_TO_DO, id="no-todos")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        """Lays out the columns once, since only the rows change from here on,
+        and draws the to-dos as they stand right now."""
+        table = self.query_one("#todos", DataTable)
+        for label, key in _TODO_COLUMNS:
+            table.add_column(label, key=key)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        """Redraws every row from what is outstanding now, leaving the cursor on
+        the same line of the board it was on — clamped, because a row checked off
+        while the finished ones are hidden takes its line with it, and the cursor
+        should land on the next task rather than at the top again.
+
+        Every cell goes in as a Text rather than a string: a table renders a
+        string as markup, which would swallow the box in the first column whole
+        and eat any square bracket a transcript happened to put in a task."""
+        table = self.query_one("#todos", DataTable)
+        at = table.cursor_row
+        table.clear()
+        self.listed = {}
+        for row in services.todo_rows(self.repo, include_done=self.show_done):
+            key = str(row.id)
+            self.listed[key] = row
+            table.add_row(
+                Text(_DONE_BOX if row.done else _OPEN_BOX),
+                Text(row.task),
+                Text(row.owner),
+                Text(row.deadline),
+                Text(row.project),
+                Text(row.memo),
+                key=key,
+            )
+        empty = not self.listed
+        table.display = not empty
+        self.query_one("#no-todos", Static).display = empty
+        if not empty:
+            table.move_cursor(row=min(at, table.row_count - 1))
+            table.focus()
+
+    def _highlighted(self) -> services.TodoRow | None:
+        """The to-do the cursor is resting on, and nothing at all on an empty
+        board — where the keys have to stay harmless rather than merely
+        useless."""
+        table = self.query_one("#todos", DataTable)
+        if table.row_count == 0:
+            return None
+        return self.listed.get(str(table.ordered_rows[table.cursor_row].key.value))
+
+    def action_toggle_done(self) -> None:
+        """Checks the highlighted task off, or puts it back on the list."""
+        row = self._highlighted()
+        if row is None:
+            return
+        services.set_todo_status(self.repo, row.id, "open" if row.done else "done")
+        self._refresh()
+
+    def action_show_done(self) -> None:
+        """Brings the finished tasks onto the board, or takes them back off."""
+        self.show_done = not self.show_done
+        self._refresh()
+
+    def action_open_memo(self) -> None:
+        """Leaves the board for the memo the highlighted task was committed in."""
+        row = self._highlighted()
+        if row is not None:
+            self.dismiss(row.memo_id)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Enter on a row opens its memo. The table answers enter itself, so the
+        key arrives as a selection rather than through this screen's binding,
+        which is only there to say in the footer what enter does."""
+        # the app behind this modal listens for row selections of its own, on the
+        # memo table this screen has nothing to do with — and its rows are keyed
+        # by memo id, which a to-do's id would be read as
+        event.stop()
+        self.action_open_memo()
+
+    def action_close(self) -> None:
+        """Puts the app back in front of them."""
+        self.dismiss(None)
+
+
 class NotesPane(MarkdownViewer):
     """One memo's notes, with their headings listed beside them so a long note
     can be jumped around rather than scrolled through.
@@ -1193,6 +1343,10 @@ class MemoApp(App[None]):
         ("R", "rename_project", "Rename project"),
         ("X", "remove_project", "Empty project"),
         ("slash", "find_tag", "Find tag"),
+        # upper case here means neither half of the case rule, only that the
+        # lower case key is taken by the raw transcript. Like the settings under
+        # S, this opens a screen of its own rather than acting on anything
+        ("T", "todo_board", "To-dos"),
         ("S", "settings", "Settings"),
         ("escape", "step_back", "Back"),
         ("q", "quit", "Quit"),
@@ -1743,6 +1897,23 @@ class MemoApp(App[None]):
         """Opens every setting `vtn config` would list, to be read and changed
         without leaving the app."""
         self.push_screen(SettingsScreen())
+
+    def action_todo_board(self) -> None:
+        """Opens everything every memo has committed to, as one list to work
+        down."""
+        self.push_screen(TodoBoard(self.repo), self._board_closed)
+
+    def _board_closed(self, memo_id: int | None) -> None:
+        """Takes the app back to what the board has been changing behind it: a
+        task checked off changes what a memo row says is still outstanding, and
+        the list was drawn before the board went up. The sidebar is left alone,
+        cursor and all — it counts recordings, and no number on it can have moved
+        while the only thing on offer was checking a task off. The memo a to-do
+        was committed in is opened last, over a list that already describes it
+        correctly."""
+        self._relist()
+        if memo_id is not None:
+            self.show_memo(memo_id)
 
     def action_step_back(self) -> None:
         """Closes whatever is open before it ever moves focus off it, since

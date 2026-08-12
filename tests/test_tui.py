@@ -8,6 +8,7 @@ from rich.text import Text
 from textual.widgets import (
     DataTable,
     DirectoryTree,
+    Footer,
     Input,
     Label,
     ListView,
@@ -3244,3 +3245,193 @@ async def test_ollama_model_with_stubbed_choices_renders_a_picker(repo, monkeypa
         await open_setting(pilot, "ollama_model")
 
         assert isinstance(pilot.app.screen.query_one("#setting-value"), Select)
+
+
+# --- the to-do board, everything outstanding on one screen -----------------
+
+
+def committed(repo, memo_id: int, *tasks: str) -> None:
+    """Puts a memo's extracted action items on the to-do list, the way the
+    extraction pipeline does once notes come back."""
+    repo.sync_todos(
+        memo_id, [{"task": task, "owner": "Alice", "deadline": "Friday"} for task in tasks]
+    )
+
+
+def board_table(pilot) -> DataTable:
+    """The board of to-dos, once it is open."""
+    return pilot.app.screen.query_one("#todos", DataTable)
+
+
+def board_rows(pilot) -> list[list[str]]:
+    """Every row of the board as a person reads it, in the order shown."""
+    table = board_table(pilot)
+    return [[str(cell) for cell in table.get_row_at(i)] for i in range(table.row_count)]
+
+
+def board_tasks(pilot) -> list[str]:
+    """The tasks the board is showing, read down its task column."""
+    return [row[1] for row in board_rows(pilot)]
+
+
+@pytest.mark.asyncio
+async def test_shift_t_opens_a_board_of_what_every_project_still_owes(repo):
+    # the point of the board over the memo list: what a person owes is one list,
+    # however many projects the recordings behind it are filed under
+    work, home = seed(repo)
+    committed(repo, work, "Cut the release")
+    committed(repo, home, "Buy milk")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("T")
+        await pilot.pause()
+
+        assert showing(pilot.app, "#todos")
+        assert board_tasks(pilot) == ["Cut the release", "Buy milk"]
+        assert [row[0] for row in board_rows(pilot)] == ["[ ]", "[ ]"]
+        # the memo is named rather than numbered, so a row says where it came from
+        assert board_rows(pilot)[0][5] == "standup.m4a"
+        # every cell is a Text rather than a string: a table reads a string as
+        # markup, which renders the box in the first column as nothing at all
+        assert all(
+            isinstance(cell, Text)
+            for i in range(board_table(pilot).row_count)
+            for cell in board_table(pilot).get_row_at(i)
+        )
+
+
+@pytest.mark.asyncio
+async def test_space_checks_the_task_off_and_takes_it_off_the_board(repo):
+    work, _home = seed(repo)
+    committed(repo, work, "Cut the release", "Tag the build")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("T")
+        await pilot.pause()
+        await pilot.press("space")
+        await pilot.pause()
+
+        assert board_tasks(pilot) == ["Tag the build"]
+        done = [todo.text for todo in repo.todos(include_done=True) if todo.status == "done"]
+        assert done == ["Cut the release"]
+
+
+@pytest.mark.asyncio
+async def test_a_brings_the_finished_tasks_back_with_their_box_ticked(repo):
+    work, _home = seed(repo)
+    committed(repo, work, "Cut the release", "Tag the build")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("T")
+        await pilot.pause()
+        await pilot.press("space")
+        await pilot.pause()
+        await pilot.press("a")
+        await pilot.pause()
+
+        assert board_rows(pilot)[0][:2] == ["[x]", "Cut the release"]
+        assert board_tasks(pilot) == ["Cut the release", "Tag the build"]
+
+
+@pytest.mark.asyncio
+async def test_checking_off_the_last_row_leaves_the_cursor_on_the_board(repo):
+    # the row under the cursor vanishes with the check-off; landing back at the
+    # top would lose a person's place halfway down a long list
+    work, _home = seed(repo)
+    committed(repo, work, "Cut the release", "Tag the build")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("T")
+        await pilot.pause()
+        board_table(pilot).move_cursor(row=1)
+        await pilot.press("space")
+        await pilot.pause()
+
+        assert board_tasks(pilot) == ["Cut the release"]
+        assert board_table(pilot).cursor_row == 0
+
+
+@pytest.mark.asyncio
+async def test_closing_the_board_leaves_the_memo_list_counting_what_is_left(repo):
+    work, _home = seed(repo)
+    committed(repo, work, "Cut the release")
+
+    async with MemoApp(repo).run_test() as pilot:
+        sidebar = pilot.app.query_one("#projects", ListView)
+        sidebar.index = 1  # work, the project being browsed
+        pilot.app.show_project("work")
+        await pilot.pause()
+        assert row_for(pilot.app, "standup.m4a")["todos"] == "1"
+
+        await pilot.press("T")
+        await pilot.pause()
+        await pilot.press("space")
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert not showing(pilot.app, "#todos")
+        assert row_for(pilot.app, "standup.m4a")["todos"] == "0"
+        # nothing the board offers can change what the sidebar counts, so the
+        # project being browsed is still the one under the cursor
+        assert sidebar.index == 1
+
+
+@pytest.mark.asyncio
+async def test_enter_on_a_task_lands_in_the_memo_it_was_committed_in(repo):
+    _work, home = seed(repo)
+    committed(repo, home, "Buy milk")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("T")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert not showing(pilot.app, "#todos")
+        assert pilot.app.memo_id == home
+
+
+@pytest.mark.asyncio
+async def test_an_empty_board_says_so_and_its_keys_stay_harmless(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("T")
+        await pilot.pause()
+
+        assert str(pilot.app.screen.query_one("#no-todos", Static).content) == "nothing to do"
+        assert board_table(pilot).display is False
+
+        await pilot.press("space")
+        await pilot.pause()
+        assert showing(pilot.app, "#no-todos")
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not showing(pilot.app, "#no-todos")
+
+
+@pytest.mark.asyncio
+async def test_the_board_offers_its_own_keys_rather_than_the_apps(repo):
+    # a board of a few rows leaves the app's footer showing underneath it, and
+    # every key on that footer is dead while the board holds the keyboard
+    work, _home = seed(repo)
+    committed(repo, work, "Cut the release")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("T")
+        await pilot.pause()
+
+        offered = pilot.app.screen.active_bindings
+        assert {
+            key: offered[key].binding.description
+            for key in ("space", "a", "enter", "escape")
+            if key in offered
+        } == {
+            "space": "Done/undone",
+            "a": "Show done",
+            "enter": "Open memo",
+            "escape": "Close",
+        }
+        assert not {"o", "q", "S", "T", "slash"} & set(offered)
+        assert pilot.app.screen.query(Footer)

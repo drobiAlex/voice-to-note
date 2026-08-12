@@ -1291,6 +1291,44 @@ def remove_project(repo: Repository, name: str) -> int:
     return moved
 
 
+@dataclass(frozen=True)
+class TodoRow:
+    """One to-do as a board lays it out: the id its row is keyed by, the memo it
+    was committed in so the board can jump there, and a cell for each column."""
+
+    id: int
+    memo_id: int
+    done: bool
+    task: str
+    owner: str
+    deadline: str
+    project: str
+    memo: str
+
+
+def todo_rows(repo: Repository, *, include_done: bool = False) -> list[TodoRow]:
+    """Every to-do a board lists, across every project, the finished ones left
+    out unless asked for. The memo each one came out of is named rather than
+    numbered — a board spanning every project is read by recognising where a
+    task was said, which an id does not tell anybody — and the names are
+    gathered in one pass so that the naming costs one query however long the
+    board is."""
+    filenames = {memo.id: memo.filename for memo in repo.memos()}
+    return [
+        TodoRow(
+            id=todo.id,
+            memo_id=todo.memo_id,
+            done=todo.status == "done",
+            task=todo.text,
+            owner=todo.owner,
+            deadline=todo.deadline,
+            project=todo.project,
+            memo=filenames.get(todo.memo_id, ""),
+        )
+        for todo in repo.todos(include_done=include_done)
+    ]
+
+
 def todos_text(
     repo: Repository, project: str | None = None, *, include_done: bool = False
 ) -> str:
