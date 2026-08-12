@@ -562,16 +562,26 @@ class Repository:
             self._touch(row["memo_id"])
         return True
 
-    def todos(self, project: str | None = None, *, include_done: bool = False) -> list[Todo]:
+    def todos(
+        self,
+        project: str | None = None,
+        *,
+        include_done: bool = False,
+        memo_id: int | None = None,
+    ) -> list[Todo]:
         """The to-dos memos have committed to, open ones only unless the caller
-        asks for the finished ones too, and narrowed to one project when asked.
-        Grouped by the memo they came out of and in the order they were found in
-        it, which is the order they were said in."""
+        asks for the finished ones too, and narrowed to one project or to a
+        single memo's own commitments when asked. Grouped by the memo they came
+        out of and in the order they were found in it, which is the order they
+        were said in."""
         where = ["t.status='open'"] if not include_done else []
         params: list = []
         if project is not None:
             where.append("m.project=?")
             params.append(project)
+        if memo_id is not None:
+            where.append("t.memo_id=?")
+            params.append(memo_id)
         clause = " WHERE " + " AND ".join(where) if where else ""
         return [
             Todo(

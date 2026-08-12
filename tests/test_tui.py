@@ -3250,17 +3250,23 @@ async def test_ollama_model_with_stubbed_choices_renders_a_picker(repo, monkeypa
 # --- the to-do board, everything outstanding on one screen -----------------
 
 
-def committed(repo, memo_id: int, *tasks: str) -> None:
+def committed(repo, memo_id: int, *tasks: str, owner: str = "Alice") -> None:
     """Puts a memo's extracted action items on the to-do list, the way the
     extraction pipeline does once notes come back."""
     repo.sync_todos(
-        memo_id, [{"task": task, "owner": "Alice", "deadline": "Friday"} for task in tasks]
+        memo_id, [{"task": task, "owner": owner, "deadline": "Friday"} for task in tasks]
     )
 
 
 def board_table(pilot) -> DataTable:
     """The board of to-dos, once it is open."""
     return pilot.app.screen.query_one("#todos", DataTable)
+
+
+def board_scope(pilot) -> str:
+    """The line above the board saying what is on it, which is the only thing
+    telling a reader the board is showing less than everything."""
+    return str(pilot.app.screen.query_one("#board-scope", Static).content)
 
 
 def board_rows(pilot) -> list[list[str]]:
@@ -3406,6 +3412,10 @@ async def test_an_empty_board_says_so_and_its_keys_stay_harmless(repo):
         await pilot.pause()
         assert showing(pilot.app, "#no-todos")
 
+        await pilot.press("o")
+        await pilot.pause()
+        assert showing(pilot.app, "#no-todos")
+
         await pilot.press("escape")
         await pilot.pause()
         assert not showing(pilot.app, "#no-todos")
@@ -3425,13 +3435,124 @@ async def test_the_board_offers_its_own_keys_rather_than_the_apps(repo):
         offered = pilot.app.screen.active_bindings
         assert {
             key: offered[key].binding.description
-            for key in ("space", "a", "enter", "escape")
+            for key in ("space", "a", "o", "enter", "escape")
             if key in offered
         } == {
             "space": "Done/undone",
             "a": "Show done",
+            # the app's own o adds a recording; on the board it reads the list
+            # as one person's
+            "o": "Owner",
             "enter": "Open memo",
             "escape": "Close",
         }
-        assert not {"o", "q", "S", "T", "slash"} & set(offered)
+        assert not {"q", "S", "T", "slash"} & set(offered)
         assert pilot.app.screen.query(Footer)
+
+
+@pytest.mark.asyncio
+async def test_o_reads_the_board_as_one_persons_list_and_round_to_everyone_again(repo):
+    work, home = seed(repo)
+    committed(repo, work, "Cut the release", owner="Alice")
+    committed(repo, home, "Buy milk", owner="Bob")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("T")
+        await pilot.pause()
+
+        await pilot.press("o")
+        await pilot.pause()
+        assert board_tasks(pilot) == ["Cut the release"]
+        # nothing else on screen says the board is showing less than everything
+        assert "Alice" in board_scope(pilot)
+
+        await pilot.press("o")
+        await pilot.pause()
+        assert board_tasks(pilot) == ["Buy milk"]
+        assert "Bob" in board_scope(pilot)
+
+        await pilot.press("o")
+        await pilot.pause()
+        assert board_tasks(pilot) == ["Cut the release", "Buy milk"]
+        assert "Alice" not in board_scope(pilot)
+        assert "Bob" not in board_scope(pilot)
+
+
+@pytest.mark.asyncio
+async def test_an_owner_with_nothing_left_leaves_a_board_that_still_cycles(repo):
+    # the last of somebody's tasks going means an empty board with the filter
+    # still on it, which a person has to be able to press their way out of
+    work, home = seed(repo)
+    committed(repo, work, "Cut the release", owner="Alice")
+    committed(repo, home, "Buy milk", owner="Bob")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("T")
+        await pilot.pause()
+        await pilot.press("o")
+        await pilot.pause()
+        await pilot.press("space")
+        await pilot.pause()
+
+        assert showing(pilot.app, "#no-todos")
+
+        await pilot.press("o")
+        await pilot.pause()
+        assert board_tasks(pilot) == ["Buy milk"]
+
+
+@pytest.mark.asyncio
+async def test_c_opens_only_what_the_memo_being_pointed_at_committed_to(repo):
+    work, home = seed(repo)
+    committed(repo, work, "Cut the release")
+    committed(repo, home, "Buy milk")
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause()
+
+        assert board_tasks(pilot) == ["Cut the release"]
+        # a board of one memo's tasks looks like a short global board, so it has
+        # to say which memo it is
+        assert "standup.m4a" in board_scope(pilot)
+
+
+@pytest.mark.asyncio
+async def test_checking_a_task_off_ticks_its_box_in_the_note_behind_the_board(repo):
+    work, _home = seed(repo)
+    committed(repo, work, "Cut the release")
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        pilot.app.show_memo(work)
+        await pilot.pause()
+        assert "- [ ] Cut the release" in notes_pane(pilot).document.source
+
+        await pilot.press("c")
+        await pilot.pause()
+        await pilot.press("space")
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert "- [x] Cut the release" in notes_pane(pilot).document.source
+
+
+@pytest.mark.asyncio
+async def test_a_memo_that_committed_to_nothing_says_so_on_its_own_board(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause()
+
+        assert str(pilot.app.screen.query_one("#no-todos", Static).content) == "nothing to do"
+        assert board_table(pilot).display is False
+        assert "standup.m4a" in board_scope(pilot)
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not showing(pilot.app, "#no-todos")

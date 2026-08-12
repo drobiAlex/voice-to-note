@@ -1,7 +1,9 @@
 import json
+from collections.abc import Container
 from typing import cast
 
 from ..domain import Extraction, NotesPayload
+from .todos import normalize
 
 SCHEMA = {
     "type": "object",
@@ -60,8 +62,19 @@ def parse_notes(text: str) -> NotesPayload:
     return cast(NotesPayload, data)
 
 
-def render_notes(extraction: Extraction) -> str:
-    """Lays the notes out the way a person reads them."""
+def _box(task: str, done: Container[str] | None) -> str:
+    """Whether an action item's box is ticked. A task is recognised as checked
+    off by the key to-dos are matched on rather than by its wording, since the
+    notes are regenerated whole and restate a commitment however the model
+    happened to word it that time. No list of finished tasks to check against
+    reads as nothing finished — a render with nothing behind it must not claim
+    work is done."""
+    return "[x]" if done is not None and normalize(task) in done else "[ ]"
+
+
+def render_notes(extraction: Extraction, done: Container[str] | None = None) -> str:
+    """Lays the notes out the way a person reads them, each action item's box
+    ticked when its task is one of the memo's finished ones."""
     d = extraction.data
     lines = [
         f"# {d['title']}",
@@ -74,7 +87,9 @@ def render_notes(extraction: Extraction) -> str:
         lines.append("ACTION ITEMS")
         for a in d["action_items"]:
             extra = ", ".join(x for x in (a.get("owner"), a.get("deadline")) if x)
-            lines.append(f"  [ ] {a['task']}" + (f"  ({extra})" if extra else ""))
+            lines.append(
+                f"  {_box(a['task'], done)} {a['task']}" + (f"  ({extra})" if extra else "")
+            )
         lines.append("")
     for items, header in (
         (d["decisions"], "DECISIONS"),
@@ -94,7 +109,9 @@ def render_notes(extraction: Extraction) -> str:
     return "\n".join(lines)
 
 
-def render_notes_markdown(extraction: Extraction) -> str:
+def render_notes_markdown(
+    extraction: Extraction, done: Container[str] | None = None
+) -> str:
     """The same notes as Markdown, for a screen that renders it rather than a
     terminal that prints it. The plain form indents its sections, which Markdown
     reads as one run-on paragraph — here every section is a real heading and
@@ -115,7 +132,9 @@ def render_notes_markdown(extraction: Extraction) -> str:
         lines += ["## Action items", ""]
         for a in d["action_items"]:
             extra = ", ".join(x for x in (a.get("owner"), a.get("deadline")) if x)
-            lines.append(f"- [ ] {a['task']}" + (f" — {extra}" if extra else ""))
+            lines.append(
+                f"- {_box(a['task'], done)} {a['task']}" + (f" — {extra}" if extra else "")
+            )
         lines.append("")
     for items, header in (
         (d["decisions"], "## Decisions"),

@@ -765,6 +765,16 @@ def test_a_database_from_before_to_dos_takes_in_the_notes_it_already_holds(tmp_p
     repo.close()
 
 
+def test_one_memos_own_to_dos_are_asked_for_without_everybody_elses(repo):
+    standup = make_memo(repo)
+    review = make_memo(repo, filename="review.m4a")
+    repo.sync_todos(standup, [action("Cut the release")])
+    repo.sync_todos(review, [action("Book the room")])
+
+    assert [t.text for t in repo.todos(memo_id=review)] == ["Book the room"]
+    assert len(repo.todos()) == 2
+
+
 def test_a_listing_counts_what_is_still_outstanding_on_every_memo(repo):
     memo_id = make_memo(repo)
     repo.sync_todos(memo_id, [action("Cut the release"), action("Book the room")])

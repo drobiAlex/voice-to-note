@@ -37,6 +37,7 @@ from .transforms.speakers import (
     match_known_speakers,
     resolve_speaker_names,
 )
+from .transforms.todos import normalize
 
 Log = Callable[[str], None]
 # how far through the pipeline a recording has got: which stage is starting, and
@@ -1011,9 +1012,22 @@ def _extraction(repo: Repository, memo_id: int) -> Extraction:
     return extraction
 
 
+def _done_tasks(repo: Repository, memo_id: int) -> set[str]:
+    """The tasks a memo committed to and somebody has since checked off, by the
+    key to-dos are matched on. What the notes say was to be done and what the
+    board says is still outstanding are the same commitments, so a note read
+    after a task is ticked has to show it ticked."""
+    return {
+        normalize(todo.text)
+        for todo in repo.todos(memo_id=memo_id, include_done=True)
+        if todo.status == "done"
+    }
+
+
 def notes(repo: Repository, memo_id: int) -> str:
-    """The notes as a person reads them."""
-    return render_notes(_extraction(repo, memo_id))
+    """The notes as a person reads them, showing what has since been checked
+    off on the memo's to-do list."""
+    return render_notes(_extraction(repo, memo_id), _done_tasks(repo, memo_id))
 
 
 def save_notes(repo: Repository, memo_id: int, markdown: str) -> None:
@@ -1030,8 +1044,10 @@ def save_notes(repo: Repository, memo_id: int, markdown: str) -> None:
 
 def notes_markdown(repo: Repository, memo_id: int) -> str:
     """The notes as Markdown for a screen that renders them: what a person wrote
-    if they have written anything, otherwise what the model made. A memo nobody
-    has extracted yet gets a line saying so, since a screen has to show
+    if they have written anything, otherwise what the model made, with the
+    boxes of the tasks already checked off ticked. Somebody's own writing is
+    shown exactly as they wrote it — the boxes in it are theirs to tick. A memo
+    nobody has extracted yet gets a line saying so, since a screen has to show
     something where a command line can simply refuse."""
     edited = repo.notes_md(memo_id)
     if edited:
@@ -1039,7 +1055,7 @@ def notes_markdown(repo: Repository, memo_id: int) -> str:
     extraction = repo.extraction(memo_id)
     if not extraction:
         return "*no notes yet — run `vtn extract` on this memo*"
-    return render_notes_markdown(extraction)
+    return render_notes_markdown(extraction, _done_tasks(repo, memo_id))
 
 
 def notes_json(repo: Repository, memo_id: int) -> str:
@@ -1306,13 +1322,15 @@ class TodoRow:
     memo: str
 
 
-def todo_rows(repo: Repository, *, include_done: bool = False) -> list[TodoRow]:
+def todo_rows(
+    repo: Repository, *, include_done: bool = False, memo_id: int | None = None
+) -> list[TodoRow]:
     """Every to-do a board lists, across every project, the finished ones left
-    out unless asked for. The memo each one came out of is named rather than
-    numbered — a board spanning every project is read by recognising where a
-    task was said, which an id does not tell anybody — and the names are
-    gathered in one pass so that the naming costs one query however long the
-    board is."""
+    out unless asked for and everything but one memo's own left out when a memo
+    is named. The memo each one came out of is named rather than numbered — a
+    board spanning every project is read by recognising where a task was said,
+    which an id does not tell anybody — and the names are gathered in one pass
+    so that the naming costs one query however long the board is."""
     filenames = {memo.id: memo.filename for memo in repo.memos()}
     return [
         TodoRow(
@@ -1325,7 +1343,7 @@ def todo_rows(repo: Repository, *, include_done: bool = False) -> list[TodoRow]:
             project=todo.project,
             memo=filenames.get(todo.memo_id, ""),
         )
-        for todo in repo.todos(include_done=include_done)
+        for todo in repo.todos(include_done=include_done, memo_id=memo_id)
     ]
 
 

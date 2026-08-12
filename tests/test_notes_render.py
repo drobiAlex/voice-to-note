@@ -15,8 +15,10 @@ BLANK = {
 }
 
 
-def render(**overrides) -> str:
-    return render_notes(Extraction("claude", {**BLANK, **overrides}, "2026-08-07 12:00:00"))
+def render(done=None, **overrides) -> str:
+    return render_notes(
+        Extraction("claude", {**BLANK, **overrides}, "2026-08-07 12:00:00"), done
+    )
 
 
 def test_header_carries_title_backend_and_time():
@@ -49,6 +51,33 @@ def test_action_item_with_only_a_deadline():
 def test_action_item_with_neither_has_no_parentheses():
     out = render(action_items=[{"task": "ship it", "owner": None, "deadline": None}])
     assert "  [ ] ship it" in out.splitlines()
+
+
+def test_a_task_checked_off_is_the_only_one_whose_box_is_ticked():
+    out = render(
+        done={"ship it"},
+        action_items=[
+            {"task": "ship it", "owner": "Alice", "deadline": "Friday"},
+            {"task": "book the room", "owner": None, "deadline": None},
+        ],
+    )
+    assert "  [x] ship it  (Alice, Friday)" in out.splitlines()
+    assert "  [ ] book the room" in out.splitlines()
+
+
+def test_a_task_reworded_since_it_was_checked_off_still_reads_as_done():
+    # notes are regenerated whole, so a commitment comes back worded however the
+    # model put it that time; a box that untucked itself over a full stop would
+    # ask for work somebody has already done
+    reworded = {"task": "Cut  The Release.", "owner": None, "deadline": None}
+    markdown = render_notes_markdown(
+        Extraction(
+            "claude", {**BLANK, "action_items": [reworded]}, "2026-08-07 12:00:00"
+        ),
+        {"cut the release"},
+    )
+
+    assert "- [x] Cut  The Release." in markdown.splitlines()
 
 
 def test_list_sections_render_as_bullets():

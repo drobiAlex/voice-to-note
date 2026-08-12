@@ -1080,12 +1080,21 @@ _OPEN_BOX = "[ ]"
 # what stands where the board would be when it has nothing to show
 _NOTHING_TO_DO = "nothing to do"
 
+# what the board calls itself while it is showing everything, and how it says
+# each narrowing that is on: a board showing less than everything has to say so,
+# since nothing else on screen tells a reader what is being left out
+_BOARD_TITLE = "to-dos"
+_SCOPE_SEPARATOR = " — "
+
 
 class TodoBoard(ModalScreen[int | None]):
-    """Everything every memo has committed to, gathered off the memos and onto
-    one screen, to be worked down and checked off. Deliberately not filtered to
-    the project being browsed: what a person owes is one list however many piles
-    the recordings behind it are filed in.
+    """Everything the memos have committed to, gathered off them and onto one
+    screen, to be worked down and checked off. Opened from the app it spans
+    every project on purpose — what a person owes is one list however many piles
+    the recordings behind it are filed in — and opened against one memo it is
+    that memo's own commitments, for checking off beside the note that states
+    them. Either way it can be narrowed to one owner, so a list of everybody's
+    work can be read as one person's.
 
     Closing it hands back the memo a to-do was committed in, when one was asked
     for, since acting on a task usually means going and reading what was
@@ -1094,6 +1103,7 @@ class TodoBoard(ModalScreen[int | None]):
     BINDINGS = [
         ("space", "toggle_done", "Done/undone"),
         ("a", "show_done", "Show done"),
+        ("o", "filter_owner", "Owner"),
         # ahead of the table, which answers enter itself with a binding of its
         # own that says nothing in the footer: leaving the table to it would
         # hide from a reader the one key that gets them off the board
@@ -1101,28 +1111,43 @@ class TodoBoard(ModalScreen[int | None]):
         ("escape", "close", "Close"),
     ]
 
-    def __init__(self, repo: Repository) -> None:
+    def __init__(self, repo: Repository, memo_id: int | None = None) -> None:
         """Reads and writes through the database the app is already holding
         open, so that a task checked off here is checked off everywhere the app
-        counts them."""
+        counts them. Naming a memo narrows the board to what that one recording
+        committed to; naming none is the whole list."""
         super().__init__()
         self.repo = repo
+        # the memo this board is confined to, if it is confined to one
+        self.memo_id = memo_id
+        # what that memo is called, read once at mount: the heading names it
+        # even while it has nothing outstanding for the rows to name it by
+        self.memo_name = ""
         # whether the finished ones are on the board too. Off to begin with: the
         # board is what is left to do, and a list that grows forever as work gets
         # done stops being that
         self.show_done = False
+        # whose tasks are on the board, and nobody in particular by default:
+        # the board is what is owed before it is who owes it
+        self.owner: str | None = None
+        # the owners there are to cycle through, taken from the board as it
+        # stands before any owner filter narrows it — read off the filtered rows
+        # they would collapse to the one being filtered to
+        self.owners: list[str] = []
         # what each row is standing for, keyed the way the row is. The table
         # holds cells, and a checked-off row has to be turned back into the
         # to-do's id and the memo behind it
         self.listed: dict[str, services.TodoRow] = {}
 
     def compose(self) -> ComposeResult:
-        """The board, and the line that stands in for it while it is empty. Only
-        ever one of the two is on screen.
+        """The board under the line saying what is on it, and the line that
+        stands in for the board while it is empty. Only ever one of those two is
+        on screen.
 
         A footer of its own, unlike the modals that fill the terminal: a board of
         three rows leaves the app's own footer showing underneath it, offering
         keys that do nothing while this screen has the keyboard."""
+        yield Static(id="board-scope")
         yield DataTable(id="todos", cursor_type="row")
         yield Static(_NOTHING_TO_DO, id="no-todos")
         yield Footer()
@@ -1133,6 +1158,8 @@ class TodoBoard(ModalScreen[int | None]):
         table = self.query_one("#todos", DataTable)
         for label, key in _TODO_COLUMNS:
             table.add_column(label, key=key)
+        if self.memo_id is not None:
+            self.memo_name = services.require_memo(self.repo, self.memo_id).filename
         self._refresh()
 
     def _refresh(self) -> None:
@@ -1148,7 +1175,7 @@ class TodoBoard(ModalScreen[int | None]):
         at = table.cursor_row
         table.clear()
         self.listed = {}
-        for row in services.todo_rows(self.repo, include_done=self.show_done):
+        for row in self._rows():
             key = str(row.id)
             self.listed[key] = row
             table.add_row(
@@ -1160,12 +1187,39 @@ class TodoBoard(ModalScreen[int | None]):
                 Text(row.memo),
                 key=key,
             )
+        self.query_one("#board-scope", Static).update(self._scope_line())
         empty = not self.listed
         table.display = not empty
         self.query_one("#no-todos", Static).display = empty
         if not empty:
             table.move_cursor(row=min(at, table.row_count - 1))
             table.focus()
+
+    def _rows(self) -> list[services.TodoRow]:
+        """The to-dos this board is showing: the memo's own or everybody's, the
+        finished ones in or out, and one owner's alone where an owner is being
+        filtered to. The owners there are to cycle through are taken here, off
+        the board before that last narrowing, so that filtering to one of them
+        cannot leave the rest unreachable."""
+        rows = services.todo_rows(
+            self.repo, include_done=self.show_done, memo_id=self.memo_id
+        )
+        self.owners = sorted({row.owner for row in rows if row.owner})
+        if self.owner is None:
+            return rows
+        return [row for row in rows if row.owner == self.owner]
+
+    def _scope_line(self) -> str:
+        """What the board says it is showing: the memo it is confined to when it
+        is confined to one, and the owner it is filtered to when it is filtered
+        to one. Everyone's tasks add nothing — a board saying only "to-dos" is
+        the whole list, which is what the unnarrowed board has always been."""
+        narrowed = []
+        if self.memo_id is not None:
+            narrowed.append(self.memo_name or f"memo {self.memo_id}")
+        if self.owner is not None:
+            narrowed.append(f"owner: {self.owner}")
+        return _SCOPE_SEPARATOR.join([_BOARD_TITLE, *narrowed])
 
     def _highlighted(self) -> services.TodoRow | None:
         """The to-do the cursor is resting on, and nothing at all on an empty
@@ -1187,6 +1241,17 @@ class TodoBoard(ModalScreen[int | None]):
     def action_show_done(self) -> None:
         """Brings the finished tasks onto the board, or takes them back off."""
         self.show_done = not self.show_done
+        self._refresh()
+
+    def action_filter_owner(self) -> None:
+        """Narrows the board to one person's tasks, a press per owner and round
+        to everyone again — the way a shared list is read as your own without
+        typing anybody's name. An owner whose last task has just left the board
+        is no longer one of them, and lands back on everyone rather than on a
+        filter matching nothing that a further press could not get out of."""
+        cycle: list[str | None] = [None, *self.owners]
+        at = cycle.index(self.owner) if self.owner in cycle else -1
+        self.owner = cycle[(at + 1) % len(cycle)]
         self._refresh()
 
     def action_open_memo(self) -> None:
@@ -1253,6 +1318,7 @@ MEMO_ACTIONS = frozenset(
         "repair",
         "diarize",
         "ask",
+        "check_tasks",
     }
 )
 PROJECT_ACTIONS = frozenset({"rename_project", "remove_project"})
@@ -1335,6 +1401,9 @@ class MemoApp(App[None]):
         ("p", "repair", "Repair"),
         ("d", "diarize", "Diarize"),
         ("a", "ask", "Ask"),
+        # the memo's own to-dos, beside the note that states them; the whole
+        # board across every memo is upper case T
+        ("c", "check_tasks", "Tasks"),
         # neither half of the case rule: this acts on no memo and on no project,
         # it brings something new into the app
         ("o", "process", "Add recording"),
@@ -1903,17 +1972,31 @@ class MemoApp(App[None]):
         down."""
         self.push_screen(TodoBoard(self.repo), self._board_closed)
 
+    def action_check_tasks(self) -> None:
+        """Opens just what the memo being pointed at committed to, to be checked
+        off against the note that states it. A note is read to find out what was
+        agreed; the ticking that follows belongs on the same screen rather than
+        on the far side of the whole board."""
+        memo_id = self._target_memo()
+        if memo_id is None:
+            return
+        self.push_screen(TodoBoard(self.repo, memo_id=memo_id), self._board_closed)
+
     def _board_closed(self, memo_id: int | None) -> None:
         """Takes the app back to what the board has been changing behind it: a
         task checked off changes what a memo row says is still outstanding, and
-        the list was drawn before the board went up. The sidebar is left alone,
-        cursor and all — it counts recordings, and no number on it can have moved
-        while the only thing on offer was checking a task off. The memo a to-do
-        was committed in is opened last, over a list that already describes it
-        correctly."""
+        the note that states that task now shows its box ticked, and both were
+        drawn before the board went up. The sidebar is left alone, cursor and all
+        — it counts recordings, and no number on it can have moved while the only
+        thing on offer was checking a task off.
+
+        The memo a to-do was committed in is opened last, over a list that
+        already describes it correctly; with none asked for, whichever memo was
+        already open is redrawn where it stands."""
         self._relist()
-        if memo_id is not None:
-            self.show_memo(memo_id)
+        shown = memo_id if memo_id is not None else self.memo_id
+        if shown is not None:
+            self.show_memo(shown)
 
     def action_step_back(self) -> None:
         """Closes whatever is open before it ever moves focus off it, since

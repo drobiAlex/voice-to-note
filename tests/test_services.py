@@ -2030,6 +2030,20 @@ def test_a_to_do_already_checked_off_survives_the_next_extraction(repo, wav, mon
     assert [t.status for t in repo.todos(include_done=True)] == ["done"]
 
 
+def test_the_note_shows_a_task_ticked_once_it_has_been_checked_off(repo, wav, monkeypatch):
+    # the note and the to-do list are the same commitments; a note still showing
+    # an empty box beside finished work is the two of them disagreeing
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Ship it", speaker="S1")])
+    fake_llm(monkeypatch, claude=json.dumps(COMMITTED))
+    services.run_extraction(repo, memo_id)
+    assert "[ ] Cut the release" in services.notes(repo, memo_id)
+    (todo,) = repo.todos()
+
+    services.set_todo_status(repo, todo.id, "done")
+
+    assert "[x] Cut the release" in services.notes(repo, memo_id)
+
+
 def test_checking_off_a_to_do_nobody_stored_is_refused(repo):
     with pytest.raises(services.NotFound):
         services.set_todo_status(repo, 999, "done")
