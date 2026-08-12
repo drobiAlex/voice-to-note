@@ -62,14 +62,13 @@ Shipped:
 - [x] Settings & configuration — every knob in vtn.toml, editable from the TUI settings screen or `vtn config`
 - [x] Custom note templates — write your own beside the built-ins, pick one per recording
 - [x] Add-recording form — speaker count, template and pipeline steps chosen per recording
-
-Next — working with to-dos (every memo produces them):
-- [ ] To-dos as first-class items: every action item a memo produced, listed and addressable
-- [ ] Cross-memo to-do board: open items from all projects in one place
-- [ ] Edit, check off and carry over to-dos as work happens
+- [x] Native meeting recording — system audio + microphone, from `vtn record` or the menu bar app
+- [x] Menu bar recorder with project and device pickers — system mix by default, any output or microphone by choice
+- [x] Memo management like a file system — delete, rename and move memos from the list or the command line
+- [x] To-dos as first-class items — counted per memo, reconciled through re-extraction, checked off from the board (`T`), beside a note (`c`) or the command line
 
 Later:
-- [ ] Native recording — record directly on your Mac instead of importing voice memos
+- [ ] Background worker & job queue — durable processing that survives restarts, batch imports, and the shape a future always-on server needs; deliberately deferred until that server becomes real
 - [ ] Full-text search across transcripts and notes
 
 ## Development
