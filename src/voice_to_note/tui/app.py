@@ -552,6 +552,75 @@ class MemoDetails(ModalScreen[None]):
         self.dismiss(None)
 
 
+class RenameMemo(ModalScreen[None]):
+    """A memo's name, open for correcting. It opens on the name in use, which
+    for most memos is whatever the recorder called the file: renaming one is
+    putting something readable where a date and a number were."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, filename: str, store: Callable[[str], None]) -> None:
+        """Opens on the name the memo carries and the way to change it."""
+        super().__init__()
+        self.filename = filename
+        self.store = store
+
+    def compose(self) -> ComposeResult:
+        """The name, ready to be typed over."""
+        yield Input(self.filename, id="memo-rename")
+
+    def on_mount(self) -> None:
+        """Puts the cursor in the name."""
+        self.query_one("#memo-rename", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Renames the memo to whatever they left on the line."""
+        self._rename(event.value)
+
+    def _rename(self, new: str) -> None:
+        """Closes only once the memo has actually been renamed: a name that was
+        refused stays on the line to be fixed rather than being thrown away."""
+        try:
+            self.store(new)
+        except services.InvalidInput as refused:
+            self.notify(str(refused), severity="warning")
+            return
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        """Leaves the memo named as it was."""
+        self.dismiss(None)
+
+
+class ConfirmDelete(ModalScreen[bool]):
+    """Stands between a stray keypress and a memo nobody can get back. The
+    transcript, the notes and the named voices go with it, so the question
+    names the memo it is about: the row under the cursor is not always the one
+    somebody thinks they are pointing at."""
+
+    BINDINGS = [("y,enter", "delete", "Delete it"), ("n,escape", "keep", "Keep it")]
+
+    def __init__(self, filename: str) -> None:
+        """Opens on the memo about to go."""
+        super().__init__()
+        self.filename = filename
+
+    def compose(self) -> ComposeResult:
+        """Says what goes, then asks."""
+        yield Static(
+            f"Delete memo — {self.filename}? It cannot be brought back.  (y / n)",
+            id="confirm-delete",
+        )
+
+    def action_delete(self) -> None:
+        """Lets the memo go."""
+        self.dismiss(True)
+
+    def action_keep(self) -> None:
+        """Leaves the memo where it is."""
+        self.dismiss(False)
+
+
 class RenameProject(ModalScreen[None]):
     """A project's name, open for correcting. It opens on the name the project
     has now, because renaming one is usually fixing it rather than replacing it."""
@@ -1026,6 +1095,8 @@ MEMO_ACTIONS = frozenset(
         "edit_notes",
         "memo_info",
         "move_memo",
+        "title_memo",
+        "delete_memo",
         "rename_speaker",
         "toggle_raw",
         "extract",
@@ -1100,7 +1171,13 @@ class MemoApp(App[None]):
         ("e", "edit_notes", "Edit notes"),
         ("i", "memo_info", "Info"),
         ("m", "move_memo", "Move"),
-        # "r" rather than "n": n already means "no" in the discard dialog
+        ("n", "title_memo", "Rename"),
+        # the two keys a file manager deletes with, since either is what a hand
+        # reaches for; only one of them is worth a slot in the footer
+        Binding("delete", "delete_memo", "Delete"),
+        Binding("backspace", "delete_memo", "Delete", show=False),
+        # "r" rather than "n": renaming the memo has n, and n means "no" in
+        # every dialog that asks
         ("r", "rename_speaker", "Rename speaker"),
         ("t", "toggle_raw", "Raw transcript"),
         ("x", "extract", "Extract"),
@@ -1185,6 +1262,30 @@ class MemoApp(App[None]):
         self.load_projects()
         self.query_one("#projects", ListView).focus()
 
+    def _target_memo(self) -> int | None:
+        """The memo a memo key acts on: the one open below the list when there
+        is one, and otherwise the row the list cursor is resting on. Pointing at
+        a memo is enough, the way it is enough in a file manager — opening a
+        recording to file it away or throw it out is a step that says nothing.
+
+        Nothing at all when the cursor is on no memo: an empty list, or a row
+        standing in for a recording still coming in, which is keyed by the path
+        it is arriving from rather than by a memo id it does not have yet."""
+        if self.memo_id is not None:
+            return self.memo_id
+        # checked while the screen is still being built, before there is a table
+        table = self.query("#memos")
+        if not table:
+            return None
+        memos = table.first(DataTable)
+        rows = memos.ordered_rows
+        if not 0 <= memos.cursor_row < len(rows):
+            return None
+        try:
+            return int(str(rows[memos.cursor_row].key.value))
+        except ValueError:
+            return None
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Which keys the footer offers, so that it never advertises one that
         would do nothing. Returning False hides a binding and also stops the key
@@ -1193,11 +1294,12 @@ class MemoApp(App[None]):
         anything that reaches it another way.
 
         The two halves are gated differently on purpose. A memo action is offered
-        whenever a memo is open, whatever holds focus, because it acts on the
-        memo being read. A project action is offered only while the sidebar holds
-        the cursor, because the thing it acts on is the row the cursor rests on."""
+        whenever there is a memo to act on — open below the list, or merely
+        pointed at in it — whatever holds focus, because a memo is on screen
+        either way. A project action is offered only while the sidebar holds the
+        cursor, because the thing it acts on is the row the cursor rests on."""
         if action in MEMO_ACTIONS:
-            return self.memo_id is not None
+            return self._target_memo() is not None
         if action in PROJECT_ACTIONS:
             # checked while the screen is still being built, before there is one
             sidebar = self.query("#projects")
@@ -1343,12 +1445,14 @@ class MemoApp(App[None]):
 
     def action_toggle_raw(self) -> None:
         """Swaps the transcript between the repaired reading and the words as
-        they were transcribed, which is how a repair pass gets checked. With no
-        memo on screen there is nothing under the tab to call raw."""
-        if self.memo_id is None:
+        they were transcribed, which is how a repair pass gets checked. What it
+        swaps is the transcript in the pane, so a memo only pointed at is opened
+        to be read: the answer to raw against repaired is the text itself."""
+        memo_id = self._target_memo()
+        if memo_id is None:
             return
         self.raw = not self.raw
-        self.show_memo(self.memo_id)
+        self.show_memo(memo_id)
 
     def _start_job(
         self, key: Hashable, subject: str, doing: str, run: Callable[[Repository], str]
@@ -1436,9 +1540,9 @@ class MemoApp(App[None]):
             self.show_memo(memo_id)
 
     def action_extract(self) -> None:
-        """Turns the memo on screen into notes, asking first when that would go
-        over a note somebody wrote by hand."""
-        memo_id = self.memo_id
+        """Turns the memo being pointed at into notes, asking first when that
+        would go over a note somebody wrote by hand."""
+        memo_id = self._target_memo()
         if memo_id is None:
             return
         if services.memo_info(self.repo, memo_id).edited:
@@ -1465,8 +1569,8 @@ class MemoApp(App[None]):
         )
 
     def action_repair(self) -> None:
-        """Repairs transcription errors in the memo on screen."""
-        memo_id = self.memo_id
+        """Repairs transcription errors in the memo being pointed at."""
+        memo_id = self._target_memo()
         if memo_id is None:
             return
         self._start_memo_job(memo_id, "repairing", lambda repo: self._repair(repo, memo_id))
@@ -1477,9 +1581,9 @@ class MemoApp(App[None]):
         return f"memo {memo_id} repaired"
 
     def action_diarize(self) -> None:
-        """Offers to run speaker detection over the memo on screen again,
+        """Offers to run speaker detection over the memo being pointed at again,
         pinning how many voices to look for if that count is known."""
-        memo_id = self.memo_id
+        memo_id = self._target_memo()
         if memo_id is None:
             return
         self.push_screen(DiarizeSpeakers(lambda typed: self._diarize_count(memo_id, typed)))
@@ -1605,8 +1709,8 @@ class MemoApp(App[None]):
         self.call_from_thread(self.notify, message)
 
     def action_ask(self) -> None:
-        """Offers to put a question to the memo on screen."""
-        memo_id = self.memo_id
+        """Offers to put a question to the memo being pointed at."""
+        memo_id = self._target_memo()
         if memo_id is None:
             return
         self.push_screen(AskQuestion(lambda asked: self._ask(memo_id, asked)))
@@ -1678,56 +1782,115 @@ class MemoApp(App[None]):
             self.show_project(self.project)
 
     def action_memo_info(self) -> None:
-        """Says what state the memo on screen is in, if one is on screen at all."""
-        if self.memo_id is None:
-            return
-        self.push_screen(MemoDetails(services.memo_info_text(self.repo, self.memo_id)))
-
-    def action_edit_notes(self) -> None:
-        """Opens the shown memo's notes for editing, if one is shown at all."""
-        if self.memo_id is None:
-            return
-        self.push_screen(
-            NoteEditor(services.notes_markdown(self.repo, self.memo_id), self._save_notes)
-        )
-
-    def _save_notes(self, markdown: str) -> None:
-        """Stores what they wrote, then shows the memo as it now reads."""
-        memo_id = self.memo_id
+        """Says what state the memo being pointed at is in, if any memo is."""
+        memo_id = self._target_memo()
         if memo_id is None:
             return
+        self.push_screen(MemoDetails(services.memo_info_text(self.repo, memo_id)))
+
+    def action_edit_notes(self) -> None:
+        """Opens the pointed-at memo's notes for editing, if any memo is. The
+        memo is put on screen first: the editor closes back onto the note it
+        just changed, and closing onto some other memo's note would read as the
+        edit having landed on the wrong one."""
+        memo_id = self._target_memo()
+        if memo_id is None:
+            return
+        self.show_memo(memo_id)
+        self.push_screen(
+            NoteEditor(
+                services.notes_markdown(self.repo, memo_id),
+                lambda markdown: self._save_notes(memo_id, markdown),
+            )
+        )
+
+    def _save_notes(self, memo_id: int, markdown: str) -> None:
+        """Stores what they wrote, then shows the memo as it now reads."""
         services.save_notes(self.repo, memo_id, markdown)
         self.show_memo(memo_id)
 
     def action_move_memo(self) -> None:
-        """Offers to refile the memo on screen, if one is on screen at all."""
-        if self.memo_id is None:
+        """Offers to refile the memo being pointed at, if any memo is."""
+        memo_id = self._target_memo()
+        if memo_id is None:
             return
-        self.push_screen(MoveMemo(services.projects(self.repo), self._move_memo))
+        self.push_screen(
+            MoveMemo(
+                services.projects(self.repo),
+                lambda project: self._move_memo(memo_id, project),
+            )
+        )
 
-    def _move_memo(self, project: str) -> None:
+    def _move_memo(self, memo_id: int, project: str) -> None:
         """Refiles the memo, then redraws what that changed. Filed away from the
         project on screen, the memo drops out of the list, and panes left
         describing it would be describing a row that is no longer there."""
-        memo_id = self.memo_id
-        if memo_id is None:
-            return
         services.move_memo(self.repo, memo_id, project)
         self._reload(self.project)
 
-    def action_rename_speaker(self) -> None:
-        """Offers to name a voice in the memo on screen."""
-        if self.memo_id is None:
-            return
-        self.push_screen(
-            RenameSpeaker(services.speakers(self.repo, self.memo_id), self._rename_speaker)
-        )
-
-    def _rename_speaker(self, label: str, name: str) -> None:
-        """Names the voice, then shows the transcript calling it that."""
-        memo_id = self.memo_id
+    def action_title_memo(self) -> None:
+        """Offers to rename the memo being pointed at, if any memo is."""
+        memo_id = self._target_memo()
         if memo_id is None:
             return
+        self.push_screen(
+            RenameMemo(
+                services.require_memo(self.repo, memo_id).filename,
+                lambda name: self._title_memo(memo_id, name),
+            )
+        )
+
+    def _title_memo(self, memo_id: int, name: str) -> None:
+        """Renames the memo, then redraws the list it is named in — the list
+        being the one place the name is read. A name of nothing is refused by
+        services, and the refusal travels back to the modal, which keeps what
+        was typed rather than losing it."""
+        services.rename_memo(self.repo, memo_id, name)
+        self._relist()
+
+    def action_delete_memo(self) -> None:
+        """Offers to throw the pointed-at memo away, asking first and naming it
+        while it asks: this is the one memo key with nothing behind it."""
+        memo_id = self._target_memo()
+        if memo_id is None:
+            return
+        filename = services.require_memo(self.repo, memo_id).filename
+        self.push_screen(
+            ConfirmDelete(filename),
+            lambda confirmed: self._delete_memo(memo_id, confirmed),
+        )
+
+    def _delete_memo(self, memo_id: int, confirmed: bool | None) -> None:
+        """Throws the memo away once they have said to, and takes everything it
+        left on screen with it: the panes below the list when that memo was the
+        one being read, the count beside the project it was filed under, and its
+        row. Says what went by name, since the row that said so is gone."""
+        if not confirmed:
+            return
+        filename = services.delete_memo(self.repo, memo_id)
+        if self.memo_id == memo_id:
+            self.clear_memo()
+            self.query_one("#memos", DataTable).focus()
+        self.load_projects()
+        self._relist()
+        self.notify(f"deleted {filename}")
+
+    def action_rename_speaker(self) -> None:
+        """Offers to name a voice in the memo being pointed at, if any memo is."""
+        memo_id = self._target_memo()
+        if memo_id is None:
+            return
+        self.push_screen(
+            RenameSpeaker(
+                services.speakers(self.repo, memo_id),
+                lambda label, name: self._rename_speaker(memo_id, label, name),
+            )
+        )
+
+    def _rename_speaker(self, memo_id: int, label: str, name: str) -> None:
+        """Names the voice, then shows the transcript calling it that — opening
+        the memo if it was only pointed at, since the renamed voice in its own
+        lines is the only place the new name can be checked."""
         services.rename_speaker(self.repo, memo_id, label, name)
         self.show_memo(memo_id)
 
@@ -1784,6 +1947,14 @@ class MemoApp(App[None]):
         if event.list_view.id == "projects":
             self.show_project(event.item.name or "")
             self.query_one("#memos", DataTable).focus()
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """The memo keys follow the cursor down the list, since what they act on
+        is whatever it has come to rest on. Only this list moves them: the
+        settings screen has a table of its own, and the row highlighted in it
+        says nothing about which memo is being pointed at behind it."""
+        if event.data_table.id == "memos":
+            self.refresh_bindings()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """A memo fills the detail below the list. The row is keyed by the id of

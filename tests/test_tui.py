@@ -615,6 +615,181 @@ async def test_moving_the_shown_memo_out_of_view_stops_showing_it(repo):
         )
 
 
+# --- acting on the memo the list cursor rests on ---------------------------
+
+
+async def point_at_memo(pilot, project: str) -> None:
+    """Lists a project and leaves the cursor on its first memo with nothing
+    opened, which is where arrowing down the list leaves somebody."""
+    pilot.app.show_project(project)
+    memo_table(pilot.app).focus()
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_a_memo_key_acts_on_the_pointed_at_row_with_nothing_open(repo):
+    # a file manager acts on the file you are pointing at; opening a memo for
+    # permission to refile it is a step that says nothing
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await point_at_memo(pilot, "work")
+        assert pilot.app.memo_id is None
+
+        await pilot.press("m")
+        await pilot.pause()
+        pilot.app.screen.query_one("#project-name", Input).value = "side"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert [m.project for m in services.memos(repo) if m.id == work] == ["side"]
+
+
+@pytest.mark.asyncio
+async def test_moving_the_cursor_moves_what_the_memo_keys_act_on(repo):
+    # the row under the cursor is the whole of what is being pointed at, so the
+    # keys have to follow it down the list rather than stay on the first row
+    seed(repo)
+    repo.create_memo(
+        filename="retro.m4a", wav_path="/tmp/c.wav", duration_s=1.0, language="en",
+        segments=[Segment(0, 1000, "what went well", speaker="S1")],
+        speakers=[Speaker("S1")], project="work",
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await point_at_memo(pilot, "work")
+        await pilot.press("down")  # newest first, so off retro.m4a onto standup.m4a
+        await pilot.press("i")
+        await pilot.pause()
+
+        shown = str(pilot.app.screen.query_one("#memo-info", Static).content)
+        assert "standup.m4a" in shown
+
+
+@pytest.mark.asyncio
+async def test_the_footer_offers_the_memo_keys_as_soon_as_a_row_is_pointed_at(repo):
+    # they act on the highlighted row, and a footer that waits for a memo to be
+    # opened before offering them is hiding keys that would work
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        assert await missing(pilot, MEMO_KEYS) == MEMO_KEYS
+
+        await point_at_memo(pilot, "work")
+
+        assert await offered(pilot, MEMO_KEYS) == MEMO_KEYS
+
+
+@pytest.mark.asyncio
+async def test_delete_asks_by_name_before_throwing_the_pointed_at_memo_away(repo):
+    work, home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await point_at_memo(pilot, "work")
+        await pilot.press("delete")
+        await pilot.pause()
+        assert "standup.m4a" in str(
+            pilot.app.screen.query_one("#confirm-delete", Static).content
+        )
+
+        await pilot.press("y")
+        await pilot.pause()
+
+        assert [m.id for m in services.memos(repo)] == [home]
+        assert memo_names(pilot.app) == []
+        assert labels(pilot.app.query_one("#projects", ListView)) == ["personal (1)"]
+        assert "deleted standup.m4a" in [
+            str(n.message) for n in pilot.app._notifications
+        ]
+        assert work not in [m.id for m in services.memos(repo)]
+
+
+@pytest.mark.asyncio
+async def test_declining_the_delete_leaves_the_memo_where_it_was(repo):
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await point_at_memo(pilot, "work")
+        await pilot.press("backspace")  # the other key a hand reaches to delete with
+        await pilot.pause()
+        assert showing(pilot.app, "#confirm-delete")
+
+        await pilot.press("n")
+        await pilot.pause()
+
+        assert not showing(pilot.app, "#confirm-delete")
+        assert [m.filename for m in services.memos(repo) if m.id == work] == ["standup.m4a"]
+        assert memo_names(pilot.app) == ["standup.m4a"]
+
+
+@pytest.mark.asyncio
+async def test_deleting_the_memo_being_read_takes_its_panes_down_with_it(repo):
+    # the memo it describes is gone from the database, so panes still showing
+    # its notes are describing something nobody can open again
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await open_memo(pilot, work)
+        await pilot.press("delete")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+
+        assert pilot.app.memo_id is None
+        assert "no memo shown" in notes_pane(pilot).document.source
+        assert "we ship on friday" not in transcript(pilot)
+        assert memo_names(pilot.app) == []
+
+
+@pytest.mark.asyncio
+async def test_pressing_n_opens_the_name_the_memo_carries_now(repo):
+    # prefilled, because a recorder's file name is being replaced by a readable
+    # one rather than corrected
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await point_at_memo(pilot, "work")
+        await pilot.press("n")
+        await pilot.pause()
+
+        assert pilot.app.screen.query_one("#memo-rename", Input).value == "standup.m4a"
+
+
+@pytest.mark.asyncio
+async def test_renaming_the_pointed_at_memo_shows_the_new_name_in_the_list(repo):
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await point_at_memo(pilot, "work")
+        await pilot.press("n")
+        await pilot.pause()
+        pilot.app.screen.query_one("#memo-rename", Input).value = "Monday standup"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert not showing(pilot.app, "#memo-rename")
+        assert [m.filename for m in services.memos(repo) if m.id == work] == ["Monday standup"]
+        assert memo_names(pilot.app) == ["Monday standup"]
+
+
+@pytest.mark.asyncio
+async def test_a_memo_name_of_nothing_is_refused_without_losing_the_modal(repo):
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await point_at_memo(pilot, "work")
+        await pilot.press("n")
+        await pilot.pause()
+        pilot.app.screen.query_one("#memo-rename", Input).value = "   "
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert showing(pilot.app, "#memo-rename")
+        assert [str(n.message) for n in pilot.app._notifications] == ["a memo needs a name"]
+        assert [m.filename for m in services.memos(repo) if m.id == work] == ["standup.m4a"]
+
+
 # --- reading the transcript raw -------------------------------------------
 
 
@@ -1064,8 +1239,9 @@ async def test_escape_from_inside_the_notes_pane_closes_the_note_rather_than_jus
 
 @pytest.mark.asyncio
 async def test_escape_closes_an_open_memo_before_moving_focus_off_the_table(repo):
-    # the footer's memo keys must go the same moment the note does, or the
-    # screen keeps offering actions that no longer land on anything open
+    # the panes must empty the moment the memo closes. The memo keys stay in the
+    # footer, and are not stale for staying: the row the memo was opened from is
+    # still under the cursor, which is all they need to land on something
     seed(repo)
 
     async with MemoApp(repo).run_test() as pilot:
@@ -1080,7 +1256,7 @@ async def test_escape_closes_an_open_memo_before_moving_focus_off_the_table(repo
 
         assert pilot.app.memo_id is None
         assert "no memo shown" in notes_pane(pilot).document.source
-        assert await missing(pilot, MEMO_KEYS) == MEMO_KEYS
+        assert await offered(pilot, MEMO_KEYS) == MEMO_KEYS
         assert pilot.app.focused is memo_table(pilot.app)
 
 
@@ -2301,6 +2477,36 @@ async def test_a_recording_being_brought_in_is_listed_while_it_is_on_its_way(
 
 
 @pytest.mark.asyncio
+async def test_the_memo_keys_go_while_the_cursor_rests_on_a_recording_coming_in(
+    repo, tmp_path, monkeypatch
+):
+    # its row stands in for a recording with no memo behind it yet, so there is
+    # nothing for a memo key to act on and nothing to read an id off
+    seed(repo)
+    holding = threading.Event()
+    monkeypatch.setattr(services, "process_memo", held_import(holding))
+    monkeypatch.setattr(
+        services, "run_extraction", lambda _r, _i, force=False, template="notes": "claude"
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        try:
+            await process_file(pilot, recording(tmp_path, "retro.m4a"), "work")
+            await pilot.pause()
+            memo_table(pilot.app).focus()
+            await pilot.press("down")  # off the stored memo, onto the arriving one
+
+            assert memo_names(pilot.app) == ["standup.m4a", "retro.m4a"]
+            assert pilot.app._target_memo() is None
+            assert await missing(pilot, MEMO_KEYS) == MEMO_KEYS
+        finally:
+            holding.set()
+            await finish_jobs(pilot)
+
+
+@pytest.mark.asyncio
 async def test_the_row_of_a_recording_walks_the_stages_of_the_pipeline(
     repo, tmp_path, monkeypatch
 ):
@@ -2448,7 +2654,7 @@ async def test_a_recording_refused_as_a_duplicate_is_listed_once(
 # --- a footer offering only what applies ----------------------------------
 
 # what each key needs before it means anything
-MEMO_KEYS = ["e", "i", "m", "r", "t", "x", "p", "d", "a"]
+MEMO_KEYS = ["e", "i", "m", "n", "delete", "r", "t", "x", "p", "d", "a"]
 PROJECT_KEYS = ["R", "X"]
 ALWAYS_KEYS = ["o", "slash", "q"]
 
@@ -2483,14 +2689,14 @@ async def offered(pilot, keys: list[str]) -> list[str]:
 # which is the only way left to hold the case where one is reached anyway.
 
 MEMO_ACTIONS = [
-    "edit_notes", "memo_info", "move_memo", "rename_speaker", "toggle_raw",
-    "extract", "repair", "diarize", "ask",
+    "edit_notes", "memo_info", "move_memo", "title_memo", "delete_memo",
+    "rename_speaker", "toggle_raw", "extract", "repair", "diarize", "ask",
 ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", MEMO_ACTIONS)
-async def test_a_memo_action_reached_with_no_memo_open_does_nothing(repo, action):
+async def test_a_memo_action_reached_with_no_memo_pointed_at_does_nothing(repo, action):
     seed(repo)
 
     async with MemoApp(repo).run_test() as pilot:
