@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>app.vtn.menubar</string>
+	<key>CFBundleName</key>
+	<string>VTN Recorder</string>
+	<key>CFBundleExecutable</key>
+	<string>vtn-menubar</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>vtn records meeting audio playing on this Mac to turn it into notes.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>vtn records your voice during meetings to turn it into notes.</string>
+</dict>
+</plist>

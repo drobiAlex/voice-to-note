@@ -33,6 +33,15 @@ CAPTURE_SRC = NATIVE_DIR / "capture.swift"
 CAPTURE_PLIST = NATIVE_DIR / "Info.plist"
 CAPTURE_BIN = ROOT / "bin" / "vtn-capture"
 
+# the menu bar recorder is built as a real app bundle rather than a bare binary:
+# macOS attributes microphone and system-audio permission to the bundle a
+# recording is launched from, and only a bundle carries the Info.plist whose
+# wording the permission prompt then shows
+MENUBAR_SRC = NATIVE_DIR / "menubar.swift"
+MENUBAR_PLIST = NATIVE_DIR / "menubar-Info.plist"
+MENUBAR_APP = ROOT / "bin" / "VTN Recorder.app"
+MENUBAR_BIN = MENUBAR_APP / "Contents" / "MacOS" / "vtn-menubar"
+
 T = TypeVar("T")
 
 

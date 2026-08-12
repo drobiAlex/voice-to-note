@@ -743,6 +743,43 @@ def test_the_bare_template_command_lists_names_and_status(monkeypatch, capsys):
     assert "overridden" in out
 
 
+# --- opening the menu bar recorder ----------------------------------------
+
+
+def built_menubar_app(monkeypatch, tmp_path) -> Path:
+    """The app bundle setup would have built, where the command looks for it."""
+    app = tmp_path / "VTN Recorder.app"
+    binary = app / "Contents" / "MacOS" / "vtn-menubar"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("bin")
+    monkeypatch.setattr(cli.config, "MENUBAR_APP", app)
+    monkeypatch.setattr(cli.config, "MENUBAR_BIN", binary)
+    return app
+
+
+def test_the_menu_bar_recorder_is_handed_to_the_finder_to_open(monkeypatch, tmp_path):
+    # opened as an app it outlives this command, and macOS attributes the
+    # recording permissions to the bundle rather than to whatever launched it
+    monkeypatch.setattr(sys, "platform", "darwin")
+    app = built_menubar_app(monkeypatch, tmp_path)
+    seen: dict = {}
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **_kwargs: seen.update(cmd=cmd))
+
+    run(monkeypatch, StubRepo(), "menubar")
+
+    assert seen["cmd"] == ["open", str(app)]
+
+
+def test_opening_the_menu_bar_recorder_before_setup_says_how_to_build_it(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(cli.config, "MENUBAR_BIN", tmp_path / "never-built")
+
+    with pytest.raises(SystemExit) as err:
+        run(monkeypatch, StubRepo(), "menubar")
+
+    assert "vtn setup" in err.value.code
+
+
 # --- launching bare, with no subcommand -----------------------------------
 
 

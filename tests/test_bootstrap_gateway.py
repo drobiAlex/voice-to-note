@@ -121,6 +121,45 @@ def test_building_the_capture_helper_embeds_its_plist_then_signs_it(monkeypatch,
     assert dst.parent.is_dir()
 
 
+# --- building the menu bar recorder ----------------------------------------
+
+
+def test_building_the_menu_bar_recorder_without_swiftc_names_how_to_get_it(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _tool: None)
+
+    with pytest.raises(GatewayError, match="swiftc"):
+        bootstrap.build_menubar(
+            tmp_path / "menubar.swift",
+            tmp_path / "menubar-Info.plist",
+            tmp_path / "bin" / "VTN Recorder.app",
+        )
+
+
+def test_building_the_menu_bar_recorder_assembles_a_signed_app_bundle(monkeypatch, tmp_path):
+    seen = []
+
+    def run(cmd, **kwargs):
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _tool: "/usr/bin/swiftc")
+    monkeypatch.setattr(bootstrap.subprocess, "run", run)
+    plist = tmp_path / "menubar-Info.plist"
+    plist.write_text("<plist/>")
+    app = tmp_path / "bin" / "VTN Recorder.app"
+
+    bootstrap.build_menubar(tmp_path / "menubar.swift", plist, app)
+
+    # macOS attributes recording permission to the bundle a capture is launched
+    # from, so the binary and its plist have to land in the layout it reads
+    assert seen[0][0] == "swiftc"
+    assert seen[0][-1] == str(app / "Contents" / "MacOS" / "vtn-menubar")
+    assert (app / "Contents" / "Info.plist").read_text() == "<plist/>"
+    assert seen[1] == [
+        "codesign", "--force", "--sign", "-", "--identifier", "app.vtn.menubar", str(app),
+    ]
+
+
 def test_a_model_download_script_runs_with_its_own_arguments_and_streams_output(
     monkeypatch, tmp_path
 ):

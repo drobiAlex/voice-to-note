@@ -1,4 +1,5 @@
 import argparse
+import subprocess
 import sys
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
@@ -153,6 +154,20 @@ def cmd_record(args: argparse.Namespace) -> None:
     tracks.rmdir()
     status(f"recorded {merged}")
     _pipeline(merged, args, steps, count)
+
+
+def cmd_menubar(args: argparse.Namespace) -> None:
+    """Opens the menu bar recorder, which starts and stops the same recording
+    this command does — from the menu bar, so nothing has to keep a terminal
+    open for the length of a meeting. Handed to the Finder rather than run from
+    here: opened as an app it outlives this process, and macOS attributes the
+    microphone and system-audio permissions to the bundle rather than to
+    whatever launched it."""
+    if sys.platform != "darwin":
+        sys.exit("the menu bar recorder is macOS-only")
+    if not config.MENUBAR_BIN.exists():
+        sys.exit("menu bar recorder not built — run: vtn setup")
+    subprocess.run(["open", str(config.MENUBAR_APP)], check=False)
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -382,6 +397,10 @@ def main() -> None:
         ' (default: speakers,notes; "" imports just the transcript)',
     )
     sp.set_defaults(fn=cmd_record)
+
+    sub.add_parser(
+        "menubar", help="open the menu bar recorder"
+    ).set_defaults(fn=cmd_menubar)
 
     sp = sub.add_parser("list", help="list memos")
     sp.add_argument("--json", action="store_true", help="print memos as JSON")

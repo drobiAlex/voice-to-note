@@ -1601,15 +1601,24 @@ def configured_paths(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(services.config, "EMB_MODEL_PATH", models / "nemo_en_titanet_large.onnx")
     monkeypatch.setattr(services.config, "CAPTURE_BIN", tmp_path / "bin" / "vtn-capture")
+    app = tmp_path / "bin" / "VTN Recorder.app"
+    monkeypatch.setattr(services.config, "MENUBAR_APP", app)
+    monkeypatch.setattr(services.config, "MENUBAR_BIN", app / "Contents" / "MacOS" / "vtn-menubar")
     return vendor
 
 
-def _write_capture_helper() -> None:
-    """Puts a runnable meeting-capture helper where setup looks for one."""
-    binary = services.config.CAPTURE_BIN
-    binary.parent.mkdir(parents=True, exist_ok=True)
-    binary.write_text("bin")
-    binary.chmod(0o755)
+def _write_binary(path: Path) -> None:
+    """Puts a runnable stand-in where setup looks for a compiled artifact."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("bin")
+    path.chmod(0o755)
+
+
+def _write_native_helpers() -> None:
+    """Puts both macOS-only builds — the capture helper and the menu bar
+    recorder — where setup looks for them."""
+    _write_binary(services.config.CAPTURE_BIN)
+    _write_binary(services.config.MENUBAR_BIN)
 
 
 def stub_bootstrap(monkeypatch, *, vad_fails=False, cloned_urls: list | None = None) -> list:
@@ -1643,17 +1652,20 @@ def stub_bootstrap(monkeypatch, *, vad_fails=False, cloned_urls: list | None = N
 
     def build_capture(source, plist, dst):
         calls.append("capture")
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_text("bin")
-        dst.chmod(0o755)
+        _write_binary(dst)
 
-    # setup's last step only runs on a Mac, so the platform is pinned rather
+    def build_menubar(source, plist, app):
+        calls.append("menubar")
+        _write_binary(app / "Contents" / "MacOS" / "vtn-menubar")
+
+    # setup's last two steps only run on a Mac, so the platform is pinned rather
     # than left to whichever machine the suite happens to run on
     monkeypatch.setattr(services.sys, "platform", "darwin")
     monkeypatch.setattr(services.bootstrap, "require_tools", lambda: calls.append("tools"))
     monkeypatch.setattr(services.bootstrap, "clone_whisper", clone)
     monkeypatch.setattr(services.bootstrap, "build_whisper", build)
     monkeypatch.setattr(services.bootstrap, "build_capture", build_capture)
+    monkeypatch.setattr(services.bootstrap, "build_menubar", build_menubar)
     monkeypatch.setattr(services.bootstrap, "download_model_script", download)
     monkeypatch.setattr(services.bootstrap, "fetch_tar_bz2", fetch_tar_bz2)
     monkeypatch.setattr(services.bootstrap, "fetch", fetch)
@@ -1669,7 +1681,7 @@ def test_setup_runs_every_step_when_nothing_is_on_disk(monkeypatch, tmp_path):
     assert result == "setup complete"
     assert calls == [
         "tools", "clone", "build",
-        "download-ggml-model.sh", "download-vad-model.sh", "seg", "emb", "capture",
+        "download-ggml-model.sh", "download-vad-model.sh", "seg", "emb", "capture", "menubar",
     ]
     assert services.config.MODELS_DIR.is_dir()
     assert services.config.DATA_DIR.is_dir()
@@ -1695,20 +1707,22 @@ def test_setup_numbers_and_times_each_step_it_actually_runs(monkeypatch, tmp_pat
 
     services.setup(log=logged.append, now=lambda: next(clock))
 
-    assert logged[0] == "[1/7] cloning whisper.cpp …"
+    assert logged[0] == "[1/8] cloning whisper.cpp …"
     assert logged[1] == "      done in 3s"
-    assert logged[2] == "[2/7] building whisper.cpp (Metal — takes a few minutes) …"
+    assert logged[2] == "[2/8] building whisper.cpp (Metal — takes a few minutes) …"
     assert logged[3] == "      done in 3s"
-    assert logged[4] == f"[3/7] downloading whisper model {config.WHISPER_MODEL} …"
+    assert logged[4] == f"[3/8] downloading whisper model {config.WHISPER_MODEL} …"
     assert logged[5] == "      done in 3s"
-    assert logged[6] == "[4/7] downloading VAD model …"
+    assert logged[6] == "[4/8] downloading VAD model …"
     assert logged[7] == "      done in 3s"
-    assert logged[8] == "[5/7] downloading speaker segmentation model (~6 MB) …"
+    assert logged[8] == "[5/8] downloading speaker segmentation model (~6 MB) …"
     assert logged[9] == "      done in 3s"
-    assert logged[10] == "[6/7] downloading speaker embedding model (~97 MB) …"
+    assert logged[10] == "[6/8] downloading speaker embedding model (~97 MB) …"
     assert logged[11] == "      done in 3s"
-    assert logged[12] == "[7/7] building meeting-capture helper …"
+    assert logged[12] == "[7/8] building meeting-capture helper …"
     assert logged[13] == "      done in 3s"
+    assert logged[14] == "[8/8] building menu bar recorder …"
+    assert logged[15] == "      done in 3s"
 
 
 def test_setup_reports_a_skipped_step_without_running_or_timing_it(monkeypatch, tmp_path):
@@ -1724,20 +1738,21 @@ def test_setup_reports_a_skipped_step_without_running_or_timing_it(monkeypatch, 
     services.config.SEG_MODEL_PATH.parent.mkdir(parents=True)
     services.config.SEG_MODEL_PATH.write_text("seg")
     (services.config.MODELS_DIR / "nemo_en_titanet_large.onnx").write_text("emb")
-    _write_capture_helper()
+    _write_native_helpers()
     stub_bootstrap(monkeypatch)
     logged: list = []
 
     services.setup(log=logged.append)
 
     assert logged == [
-        "[1/7] whisper.cpp source — already installed",
-        "[2/7] whisper.cpp build — already installed",
-        "[3/7] whisper model — already installed",
-        "[4/7] VAD model — already installed",
-        "[5/7] speaker segmentation model — already installed",
-        "[6/7] speaker embedding model — already installed",
-        "[7/7] meeting-capture helper — already installed",
+        "[1/8] whisper.cpp source — already installed",
+        "[2/8] whisper.cpp build — already installed",
+        "[3/8] whisper model — already installed",
+        "[4/8] VAD model — already installed",
+        "[5/8] speaker segmentation model — already installed",
+        "[6/8] speaker embedding model — already installed",
+        "[7/8] meeting-capture helper — already installed",
+        "[8/8] menu bar recorder — already installed",
     ]
 
 
@@ -1788,7 +1803,7 @@ def test_setup_skips_steps_whose_artifact_already_exists(monkeypatch, tmp_path):
     services.config.SEG_MODEL_PATH.parent.mkdir(parents=True)
     services.config.SEG_MODEL_PATH.write_text("seg")
     (services.config.MODELS_DIR / "nemo_en_titanet_large.onnx").write_text("emb")
-    _write_capture_helper()
+    _write_native_helpers()
     calls = stub_bootstrap(monkeypatch)
 
     services.setup()
@@ -1841,7 +1856,21 @@ def test_setup_skips_the_capture_helper_away_from_a_mac(monkeypatch, tmp_path):
     services.setup(log=logged.append)
 
     assert "capture" not in calls
-    assert "[7/7] meeting-capture helper — macOS only, skipped" in logged
+    assert "[7/8] meeting-capture helper — macOS only, skipped" in logged
+
+
+def test_setup_skips_the_menu_bar_recorder_away_from_a_mac(monkeypatch, tmp_path):
+    # the recorder is an AppKit app driving the macOS-only capture helper, so
+    # there is nothing to build with anywhere else and nothing it could record
+    configured_paths(monkeypatch, tmp_path)
+    calls = stub_bootstrap(monkeypatch)
+    monkeypatch.setattr(services.sys, "platform", "linux")
+    logged: list = []
+
+    services.setup(log=logged.append)
+
+    assert "menubar" not in calls
+    assert "[8/8] menu bar recorder — macOS only, skipped" in logged
 
 
 def test_mock_world_previews_setup_without_touching_the_network_or_disk(monkeypatch, tmp_path):
@@ -1856,6 +1885,7 @@ def test_mock_world_previews_setup_without_touching_the_network_or_disk(monkeypa
     monkeypatch.setattr(services.bootstrap, "clone_whisper", gateway_called)
     monkeypatch.setattr(services.bootstrap, "build_whisper", gateway_called)
     monkeypatch.setattr(services.bootstrap, "build_capture", gateway_called)
+    monkeypatch.setattr(services.bootstrap, "build_menubar", gateway_called)
     monkeypatch.setattr(services.bootstrap, "download_model_script", gateway_called)
     monkeypatch.setattr(services.bootstrap, "fetch", gateway_called)
     monkeypatch.setattr(services.bootstrap, "fetch_tar_bz2", gateway_called)
@@ -1870,9 +1900,9 @@ def test_mock_world_previews_setup_without_touching_the_network_or_disk(monkeypa
     )
 
     assert result == "setup complete"
-    for n in range(1, 8):
-        assert any(line.startswith(f"[{n}/7]") for line in logged)
-    assert sum(line.startswith("      done in") for line in logged) == 7
+    for n in range(1, 9):
+        assert any(line.startswith(f"[{n}/8]") for line in logged)
+    assert sum(line.startswith("      done in") for line in logged) == 8
     assert any("%" in line and "MB" in line for line in downloaded)
     assert not services.config.MODELS_DIR.exists()
     assert not services.config.DATA_DIR.exists()

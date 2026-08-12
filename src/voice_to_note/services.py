@@ -141,7 +141,7 @@ def _report_step(
     """Times one setup step that actually has to run, saying what it is doing
     before the work and how long it took once it is done: the two lines a
     person staring at a silent terminal needs to know it has not hung."""
-    log(f"[{n}/7] {doing} …")
+    log(f"[{n}/8] {doing} …")
     t0 = now()
     work()
     log(f"      done in {int(now() - t0)}s")
@@ -160,6 +160,7 @@ class World:
     clone: Callable[[Path, str], None]
     build: Callable[[Path], None]
     build_capture: Callable[[Path, Path, Path], None]
+    build_menubar: Callable[[Path, Path, Path], None]
     script: Callable[[Path, str, list[str]], None]
     fetch: Callable[[str, Path, Callable[[int, int], None]], None]
     fetch_tar: Callable[[str, Path, Callable[[int, int], None]], None]
@@ -176,6 +177,7 @@ def _real_world() -> World:
         clone=bootstrap.clone_whisper,
         build=bootstrap.build_whisper,
         build_capture=bootstrap.build_capture,
+        build_menubar=bootstrap.build_menubar,
         script=bootstrap.download_model_script,
         fetch=bootstrap.fetch,
         fetch_tar=bootstrap.fetch_tar_bz2,
@@ -227,6 +229,7 @@ def mock_world(sleep: Callable[[float], None] = time.sleep) -> World:
         clone=clone,
         build=build,
         build_capture=lambda _src, _plist, _dst: None,
+        build_menubar=lambda _src, _plist, _app: None,
         script=script,
         fetch=simulated_fetch,
         fetch_tar=simulated_fetch,
@@ -244,9 +247,9 @@ def setup(
     install only does what is still missing. A failed VAD download is the one
     step tolerated rather than raised: transcription still works without it,
     just without the pause-aware segmentation VAD gives it. The meeting-capture
-    helper is compiled last and only on a Mac, since recording a call is a
-    macOS-only feature that the rest of the pipeline does not depend on. A
-    World stands in
+    helper and the menu bar recorder are compiled last and only on a Mac, since
+    recording a call is a macOS-only feature that the rest of the pipeline does
+    not depend on. A World stands in
     for every step that touches git, cmake or the network; passing mock_world()
     previews the same flow without doing any of it."""
     world = world or _real_world()
@@ -255,7 +258,7 @@ def setup(
         world.mkdir(d)
 
     if world.exists(config.VENDOR):
-        log("[1/7] whisper.cpp source — already installed")
+        log("[1/8] whisper.cpp source — already installed")
     else:
         _report_step(
             log,
@@ -266,7 +269,7 @@ def setup(
         )
 
     if world.built(config.WHISPER_BIN):
-        log("[2/7] whisper.cpp build — already installed")
+        log("[2/8] whisper.cpp build — already installed")
     else:
         _report_step(
             log,
@@ -277,7 +280,7 @@ def setup(
         )
 
     if world.exists(config.WHISPER_MODEL_PATH):
-        log("[3/7] whisper model — already installed")
+        log("[3/8] whisper model — already installed")
     else:
         _report_step(
             log,
@@ -292,9 +295,9 @@ def setup(
         )
 
     if world.exists(config.VAD_MODEL_PATH):
-        log("[4/7] VAD model — already installed")
+        log("[4/8] VAD model — already installed")
     else:
-        log("[4/7] downloading VAD model …")
+        log("[4/8] downloading VAD model …")
         t0 = now()
         try:
             world.script(
@@ -305,7 +308,7 @@ def setup(
             log("VAD download failed — continuing without VAD")
 
     if world.exists(config.SEG_MODEL_PATH):
-        log("[5/7] speaker segmentation model — already installed")
+        log("[5/8] speaker segmentation model — already installed")
     else:
         _report_step(
             log,
@@ -327,7 +330,7 @@ def setup(
     # download must never land under a name it does not own
     default_emb_model = config.MODELS_DIR / "nemo_en_titanet_large.onnx"
     if world.exists(default_emb_model):
-        log("[6/7] speaker embedding model — already installed")
+        log("[6/8] speaker embedding model — already installed")
     else:
         _report_step(
             log,
@@ -345,9 +348,9 @@ def setup(
         )
 
     if sys.platform != "darwin":
-        log("[7/7] meeting-capture helper — macOS only, skipped")
+        log("[7/8] meeting-capture helper — macOS only, skipped")
     elif world.built(config.CAPTURE_BIN):
-        log("[7/7] meeting-capture helper — already installed")
+        log("[7/8] meeting-capture helper — already installed")
     else:
         _report_step(
             log,
@@ -356,6 +359,21 @@ def setup(
             "building meeting-capture helper",
             lambda: world.build_capture(
                 config.CAPTURE_SRC, config.CAPTURE_PLIST, config.CAPTURE_BIN
+            ),
+        )
+
+    if sys.platform != "darwin":
+        log("[8/8] menu bar recorder — macOS only, skipped")
+    elif world.built(config.MENUBAR_BIN):
+        log("[8/8] menu bar recorder — already installed")
+    else:
+        _report_step(
+            log,
+            now,
+            8,
+            "building menu bar recorder",
+            lambda: world.build_menubar(
+                config.MENUBAR_SRC, config.MENUBAR_PLIST, config.MENUBAR_APP
             ),
         )
 

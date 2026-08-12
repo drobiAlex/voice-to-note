@@ -100,6 +100,28 @@ def build_capture(source: Path, plist: Path, dst: Path) -> None:
     )
 
 
+def build_menubar(source: Path, plist: Path, app: Path) -> None:
+    """Compiles the menu bar recorder, which starts a meeting from the menu bar
+    instead of from a terminal that has to stay open for the length of a call.
+    It is assembled into an app bundle rather than left as a binary because
+    macOS attributes recording permission to the bundle a capture is launched
+    from — and because only something in a bundle can be opened from the Finder
+    or set to log in."""
+    if shutil.which("swiftc") is None:
+        raise GatewayError("missing: swiftc — install: xcode-select --install")
+    binary = app / "Contents" / "MacOS" / "vtn-menubar"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    _run(["swiftc", str(source), "-O", "-o", str(binary)], "building vtn-menubar")
+    shutil.copyfile(plist, app / "Contents" / "Info.plist")
+    # signed under a fixed identifier for the same reason the capture helper is:
+    # macOS files the permissions a person grants under it, and the ad-hoc
+    # default's hash changes with every build
+    _run(
+        ["codesign", "--force", "--sign", "-", "--identifier", "app.vtn.menubar", str(app)],
+        "signing VTN Recorder.app",
+    )
+
+
 def download_model_script(vendor: Path, script: str, args: list[str]) -> None:
     """Runs one of whisper.cpp's own model-download scripts, which ship inside
     its clone rather than in this project. Left to print straight to the
