@@ -1,14 +1,16 @@
 import argparse
 import sys
+from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from . import config, services
-from .gateways import GatewayError
+from .gateways import GatewayError, audio, capture
 from .storage.repository import Repository
 
 EXAMPLES = """examples:
   vtn process ~/memos/standup.m4a     transcribe, diarize, then extract notes
+  vtn record --project work           tape this Mac's meeting, then process it
   vtn show 3                          print memo 3's transcript
   vtn notes 3 --json > notes.json     machine-readable notes for scripting
   vtn rename 3 S1 Samantha            name a speaker; later memos match by voice
@@ -52,17 +54,21 @@ def cmd_setup(args: argparse.Namespace) -> None:
         print(services.setup(log, download))
 
 
-def cmd_process(args: argparse.Namespace) -> None:
-    """Takes a recording all the way to notes on screen. The note template,
-    the step list and the speaker count are all checked before the file is
-    even touched: a typo in any of them must not survive minutes of
-    converting, transcribing and diarizing only to fail at the last step."""
-    src = Path(args.file).expanduser().resolve()
-    if not src.exists():
-        sys.exit(f"no such file: {src}")
+def _checked(args: argparse.Namespace) -> tuple[frozenset[str], int | None]:
+    """The options that decide what the pipeline does, all read before any
+    audio is: a typo in a template, a step or a speaker count must not survive
+    minutes of converting, transcribing and diarizing — or a whole meeting —
+    only to fail at the last step."""
     services.note_template(args.template)
-    steps = services.process_steps(args.steps)
-    count = services.speaker_count(args.speakers)
+    return services.process_steps(args.steps), services.speaker_count(args.speakers)
+
+
+def _pipeline(
+    src: Path, args: argparse.Namespace, steps: frozenset[str], count: int | None
+) -> None:
+    """Everything that happens to a recording once it exists and its options
+    have been checked. Shared, so that a file handed in and a meeting taped a
+    moment ago travel exactly the same path."""
     with Repository() as repo:
         result = services.process_memo(
             repo,
@@ -97,6 +103,56 @@ def cmd_process(args: argparse.Namespace) -> None:
                 status(f"retry later with: vtn extract {result.memo_id}")
         else:
             status(f"transcript stored — run `vtn extract {result.memo_id}` for notes")
+
+
+def cmd_process(args: argparse.Namespace) -> None:
+    """Takes a recording all the way to notes on screen."""
+    src = Path(args.file).expanduser().resolve()
+    if not src.exists():
+        sys.exit(f"no such file: {src}")
+    steps, count = _checked(args)
+    _pipeline(src, args, steps, count)
+
+
+def _taped(track: Path) -> bool:
+    """Whether a track holds anything at all. A helper that fell over before it
+    opened its files leaves nothing worth merging behind."""
+    return track.exists() and track.stat().st_size > 0
+
+
+def cmd_record(args: argparse.Namespace) -> None:
+    """Tapes a meeting on this Mac and takes it straight through to notes. The
+    two sides — what the Mac plays and what the microphone hears — are recorded
+    apart and then merged, because everything downstream reads a single
+    recording. Once the merged file exists the raw tracks are dropped; until
+    then they are kept whatever goes wrong, since they are the only copy of a
+    meeting nobody can hold twice."""
+    if sys.platform != "darwin":
+        sys.exit("meeting recording is macOS-only")
+    steps, count = _checked(args)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    tracks = config.RECORDINGS_DIR / stamp
+    system_wav, mic_wav = tracks / "system.wav", tracks / "mic.wav"
+    merged = config.RECORDINGS_DIR / f"meeting-{stamp}.m4a"
+
+    recording = capture.start(system_wav, mic_wav)
+    status(f"recording — press Ctrl+C to stop ({tracks})")
+    try:
+        code = recording.wait()
+        status(f"recording ended on its own: vtn-capture exited with code {code}")
+    except KeyboardInterrupt:
+        status("")
+    recording.stop()
+
+    if not _taped(system_wav) or not _taped(mic_wav):
+        sys.exit(f"nothing was recorded — no audio in {tracks}")
+    status("merging the two tracks …")
+    audio.merge_tracks(system_wav, mic_wav, merged)
+    system_wav.unlink()
+    mic_wav.unlink()
+    tracks.rmdir()
+    status(f"recorded {merged}")
+    _pipeline(merged, args, steps, count)
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -304,6 +360,28 @@ def main() -> None:
         ' (default: speakers,notes; "" imports just the transcript)',
     )
     sp.set_defaults(fn=cmd_process)
+
+    sp = sub.add_parser("record", help="record this Mac's meeting, then transcribe it")
+    sp.add_argument("--project", default="other", help="file the memo under a project")
+    sp.add_argument(
+        "--template",
+        default="notes",
+        help="note template to extract with (see: vtn template)",
+    )
+    sp.add_argument(
+        "--speakers",
+        default="auto",
+        metavar="N",
+        help='how many voices are in the meeting; "auto" guesses',
+    )
+    sp.add_argument(
+        "--steps",
+        default="speakers,notes",
+        metavar="STEPS",
+        help='comma-separated optional stages to run: speakers,refine,notes'
+        ' (default: speakers,notes; "" imports just the transcript)',
+    )
+    sp.set_defaults(fn=cmd_record)
 
     sp = sub.add_parser("list", help="list memos")
     sp.add_argument("--json", action="store_true", help="print memos as JSON")
