@@ -215,6 +215,31 @@ func channelCount(_ device: AudioObjectID, _ scope: AudioObjectPropertyScope) ->
     return buffers.reduce(0) { $0 + $1.mNumberChannels }
 }
 
+/// How a device is attached to this Mac — built in, USB, Bluetooth and so on.
+/// A device that will not answer is reported as unknown rather than guessed at,
+/// which leaves the caller below preferring one that did answer.
+func transportType(_ device: AudioObjectID) -> UInt32 {
+    var selector = address(kAudioDevicePropertyTransportType)
+    var transport = UInt32(kAudioDeviceTransportTypeUnknown)
+    var size = UInt32(MemoryLayout<UInt32>.size)
+    guard AudioObjectGetPropertyData(device, &selector, 0, nil, &size, &transport) == noErr
+    else { return UInt32(kAudioDeviceTransportTypeUnknown) }
+    return transport
+}
+
+/// This Mac's own speakers, or nothing on a Mac that has none — a mini driving
+/// a monitor's audio over HDMI has none. Wanted not for what they play but for
+/// how steadily they tick: see the clock the capture aggregate is built around.
+func builtInOutputUID() -> String? {
+    let devices = (try? allDevices()) ?? []
+    for device in devices
+    where transportType(device) == UInt32(kAudioDeviceTransportTypeBuiltIn)
+        && channelCount(device, kAudioObjectPropertyScopeOutput) > 0 {
+        if let uid = try? deviceUID(device) { return uid }
+    }
+    return nil
+}
+
 /// Prints what a picker can offer: one tab-separated `direction UID name` line
 /// per direction a device works in. Nothing here opens a tap, an aggregate or
 /// a file, and macOS asks the user for nothing — listing devices is not
@@ -288,16 +313,28 @@ final class SystemAudioRecorder {
         description.isPrivate = true
         try check(AudioHardwareCreateProcessTap(description, &tap), "creating the audio tap")
 
+        // the sub-device below is the aggregate's clock, not the source of what
+        // is recorded: a global tap carries the mix of every process whichever
+        // device happens to be playing it, so this only has to tick steadily.
+        // Bluetooth does not. Its rate is renegotiated the moment any app opens
+        // the headset's microphone — the call that is being recorded does
+        // exactly that — and an aggregate never re-reads the device it was built
+        // around, so the IOProc goes on firing and hands back zeroed buffers for
+        // the rest of the meeting. This Mac's own speakers are always attached
+        // and never renegotiate, which is what makes them the clock to prefer;
+        // a Mac without any falls back to whatever it is playing through.
+        // A tap scoped to one device is left clocked by that device: that device
+        // is the one being recorded, so its silence would be the truth.
+        let clockUID = requestedUID == nil ? builtInOutputUID() ?? outputUID : outputUID
+
         let settings: [String: Any] = [
             kAudioAggregateDeviceNameKey: "vtn-capture",
             kAudioAggregateDeviceUIDKey: UUID().uuidString,
-            // the real output device, not a placeholder: an aggregate built
-            // around a device that is not playing hands back nothing but silence
-            kAudioAggregateDeviceMainSubDeviceKey: outputUID,
+            kAudioAggregateDeviceMainSubDeviceKey: clockUID,
             kAudioAggregateDeviceIsPrivateKey: true,
             kAudioAggregateDeviceIsStackedKey: false,
             kAudioAggregateDeviceTapAutoStartKey: true,
-            kAudioAggregateDeviceSubDeviceListKey: [[kAudioSubDeviceUIDKey: outputUID]],
+            kAudioAggregateDeviceSubDeviceListKey: [[kAudioSubDeviceUIDKey: clockUID]],
             kAudioAggregateDeviceTapListKey: [
                 [
                     kAudioSubTapUIDKey: description.uuid.uuidString,
