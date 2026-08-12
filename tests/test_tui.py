@@ -2507,6 +2507,44 @@ async def test_the_memo_keys_go_while_the_cursor_rests_on_a_recording_coming_in(
 
 
 @pytest.mark.asyncio
+async def test_pressing_enter_on_a_recording_coming_in_opens_nothing(
+    repo, tmp_path, monkeypatch
+):
+    # its row is keyed by the path it is arriving from rather than a memo id,
+    # so selecting it should open nothing rather than take the app down
+    work, _home = seed(repo)
+    holding = threading.Event()
+    monkeypatch.setattr(services, "process_memo", held_import(holding))
+    monkeypatch.setattr(
+        services, "run_extraction", lambda _r, _i, force=False, template="notes": "claude"
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        try:
+            await process_file(pilot, recording(tmp_path, "retro.m4a"), "work")
+            await pilot.pause()
+            memo_table(pilot.app).focus()
+            await pilot.press("down")  # off the stored memo, onto the arriving one
+
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert pilot.app.memo_id is None
+
+            # the app is still running, not merely still standing: the row
+            # above still opens the memo it was always going to open
+            await pilot.press("up", "enter")
+            await pilot.pause()
+
+            assert pilot.app.memo_id == work
+        finally:
+            holding.set()
+            await finish_jobs(pilot)
+
+
+@pytest.mark.asyncio
 async def test_the_row_of_a_recording_walks_the_stages_of_the_pipeline(
     repo, tmp_path, monkeypatch
 ):

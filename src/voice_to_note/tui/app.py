@@ -1960,5 +1960,13 @@ class MemoApp(App[None]):
         """A memo fills the detail below the list. The row is keyed by the id of
         the memo it describes — the one thing about a row that survives the list
         being redrawn, reordered or narrowed to a tag — and every row is drawn
-        with one, so there is always an id under the cursor to read."""
-        self.show_memo(int(str(event.row_key.value)))
+        with one, so there is usually an id under the cursor to read.
+
+        A row standing in for a recording still on its way in is keyed by the
+        path it is arriving from rather than by a memo id it does not have yet,
+        so there is nothing behind it to open."""
+        try:
+            memo_id = int(str(event.row_key.value))
+        except ValueError:
+            return
+        self.show_memo(memo_id)
