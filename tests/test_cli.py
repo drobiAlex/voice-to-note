@@ -6,7 +6,7 @@ import pytest
 from conftest import StubRepo
 
 from voice_to_note import cli, services
-from voice_to_note.domain import Segment, Speaker
+from voice_to_note.domain import Memo, Segment, Speaker
 
 
 def add_memo(
@@ -510,6 +510,55 @@ def test_moving_a_memo_says_where_it_went(monkeypatch, capsys):
     assert seen == {"memo_id": 3, "project": "side"}
     assert captured.out == ""
     assert captured.err == "memo 3 moved to side\n"
+
+
+def stored_memo(filename: str = "standup.m4a") -> Memo:
+    """The one memo a delete would be asked about."""
+    return Memo(3, filename, "/tmp/standup.wav", 12.0, "en", "transcribed", "2026-01-01 09:00:00")
+
+
+def test_deleting_with_yes_says_what_went_without_asking(monkeypatch, capsys):
+    seen: dict = {}
+
+    def delete_memo(_repo, memo_id):
+        seen["memo_id"] = memo_id
+        return "standup.m4a"
+
+    monkeypatch.setattr(services, "delete_memo", delete_memo)
+    monkeypatch.setattr("builtins.input", lambda: pytest.fail("asked despite --yes"))
+
+    run(monkeypatch, StubRepo(), "delete", "3", "--yes")
+
+    assert seen == {"memo_id": 3}
+    assert capsys.readouterr().err == "deleted memo 3 — standup.m4a\n"
+
+
+def test_a_delete_answered_no_keeps_the_memo(monkeypatch, capsys):
+    monkeypatch.setattr(services, "require_memo", lambda _repo, _id: stored_memo())
+    monkeypatch.setattr(
+        services, "delete_memo", lambda _repo, _id: pytest.fail("deleted after a no")
+    )
+    monkeypatch.setattr("builtins.input", lambda: "n")
+
+    run(monkeypatch, StubRepo(), "delete", "3")
+
+    assert capsys.readouterr().err == "delete memo 3 — standup.m4a? [y/N] kept\n"
+
+
+def test_titling_a_memo_says_what_it_is_now_called(monkeypatch, capsys):
+    seen: dict = {}
+
+    def rename_memo(_repo, memo_id, name):
+        seen["memo_id"], seen["name"] = memo_id, name
+
+    monkeypatch.setattr(services, "rename_memo", rename_memo)
+
+    run(monkeypatch, StubRepo(), "title", "3", "Sprint", "planning")
+
+    captured = capsys.readouterr()
+    assert seen == {"memo_id": 3, "name": "Sprint planning"}
+    assert captured.out == ""
+    assert captured.err == "memo 3: renamed to Sprint planning\n"
 
 
 def test_renaming_a_project_says_how_many_memos_it_carried(monkeypatch, capsys):

@@ -15,6 +15,7 @@ EXAMPLES = """examples:
   vtn show 3                          print memo 3's transcript
   vtn notes 3 --json > notes.json     machine-readable notes for scripting
   vtn rename 3 S1 Samantha            name a speaker; later memos match by voice
+  vtn title 3 Sprint planning         give memo 3 a name of its own
 """
 
 
@@ -190,6 +191,31 @@ def cmd_move(args: argparse.Namespace) -> None:
     status(f"memo {args.id} moved to {args.project}")
 
 
+def _confirmed(question: str) -> bool:
+    """Whether the user actually said yes, asked on stderr so the question does
+    not land in a pipe. Anything but yes is a no, and so is a prompt nobody was
+    there to answer: piping into a command that then waits on an answer it will
+    never get must not end in the deletion nobody asked for."""
+    print(f"{question} [y/N] ", end="", file=sys.stderr, flush=True)
+    try:
+        answer = input()
+    except EOFError:
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+def cmd_delete(args: argparse.Namespace) -> None:
+    """Throws a memo away for good, asking first unless already told to."""
+    with Repository() as repo:
+        if not args.yes:
+            memo = services.require_memo(repo, args.id)
+            if not _confirmed(f"delete memo {args.id} — {memo.filename}?"):
+                status("kept")
+                return
+        filename = services.delete_memo(repo, args.id)
+    status(f"deleted memo {args.id} — {filename}")
+
+
 def cmd_info(args: argparse.Namespace) -> None:
     """Prints what state one memo is in."""
     with Repository() as repo:
@@ -342,6 +368,14 @@ def cmd_rename(args: argparse.Namespace) -> None:
     status(f"memo {args.id}: {args.label} -> {args.name}")
 
 
+def cmd_title(args: argparse.Namespace) -> None:
+    """Gives a memo a name of its own, in place of the recording's file name."""
+    name = " ".join(args.name)
+    with Repository() as repo:
+        services.rename_memo(repo, args.id, name)
+    status(f"memo {args.id}: renamed to {name}")
+
+
 def main() -> None:
     """The vtn command."""
     p = argparse.ArgumentParser(
@@ -412,6 +446,11 @@ def main() -> None:
     sp.add_argument("id", type=int)
     sp.add_argument("project")
     sp.set_defaults(fn=cmd_move)
+
+    sp = sub.add_parser("delete", help="throw a memo away for good: delete <id>")
+    sp.add_argument("id", type=int)
+    sp.add_argument("--yes", action="store_true", help="delete without asking first")
+    sp.set_defaults(fn=cmd_delete)
 
     sp = sub.add_parser("info", help="show what state a memo is in")
     sp.add_argument("id", type=int)
@@ -533,6 +572,11 @@ def main() -> None:
     sp.add_argument("label")
     sp.add_argument("name")
     sp.set_defaults(fn=cmd_rename)
+
+    sp = sub.add_parser("title", help="rename a memo: title <id> <new name...>")
+    sp.add_argument("id", type=int)
+    sp.add_argument("name", nargs="+")
+    sp.set_defaults(fn=cmd_title)
 
     args = p.parse_args()
     if args.cmd is None:

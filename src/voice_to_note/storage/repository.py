@@ -237,6 +237,14 @@ class Repository:
             self.con.execute("UPDATE memos SET project=? WHERE id=?", (project, memo_id))
             self._touch(memo_id)
 
+    def set_filename(self, memo_id: int, filename: str) -> None:
+        """Gives a memo a different name to be listed and found under."""
+        with self.con:
+            self.con.execute(
+                "UPDATE memos SET filename=? WHERE id=?", (filename, memo_id)
+            )
+            self._touch(memo_id)
+
     def refile_project(self, old: str, new: str) -> int:
         """Files everything under one project into another in a single statement,
         reporting how many memos that carried. Renaming a project and emptying
@@ -258,6 +266,14 @@ class Repository:
             f"SELECT {MEMO_COLUMNS} FROM memos WHERE id=?", (memo_id,)
         ).fetchone()
         return _memo(row) if row else None
+
+    def delete_memo(self, memo_id: int) -> None:
+        """Removes a memo and everything stored under it. One statement is the
+        whole deletion: segments, extractions and speakers all reference the
+        memo with ON DELETE CASCADE, so sqlite carries them off with the row
+        and no child table can be left holding rows nothing points at."""
+        with self.con:
+            self.con.execute("DELETE FROM memos WHERE id=?", (memo_id,))
 
     # --- segments ------------------------------------------------------
 

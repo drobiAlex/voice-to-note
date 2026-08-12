@@ -927,6 +927,49 @@ def test_moving_a_memo_into_a_nameless_project_is_refused(repo, wav, project):
     assert repo.memo(memo_id).project == "work"
 
 
+def test_renaming_a_memo_stores_the_tidied_name(repo, wav):
+    memo_id = add_memo(repo, wav)
+
+    services.rename_memo(repo, memo_id, "  Sprint planning  ")
+
+    assert repo.memo(memo_id).filename == "Sprint planning"
+
+
+@pytest.mark.parametrize("name", ["", "   "])
+def test_renaming_a_memo_to_nothing_is_refused(repo, wav, name):
+    # a blank name would leave nothing in the list to read the memo by
+    memo_id = add_memo(repo, wav, filename="standup.m4a")
+
+    with pytest.raises(services.InvalidInput):
+        services.rename_memo(repo, memo_id, name)
+
+    assert repo.memo(memo_id).filename == "standup.m4a"
+
+
+def test_deleting_a_memo_takes_the_wav_it_converted_with_it(repo, wav):
+    memo_id = add_memo(repo, wav, filename="standup.m4a")
+
+    assert services.delete_memo(repo, memo_id) == "standup.m4a"
+    assert repo.memo(memo_id) is None
+    assert not wav.exists()
+
+
+def test_deleting_a_memo_whose_wav_is_already_gone_still_removes_it(repo, wav):
+    # the stored row is what says a memo exists, so a file somebody cleared out
+    # by hand must not leave a memo nobody can delete
+    memo_id = add_memo(repo, wav)
+    wav.unlink()
+
+    services.delete_memo(repo, memo_id)
+
+    assert repo.memo(memo_id) is None
+
+
+def test_deleting_a_memo_that_was_never_stored_is_refused(repo):
+    with pytest.raises(services.NotFound):
+        services.delete_memo(repo, 999)
+
+
 def test_a_project_name_is_tidied_before_it_is_stored(repo, wav):
     memo_id = add_project_memo(repo, wav, "work.m4a", "other")
 

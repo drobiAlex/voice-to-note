@@ -1161,6 +1161,37 @@ def move_memo(repo: Repository, memo_id: int, project: str) -> None:
     repo.set_project(memo_id, name)
 
 
+def rename_memo(repo: Repository, memo_id: int, name: str) -> None:
+    """Gives a memo a name of its own, in place of whatever the recording's file
+    happened to be called. A name of nothing is refused: a blank name would show
+    as a blank cell in every list, with nothing left to read the memo by or find
+    it under."""
+    title = name.strip()
+    if not title:
+        raise InvalidInput("a memo needs a name")
+    require_memo(repo, memo_id)
+    repo.set_filename(memo_id, title)
+
+
+def delete_memo(repo: Repository, memo_id: int) -> str:
+    """Throws a memo away for good, reporting what it was called so the caller
+    can say what went. The transcript, the notes and the speakers go with it,
+    and so those speakers' voice fingerprints leave the pool later recordings
+    are matched against — a name only recognised from this one memo stops being
+    recognised at all.
+
+    Only the converted wav this app wrote is deleted from disk. The recording it
+    was made from is left where it is: that copy is the user's own archive of
+    the audio, and deleting a memo means dropping what was made of a recording,
+    not the recording itself."""
+    memo = require_memo(repo, memo_id)
+    repo.delete_memo(memo_id)
+    # the row is what says a memo exists, so it goes first and the file follows:
+    # a wav already removed by hand must not leave a memo that cannot be deleted
+    Path(memo.wav_path).unlink(missing_ok=True)
+    return memo.filename
+
+
 @dataclass(frozen=True)
 class MemoInfo:
     """What state one memo is in, for a screen or a command line to lay out."""

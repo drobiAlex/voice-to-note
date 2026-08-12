@@ -114,6 +114,32 @@ def test_unknown_memo_is_none(repo):
     assert repo.memos() == []
 
 
+def test_deleting_a_memo_takes_its_transcript_speakers_and_notes_with_it(repo):
+    # nothing deletes the child rows itself; the cascade in the schema is the
+    # only thing keeping them from outliving the memo they belong to
+    memo_id = make_memo(
+        repo, segments=[Segment(0, 1000, "Hello", speaker="S1")], speakers=[Speaker("S1", "Alice")]
+    )
+    repo.save_extraction(memo_id, "claude", {"title": "Sprint sync"})
+    kept = make_memo(repo, segments=[Segment(0, 1000, "Still here")], filename="other.m4a")
+
+    repo.delete_memo(memo_id)
+
+    assert repo.memo(memo_id) is None
+    assert repo.segments(memo_id) == []
+    assert repo.display_names(memo_id) == {}
+    assert repo.extraction(memo_id) is None
+    assert [m.id for m in repo.memos()] == [kept]
+
+
+def test_a_memo_can_be_given_a_different_name(repo):
+    memo_id = make_memo(repo)
+
+    repo.set_filename(memo_id, "Sprint planning")
+
+    assert repo.memo(memo_id).filename == "Sprint planning"
+
+
 def test_a_repository_knows_which_database_it_opened(tmp_path):
     # work happening off the main thread has to open its own connection to the
     # same file, and it can only do that if the file is still known
@@ -510,6 +536,14 @@ def test_moving_a_memo_marks_when_it_changed(repo):
     memo_id = make_memo(repo)
 
     repo.set_project(memo_id, "work")
+
+    assert repo.memo(memo_id).updated_at is not None
+
+
+def test_renaming_a_memo_marks_when_it_changed(repo):
+    memo_id = make_memo(repo)
+
+    repo.set_filename(memo_id, "Sprint planning")
 
     assert repo.memo(memo_id).updated_at is not None
 
