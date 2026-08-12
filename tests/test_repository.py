@@ -149,6 +149,23 @@ def test_a_repository_knows_which_database_it_opened(tmp_path):
     repo.close()
 
 
+def test_the_data_version_moves_for_another_connections_writes_and_not_its_own(repo):
+    # what a screen watching this number is asking is whether somebody else has
+    # written; its own writes reading as somebody else's would have it redrawing
+    # itself after every keystroke
+    outside = Repository(repo.path)
+    try:
+        before = repo.data_version()
+        make_memo(repo)
+        assert repo.data_version() == before
+
+        make_memo(outside, filename="elsewhere.m4a")
+
+        assert repo.data_version() != before
+    finally:
+        outside.close()
+
+
 def test_a_repository_block_hands_back_the_repository(tmp_path):
     with Repository(tmp_path / "block.db") as repo:
         memo_id = make_memo(repo)

@@ -1424,6 +1424,13 @@ PROJECT_ACTIONS = frozenset({"rename_project", "remove_project"})
 JOB_BAR = 6
 JOB_FRAME = 0.4
 
+# how often the screen looks for writes made outside it — the menu bar recorder
+# runs the pipeline in a process of its own, and a `vtn process` in another
+# terminal writes the same database. Two seconds is short enough that a memo
+# turns up while the person is still expecting it, and the look itself is one
+# read of a number, so nothing is saved by looking less often
+WATCH_INTERVAL = 2.0
+
 
 def _running(doing: str, frame: int) -> str:
     """One frame of what a row shows while it is being worked on: the block a
@@ -1550,6 +1557,13 @@ class MemoApp(App[None]):
         # a way of reading transcripts rather than a property of any one memo:
         # somebody checking a repair pass is checking all of it, memo after memo
         self.raw = False
+        # what the database was numbered at when this screen last took it in,
+        # so a look can tell "another process has written" from "nothing has
+        # happened" without reading a single row. Read before the first draw
+        # rather than after it: a write landing in between then costs one
+        # redundant redraw, where the other order would lose it until the next
+        # write came along
+        self.seen_version = services.data_version(repo)
         # whether a theme change is now the reader's doing and worth storing.
         # Applying the stored theme at start-up moves the same reactive a
         # reader's own pick moves, and writing that back would be the app
@@ -1582,13 +1596,17 @@ class MemoApp(App[None]):
         nothing, which reads as the app being broken. The memo table gets its
         headings once, since only its rows change from here on, each column
         keyed by what it is called so that a single cell can be found again by
-        name rather than by counting along the row."""
+        name rather than by counting along the row.
+
+        The timer that follows is what keeps the screen honest about a database
+        it is not the only writer of."""
         self._restore_theme()
         memos = self.query_one("#memos", DataTable)
         for column in services.MEMO_COLUMNS:
             memos.add_column(column, key=column)
         self.load_projects()
         self.query_one("#projects", ListView).focus()
+        self.set_interval(WATCH_INTERVAL, self._take_in_outside_writes)
 
     def _restore_theme(self) -> None:
         """Opens in the theme last picked, and in Textual's own default when
@@ -1608,6 +1626,20 @@ class MemoApp(App[None]):
         if self._theme_restored:
             services.config_set("tui_theme", theme_name)
 
+    def _cursor_key(self) -> str | None:
+        """What the row under the memo list's cursor is keyed by — a memo id, or
+        the path a recording is still arriving from — and nothing at all when the
+        cursor is resting on no row, as it does over an empty list."""
+        # checked while the screen is still being built, before there is a table
+        table = self.query("#memos")
+        if not table:
+            return None
+        memos = table.first(DataTable)
+        rows = memos.ordered_rows
+        if not 0 <= memos.cursor_row < len(rows):
+            return None
+        return str(rows[memos.cursor_row].key.value)
+
     def _target_memo(self) -> int | None:
         """The memo a memo key acts on: the one open below the list when there
         is one, and otherwise the row the list cursor is resting on. Pointing at
@@ -1619,16 +1651,11 @@ class MemoApp(App[None]):
         it is arriving from rather than by a memo id it does not have yet."""
         if self.memo_id is not None:
             return self.memo_id
-        # checked while the screen is still being built, before there is a table
-        table = self.query("#memos")
-        if not table:
-            return None
-        memos = table.first(DataTable)
-        rows = memos.ordered_rows
-        if not 0 <= memos.cursor_row < len(rows):
+        key = self._cursor_key()
+        if key is None:
             return None
         try:
-            return int(str(rows[memos.cursor_row].key.value))
+            return int(key)
         except ValueError:
             return None
 
@@ -1659,12 +1686,25 @@ class MemoApp(App[None]):
         return True
 
     def load_projects(self) -> None:
-        """Draws the sidebar from what is in the database now, counts and all."""
+        """Draws the sidebar from what is in the database now, counts and all,
+        leaving the cursor on the project it was resting on. Every count on it
+        moves whenever anything is stored, here or in another process, and a
+        cursor thrown back to the top by each of those would keep changing which
+        project the project keys act on under the hand pressing them.
+
+        A project that is no longer listed leaves the cursor at the top, which
+        is also where the first draw of the session puts it: a sidebar
+        highlighting nothing makes the session's first Enter do nothing, which
+        reads as the app being broken."""
         sidebar = self.query_one("#projects", ListView)
+        resting = sidebar.highlighted_child
+        was_on = resting.name if resting else None
+        listed = services.projects(self.repo)
         sidebar.clear()
-        for name, count in services.projects(self.repo):
+        for name, count in listed:
             sidebar.append(ListItem(Label(f"{name} ({count})"), name=name))
-        sidebar.index = 0
+        names = [name for name, _count in listed]
+        sidebar.index = names.index(was_on) if was_on in names else 0
 
     def _list_memos(self, rows: list[services.MemoRow]) -> None:
         """Draws the memo table from one listing, keying every row by the id of
@@ -1728,6 +1768,46 @@ class MemoApp(App[None]):
             self.show_tagged(self.tag)
         elif self.project is not None:
             self.show_project(self.project)
+
+    def _relist_in_place(self) -> None:
+        """Redraws the listing without moving what the reader is pointing at, as
+        a redraw nobody asked for has to: the cursor goes back on the row it was
+        resting on, found again by its key, since a memo arriving at the top of
+        the list slides every row below it down one and a cursor left at its own
+        position would come to rest on some other memo. A row that is no longer
+        listed leaves the cursor wherever the table puts it."""
+        memos = self.query_one("#memos", DataTable)
+        was_on = self._cursor_key()
+        self._relist()
+        if was_on is not None and was_on in memos.rows:
+            memos.move_cursor(row=memos.get_row_index(was_on))
+
+    def _take_in_outside_writes(self) -> None:
+        """Draws what some other process has written since the last look. The
+        recorder runs the pipeline in a process of its own, so a memo can be
+        stored while this screen sits idle, and a screen that only redraws on
+        its own keystrokes goes on denying that memo exists until somebody
+        restarts it.
+
+        Nothing at all when nothing has been written, which is nearly every
+        look: reading the listing back each time to compare it would mean a
+        query every couple of seconds for the length of a session.
+
+        Nothing either while a dialog is up, while a job is running, or while a
+        recording is coming in. A list rebuilt under a dialog moves the thing
+        the dialog is asking about, and the rows standing in for recordings
+        being brought in exist on this screen alone, so a rebuild from the
+        database would take them away mid-import. What was written is not lost
+        by waiting: the version is left unread, and each of those states redraws
+        as it ends anyway."""
+        if len(self.screen_stack) > 1 or self.jobs or self.importing:
+            return
+        version = services.data_version(self.repo)
+        if version == self.seen_version:
+            return
+        self.seen_version = version
+        self.load_projects()
+        self._relist_in_place()
 
     def _listed(self, memo_id: int) -> bool:
         """Whether a memo is among the rows the table is showing."""

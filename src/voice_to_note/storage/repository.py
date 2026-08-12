@@ -144,6 +144,19 @@ class Repository:
         self.close()
         return False
 
+    def data_version(self) -> int:
+        """A number sqlite moves whenever some *other* connection commits to
+        this database, and leaves alone however much this one writes. A screen
+        holding a connection open all day has no other way of learning that the
+        recorder wrote a memo from a process of its own; comparing this against
+        what it last saw answers that in one read, where the alternative is
+        re-reading every listing on a timer to see whether anything moved.
+
+        Only the movement means anything. Two connections to the same file
+        start from different numbers, so this is worth comparing against
+        earlier readings of this same connection and nothing else."""
+        return int(self.con.execute("PRAGMA data_version").fetchone()[0])
+
     # --- memos ---------------------------------------------------------
 
     def create_memo(

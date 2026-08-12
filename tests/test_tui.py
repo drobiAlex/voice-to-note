@@ -26,6 +26,7 @@ from textual.widgets import (
 from voice_to_note import config, services
 from voice_to_note.domain import Segment, Speaker
 from voice_to_note.gateways import GatewayError
+from voice_to_note.storage.repository import Repository
 from voice_to_note.tui import app as tui_app
 from voice_to_note.tui.app import MemoApp
 
@@ -3652,3 +3653,71 @@ async def test_a_memo_that_committed_to_nothing_says_so_on_its_own_board(repo):
         await pilot.press("escape")
         await pilot.pause()
         assert not showing(pilot.app, "#no-todos")
+
+
+# --- taking in what another process wrote ----------------------------------
+
+
+def stored_elsewhere(repo, filename: str, project: str) -> int:
+    """A memo written through a second connection to the same database, which
+    is all the screen ever sees of the recorder storing one from a process of
+    its own."""
+    outside = Repository(repo.path)
+    try:
+        return outside.create_memo(
+            filename=filename, wav_path=f"/tmp/{filename}.wav", duration_s=1.0,
+            language="en", segments=[Segment(0, 1000, "said elsewhere", speaker="S1")],
+            speakers=[Speaker("S1")], project=project,
+        )
+    finally:
+        outside.close()
+
+
+@pytest.mark.asyncio
+async def test_a_memo_another_process_stored_turns_up_without_a_keypress(repo, monkeypatch):
+    # nobody is going to restart the screen to find out that the recording they
+    # just made off the menu bar has finished going through the pipeline
+    seed(repo)
+    monkeypatch.setattr(tui_app, "WATCH_INTERVAL", 0.05)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        assert memo_names(pilot.app) == ["standup.m4a"]
+
+        stored_elsewhere(repo, "retro.m4a", "work")
+        await pilot.pause(0.3)
+
+        assert memo_names(pilot.app) == ["retro.m4a", "standup.m4a"]
+        assert labels(pilot.app.query_one("#projects", ListView)) == [
+            "personal (1)",
+            "work (2)",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_taking_in_an_outside_write_leaves_the_reader_where_they_were(repo):
+    # a memo arriving at the top of the list slides every row below it down one,
+    # and a refresh nobody asked for that carried the cursor along with it would
+    # leave the next keypress acting on a memo nobody pointed at
+    work, _home = seed(repo)
+    stored_elsewhere(repo, "retro.m4a", "work")
+
+    async with MemoApp(repo).run_test() as pilot:
+        sidebar = pilot.app.query_one("#projects", ListView)
+        sidebar.index = 1  # work, the project being browsed
+        pilot.app.show_project("work")
+        await pilot.pause()
+        table = memo_table(pilot.app)
+        table.focus()
+        table.move_cursor(row=table.get_row_index(str(work)))
+        await pilot.pause()
+
+        stored_elsewhere(repo, "planning.m4a", "work")
+        pilot.app._take_in_outside_writes()
+        await pilot.pause()
+
+        assert memo_names(pilot.app) == ["planning.m4a", "retro.m4a", "standup.m4a"]
+        assert memo_rows(pilot.app)[table.cursor_row][0] == "standup.m4a"
+        assert sidebar.index == 1
+        assert pilot.app.focused is table

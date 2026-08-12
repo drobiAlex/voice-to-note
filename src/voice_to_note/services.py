@@ -1077,6 +1077,13 @@ def projects(repo: Repository) -> list[tuple[str, int]]:
     return repo.projects()
 
 
+def data_version(repo: Repository) -> int:
+    """What this connection's view of the stored data is numbered at, for a
+    screen that has to notice writes made outside it. Meaningful only as a
+    change against an earlier reading through the same repository."""
+    return repo.data_version()
+
+
 def memos(
     repo: Repository, project: str | None = None, tag: str | None = None
 ) -> list[Memo]:
