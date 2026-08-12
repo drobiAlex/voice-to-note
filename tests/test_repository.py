@@ -693,3 +693,84 @@ def test_a_listing_costs_one_query_however_many_memos_it_carries(repo):
     repo.con.set_trace_callback(None)
     assert len(listed) == 4
     assert len(statements) == 1
+
+
+# --- what a memo committed to ---------------------------------------------
+
+
+def action(task: str, owner: str | None = None, deadline: str | None = None) -> dict:
+    """One action item the way an extraction states it."""
+    return {"task": task, "owner": owner, "deadline": deadline}
+
+
+def test_an_extraction_leaves_its_action_items_on_the_memo_as_to_dos(repo):
+    memo_id = make_memo(repo)
+
+    repo.sync_todos(memo_id, [action("Cut the release", "Alice", "Friday")])
+
+    (todo,) = repo.todos()
+    assert (todo.memo_id, todo.text, todo.owner, todo.deadline) == (
+        memo_id,
+        "Cut the release",
+        "Alice",
+        "Friday",
+    )
+    assert (todo.status, todo.project) == ("open", "other")
+
+
+def test_a_to_do_checked_off_stays_checked_off_when_the_notes_are_extracted_again(repo):
+    memo_id = make_memo(repo)
+    repo.sync_todos(memo_id, [action("Cut the release")])
+    (todo,) = repo.todos()
+    repo.set_todo_status(todo.id, "done")
+
+    repo.sync_todos(memo_id, [action("cut the release.")])
+
+    assert repo.todos() == []
+    (same,) = repo.todos(include_done=True)
+    assert (same.id, same.status) == (todo.id, "done")
+
+
+def test_deleting_a_memo_takes_its_to_dos_with_it(repo):
+    # the cascade in the schema is the only thing keeping them from outliving
+    # the memo that committed to them
+    memo_id = make_memo(repo)
+    repo.sync_todos(memo_id, [action("Cut the release")])
+
+    repo.delete_memo(memo_id)
+
+    assert repo.todos(include_done=True) == []
+
+
+def test_a_database_from_before_to_dos_takes_in_the_notes_it_already_holds(tmp_path):
+    # the table dropped again stands in for a database written before to-dos
+    # were tracked: its extractions are the whole record of what was committed to
+    path = tmp_path / "legacy.db"
+    repo = Repository(path)
+    memo_id = make_memo(repo)
+    repo.save_extraction(
+        memo_id, "claude", {"title": "A", "action_items": [action("Cut the release")]}
+    )
+    # a memo whose notes were extracted before action items were part of them
+    repo.save_extraction(make_memo(repo, filename="notes.m4a"), "claude", {"title": "B"})
+    repo.close()
+    con = sqlite3.connect(path)
+    con.executescript("DROP TABLE todos")
+    con.commit()
+    con.close()
+
+    repo = Repository(path)
+
+    assert [(t.memo_id, t.text) for t in repo.todos()] == [(memo_id, "Cut the release")]
+    repo.close()
+
+
+def test_a_listing_counts_what_is_still_outstanding_on_every_memo(repo):
+    memo_id = make_memo(repo)
+    repo.sync_todos(memo_id, [action("Cut the release"), action("Book the room")])
+    released, _booking = repo.todos()
+    repo.set_todo_status(released.id, "done")
+
+    (listing,) = repo.memo_listings()
+
+    assert listing.open_todos == 1

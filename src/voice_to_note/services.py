@@ -904,7 +904,12 @@ def run_extraction(
     hand is left alone unless the caller says outright to overwrite: an
     afternoon of editing must not go under a rerun. The template name is
     checked before anything else, so a typo is caught before the transcript is
-    even fetched, let alone sent to a backend."""
+    even fetched, let alone sent to a backend.
+
+    What the notes commit somebody to is taken into the memo's to-do list as
+    part of the same run: the list is what gets checked off and counted, and an
+    extraction that did not feed it would leave the two disagreeing about what
+    this memo said had to be done."""
     note_template(template)
     if not force and repo.notes_md(memo_id):
         raise InvalidInput(
@@ -919,6 +924,7 @@ def run_extraction(
         unavailable="no extraction backend",
     )
     repo.save_extraction(memo_id, backend, data, clear_edited=force)
+    repo.sync_todos(memo_id, data["action_items"])
     return backend
 
 
@@ -1067,7 +1073,7 @@ def memos(
 # what a table of memos puts beside each name, in the order a reader scans it.
 # The screen takes its headings from here rather than naming them itself, so the
 # columns and the values under them cannot come to disagree.
-MEMO_COLUMNS = ("name", "duration", "speakers", "status", "created", "updated")
+MEMO_COLUMNS = ("name", "duration", "speakers", "todos", "status", "created", "updated")
 
 
 @dataclass(frozen=True)
@@ -1079,6 +1085,7 @@ class MemoRow:
     name: str
     duration: str
     speakers: str
+    todos: str
     status: str
     created: str
     updated: str
@@ -1106,6 +1113,7 @@ def memo_rows(
             name=listed.memo.filename,
             duration=_duration(listed.memo.duration_s),
             speakers=str(listed.speakers),
+            todos=str(listed.open_todos),
             status=_status(listed.memo.status, listed.refined, listed.edited),
             created=listed.memo.created_at,
             updated=listed.memo.updated_at or listed.memo.created_at,
@@ -1281,6 +1289,34 @@ def remove_project(repo: Repository, name: str) -> int:
     if not moved:
         raise NotFound(f"no project {name}")
     return moved
+
+
+def todos_text(
+    repo: Repository, project: str | None = None, *, include_done: bool = False
+) -> str:
+    """The to-do list as a person reads it: a box saying whether it is done, the
+    task, who owns it and when it is due, and the memo it was committed in —
+    column-aligned so they line up down the screen. One project at a time when
+    asked for, and the finished ones left out unless asked for. Empty when
+    nothing is outstanding, and equally empty when nothing is stored at all."""
+    listed = repo.todos(project, include_done=include_done)
+    task_w = max((len(t.text) for t in listed), default=0)
+    owner_w = max((len(t.owner) for t in listed), default=0)
+    deadline_w = max((len(t.deadline) for t in listed), default=0)
+    return "\n".join(
+        f"{t.id:>4}  {'[x]' if t.status == 'done' else '[ ]'}  {t.text:<{task_w}}"
+        f"  {t.owner:<{owner_w}}  {t.deadline:<{deadline_w}}"
+        f"  memo {t.memo_id} ({t.project})"
+        for t in listed
+    )
+
+
+def set_todo_status(repo: Repository, todo_id: int, status: str) -> None:
+    """Checks a to-do off, or puts it back on the list. An id nothing was stored
+    under is refused rather than passing quietly: a mistyped number must not
+    read back as work marked done."""
+    if not repo.set_todo_status(todo_id, status):
+        raise NotFound(f"no to-do with id {todo_id}")
 
 
 def rename_speaker(repo: Repository, memo_id: int, label: str, name: str) -> None:

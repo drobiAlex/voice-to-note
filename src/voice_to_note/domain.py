@@ -101,6 +101,23 @@ class MemoListing:
     speakers: int
     refined: bool
     edited: bool
+    open_todos: int
+
+
+@dataclass(frozen=True)
+class Todo:
+    """One thing a memo committed somebody to, tracked past the extraction that
+    found it so that checking it off means something. The project is the memo's
+    own rather than the to-do's: a memo filed elsewhere takes everything it
+    committed to along with it."""
+
+    id: int
+    memo_id: int
+    text: str
+    owner: str
+    deadline: str
+    status: str
+    project: str
 
 
 @dataclass(frozen=True)

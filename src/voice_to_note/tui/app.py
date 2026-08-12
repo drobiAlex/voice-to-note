@@ -1332,6 +1332,7 @@ class MemoApp(App[None]):
                 row.name,
                 row.duration,
                 row.speakers,
+                row.todos,
                 row.status,
                 row.created,
                 row.updated,
@@ -1350,7 +1351,7 @@ class MemoApp(App[None]):
         name and its stage bar is blank, because nothing else about it is known
         until the pipeline has read it."""
         self.query_one("#memos", DataTable).add_row(
-            Path(key).name, "", "", "", "", "", key=key
+            Path(key).name, "", "", "", "", "", "", key=key
         )
 
     def _draw_importing(self) -> None:

@@ -7,7 +7,17 @@ from typing import Literal, cast
 import numpy as np
 
 from .. import config
-from ..domain import Extraction, Memo, MemoListing, NotesPayload, Segment, Speaker
+from ..domain import (
+    ActionItem,
+    Extraction,
+    Memo,
+    MemoListing,
+    NotesPayload,
+    Segment,
+    Speaker,
+    Todo,
+)
+from ..transforms.todos import StoredTodo, reconcile, todo_items
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS memos (
@@ -45,6 +55,18 @@ CREATE TABLE IF NOT EXISTS speakers (
   name TEXT,
   UNIQUE(memo_id, label)
 );
+CREATE TABLE IF NOT EXISTS todos (
+  id INTEGER PRIMARY KEY,
+  memo_id INTEGER NOT NULL REFERENCES memos(id) ON DELETE CASCADE,
+  text TEXT NOT NULL,
+  norm TEXT NOT NULL,
+  owner TEXT NOT NULL DEFAULT '',
+  deadline TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','done')),
+  done_at TEXT,
+  touched INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 MEMO_COLUMNS = (
@@ -66,8 +88,24 @@ class Repository:
         self.con.row_factory = sqlite3.Row
         self.con.execute("PRAGMA journal_mode=WAL")
         self.con.execute("PRAGMA foreign_keys=ON")
+        # asked before the schema script runs, since that script is what creates
+        # the table: a database written before to-dos were tracked has every
+        # extraction it already holds still to be taken in
+        first_todos = not self._table_exists("todos")
         self.con.executescript(SCHEMA)
         self._migrate()
+        if first_todos:
+            self._backfill_todos()
+
+    def _table_exists(self, name: str) -> bool:
+        """Whether this database already carries a table, for a migration that
+        adds a whole one rather than a column."""
+        return (
+            self.con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+            ).fetchone()
+            is not None
+        )
 
     def _migrate(self) -> None:
         """Brings an older database up to the current shape, a column at a time:
@@ -173,16 +211,22 @@ class Repository:
         self, project: str | None = None, tag: str | None = None
     ) -> list[MemoListing]:
         """Every memo a list shows, narrowed the same ways as `memos`, each one
-        carrying how many voices are in it and whether its transcript has been
-        repaired or its notes written by hand.
+        carrying how many voices are in it, how much of what it committed to is
+        still outstanding, and whether its transcript has been repaired or its
+        notes written by hand.
 
         One statement however many memos come back: a screen draws the whole
         list at once and redraws it after every job, so counting each row's
-        speakers and repairs on its own would cost a query per row on screen."""
+        speakers, to-dos and repairs on its own would cost a query per row on
+        screen."""
         tail, params = self._narrowed(project, tag)
         rows = self.con.execute(
             f"SELECT {MEMO_COLUMNS},"
             " (SELECT count(*) FROM speakers s WHERE s.memo_id=memos.id) AS speakers,"
+            # what is left to do, not what was ever committed to: a memo whose
+            # tasks are all checked off reads as finished, like one with none
+            " (SELECT count(*) FROM todos t WHERE t.memo_id=memos.id"
+            "  AND t.status='open') AS open_todos,"
             " EXISTS(SELECT 1 FROM segments g WHERE g.memo_id=memos.id"
             "  AND g.refined_text IS NOT NULL) AS refined,"
             # an emptied note is no more a hand-written one than a missing note
@@ -191,7 +235,13 @@ class Repository:
             params,
         )
         return [
-            MemoListing(_memo(r), r["speakers"], bool(r["refined"]), bool(r["edited"]))
+            MemoListing(
+                _memo(r),
+                r["speakers"],
+                bool(r["refined"]),
+                bool(r["edited"]),
+                r["open_todos"],
+            )
             for r in rows
         ]
 
@@ -269,8 +319,8 @@ class Repository:
 
     def delete_memo(self, memo_id: int) -> None:
         """Removes a memo and everything stored under it. One statement is the
-        whole deletion: segments, extractions and speakers all reference the
-        memo with ON DELETE CASCADE, so sqlite carries them off with the row
+        whole deletion: segments, extractions, speakers and to-dos all reference
+        the memo with ON DELETE CASCADE, so sqlite carries them off with the row
         and no child table can be left holding rows nothing points at."""
         with self.con:
             self.con.execute("DELETE FROM memos WHERE id=?", (memo_id,))
@@ -417,6 +467,130 @@ class Repository:
         # only parse_notes writes here, so the stored JSON already passed its check
         data = cast(NotesPayload, json.loads(row["json"]))
         return Extraction(row["backend"], data, row["created_at"])
+
+    # --- to-dos ----------------------------------------------------------
+
+    def sync_todos(self, memo_id: int, action_items: Sequence[ActionItem]) -> None:
+        """Brings a memo's to-do list into line with the notes just extracted,
+        keeping whatever the user has already made of it. The extraction's own
+        write is what stamps the memo as changed, so nothing here does it
+        again."""
+        with self.con:
+            self._ingest_todos(memo_id, action_items)
+
+    def _ingest_todos(self, memo_id: int, action_items: Sequence[ActionItem]) -> None:
+        """One memo's reconciling, planned and then applied. Kept apart from the
+        transaction around it so that filling a whole database in from the
+        extractions it already holds is one transaction rather than one per
+        memo."""
+        plan = reconcile(
+            todo_items(action_items),
+            self._stored_todos(memo_id),
+            self._open_in_project(memo_id),
+        )
+        self.con.executemany(
+            "DELETE FROM todos WHERE id=?", [(todo_id,) for todo_id in plan.delete]
+        )
+        self.con.executemany(
+            "UPDATE todos SET text=?, owner=?, deadline=? WHERE id=?",
+            [(i.text, i.owner, i.deadline, todo_id) for todo_id, i in plan.refresh],
+        )
+        self.con.executemany(
+            "INSERT INTO todos (memo_id, text, norm, owner, deadline) VALUES (?,?,?,?,?)",
+            [(memo_id, i.text, i.norm, i.owner, i.deadline) for i in plan.insert],
+        )
+
+    def _stored_todos(self, memo_id: int) -> list[StoredTodo]:
+        """What a memo's to-do list already holds, as planning reads it."""
+        return [
+            StoredTodo(r["id"], r["norm"], bool(r["touched"]))
+            for r in self.con.execute(
+                "SELECT id, norm, touched FROM todos WHERE memo_id=?", (memo_id,)
+            )
+        ]
+
+    def _open_in_project(self, memo_id: int) -> set[str]:
+        """What is still outstanding elsewhere in this memo's project, by the key
+        to-dos are matched on. A project is a value on the memo rather than on
+        the to-do, so the memos are what this reads it through — and a memo moved
+        to another project takes its to-dos into that project's reckoning."""
+        return {
+            r["norm"]
+            for r in self.con.execute(
+                "SELECT t.norm FROM todos t JOIN memos m ON m.id=t.memo_id"
+                " WHERE t.status='open' AND t.memo_id<>?"
+                " AND m.project=(SELECT project FROM memos WHERE id=?)",
+                (memo_id, memo_id),
+            )
+        }
+
+    def _backfill_todos(self) -> None:
+        """Takes every extraction already stored through the same reconciling a
+        fresh one goes through, so a database written before to-dos were tracked
+        arrives holding the list its notes always implied. Memos are read in the
+        order they were recorded, so which memo in a project keeps a task
+        repeated across several of them is decided by which came first rather
+        than by the order sqlite happened to hand the rows back."""
+        with self.con:
+            for row in self.con.execute(
+                "SELECT memo_id, json FROM extractions ORDER BY memo_id"
+            ):
+                data = json.loads(row["json"])
+                # a stored extraction is whatever a backend produced, and the
+                # earliest of them predate action items being part of that
+                self._ingest_todos(row["memo_id"], data.get("action_items") or [])
+
+    def set_todo_status(self, todo_id: int, status: str) -> bool:
+        """Checks a to-do off or puts it back, reporting whether that id was
+        there to change. Either way the row is marked touched: a person's own
+        say-so about a task has to outlive the next extraction, which would
+        otherwise reword it or drop it as noise."""
+        row = self.con.execute(
+            "SELECT memo_id FROM todos WHERE id=?", (todo_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        with self.con:
+            self.con.execute(
+                "UPDATE todos SET status=?,"
+                " done_at=CASE ? WHEN 'done' THEN datetime('now') END,"
+                " touched=1 WHERE id=?",
+                (status, status, todo_id),
+            )
+            # what a list says about the memo changes with this, so the memo has
+            # changed as a reader of it sees it
+            self._touch(row["memo_id"])
+        return True
+
+    def todos(self, project: str | None = None, *, include_done: bool = False) -> list[Todo]:
+        """The to-dos memos have committed to, open ones only unless the caller
+        asks for the finished ones too, and narrowed to one project when asked.
+        Grouped by the memo they came out of and in the order they were found in
+        it, which is the order they were said in."""
+        where = ["t.status='open'"] if not include_done else []
+        params: list = []
+        if project is not None:
+            where.append("m.project=?")
+            params.append(project)
+        clause = " WHERE " + " AND ".join(where) if where else ""
+        return [
+            Todo(
+                r["id"],
+                r["memo_id"],
+                r["text"],
+                r["owner"],
+                r["deadline"],
+                r["status"],
+                r["project"],
+            )
+            for r in self.con.execute(
+                "SELECT t.id, t.memo_id, t.text, t.owner, t.deadline, t.status, m.project"
+                " FROM todos t JOIN memos m ON m.id=t.memo_id"
+                + clause
+                + " ORDER BY t.memo_id, t.id",
+                tuple(params),
+            )
+        ]
 
 
 def _memo(row: sqlite3.Row) -> Memo:

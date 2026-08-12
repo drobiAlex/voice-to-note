@@ -1194,10 +1194,11 @@ def test_the_memo_table_puts_a_memos_state_in_columns_beside_its_name(repo, wav)
     (row,) = services.memo_rows(repo)
 
     assert services.MEMO_COLUMNS == (
-        "name", "duration", "speakers", "status", "created", "updated",
+        "name", "duration", "speakers", "todos", "status", "created", "updated",
     )
     assert row.id == memo_id
     assert (row.name, row.duration, row.speakers) == ("standup.m4a", "1m 15s", "2")
+    assert row.todos == "0"
     assert row.status == "transcribed"
     assert row.created != ""
     assert row.updated == row.created
@@ -1993,3 +1994,42 @@ def test_durations_read_like_a_person_says_them():
     assert services._duration(3600) == "1h"
     assert services._duration(3661) == "1h 1m 1s"
     assert services._duration(90061) == "1d 1h 1m 1s"
+
+
+# --- what a memo committed to ---------------------------------------------
+
+
+COMMITTED = NOTES | {
+    "action_items": [{"task": "Cut the release", "owner": "Alice", "deadline": "Friday"}]
+}
+
+
+def test_extracting_notes_leaves_the_memo_with_the_to_dos_they_commit_to(
+    repo, wav, monkeypatch
+):
+    # the list is what gets checked off and counted; notes alone are only text
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Ship it", speaker="S1")])
+    fake_llm(monkeypatch, claude=json.dumps(COMMITTED))
+
+    services.run_extraction(repo, memo_id)
+
+    (todo,) = repo.todos()
+    assert (todo.text, todo.owner, todo.deadline) == ("Cut the release", "Alice", "Friday")
+
+
+def test_a_to_do_already_checked_off_survives_the_next_extraction(repo, wav, monkeypatch):
+    # a rerun that reopened it would ask for work somebody has already done
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Ship it", speaker="S1")])
+    fake_llm(monkeypatch, claude=json.dumps(COMMITTED))
+    services.run_extraction(repo, memo_id)
+    (todo,) = repo.todos()
+    services.set_todo_status(repo, todo.id, "done")
+
+    services.run_extraction(repo, memo_id)
+
+    assert [t.status for t in repo.todos(include_done=True)] == ["done"]
+
+
+def test_checking_off_a_to_do_nobody_stored_is_refused(repo):
+    with pytest.raises(services.NotFound):
+        services.set_todo_status(repo, 999, "done")

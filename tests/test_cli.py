@@ -7,6 +7,7 @@ from conftest import StubRepo
 
 from voice_to_note import cli, services
 from voice_to_note.domain import Memo, Segment, Speaker
+from voice_to_note.storage.repository import Repository
 
 
 def add_memo(
@@ -885,3 +886,42 @@ def test_naming_a_speaker_nothing_ends_the_command_with_a_message(monkeypatch, c
         run(monkeypatch, StubRepo(), "rename", "3", "S1", "")
 
     assert err.value.code == "a speaker needs a name"
+
+
+# --- the to-do list ------------------------------------------------------
+
+
+def test_the_to_do_list_prints_what_is_still_outstanding(repo, monkeypatch, capsys):
+    memo_id = add_memo(repo)
+    repo.sync_todos(
+        memo_id, [{"task": "Cut the release", "owner": "Alice", "deadline": "Friday"}]
+    )
+    (todo,) = repo.todos()
+
+    run(monkeypatch, repo, "todos")
+
+    assert capsys.readouterr().out == (
+        f"{todo.id:>4}  [ ]  Cut the release  Alice  Friday  memo {memo_id} (other)\n"
+    )
+
+
+def test_nothing_left_to_do_says_so_without_polluting_stdout(repo, monkeypatch, capsys):
+    run(monkeypatch, repo, "todos")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "no to-dos\n"
+
+
+def test_checking_a_to_do_off_says_so_and_takes_it_off_the_list(repo, monkeypatch, capsys):
+    memo_id = add_memo(repo)
+    repo.sync_todos(memo_id, [{"task": "Cut the release", "owner": None, "deadline": None}])
+    (todo,) = repo.todos()
+
+    run(monkeypatch, repo, "todo", "done", str(todo.id))
+
+    assert capsys.readouterr().err == f"to-do {todo.id} done\n"
+    # the command closed the database it was handed, as every command does
+    with Repository(repo.path) as reopened:
+        assert reopened.todos() == []
+        assert [t.status for t in reopened.todos(include_done=True)] == ["done"]

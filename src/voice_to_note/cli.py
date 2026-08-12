@@ -184,6 +184,30 @@ def cmd_list(args: argparse.Namespace) -> None:
             status("no memos yet")
 
 
+def cmd_todos(args: argparse.Namespace) -> None:
+    """Shows what the memos have committed to and nobody has done yet."""
+    with Repository() as repo:
+        listing = services.todos_text(repo, project=args.project, include_done=args.all)
+        if listing:
+            print(listing)
+        else:
+            status("no to-dos")
+
+
+def cmd_todo_done(args: argparse.Namespace) -> None:
+    """Checks a to-do off."""
+    with Repository() as repo:
+        services.set_todo_status(repo, args.id, "done")
+    status(f"to-do {args.id} done")
+
+
+def cmd_todo_open(args: argparse.Namespace) -> None:
+    """Puts a to-do back on the list, for one checked off too soon."""
+    with Repository() as repo:
+        services.set_todo_status(repo, args.id, "open")
+    status(f"to-do {args.id} back on the list")
+
+
 def cmd_move(args: argparse.Namespace) -> None:
     """Files a memo under a different project."""
     with Repository() as repo:
@@ -442,6 +466,22 @@ def main() -> None:
     sp.add_argument("--tag", help="only the memos whose notes carry this tag")
     sp.set_defaults(fn=cmd_list)
 
+    sp = sub.add_parser("todos", help="list what the memos committed to")
+    sp.add_argument("--project", help="only the to-dos of memos filed under this project")
+    sp.add_argument("--all", action="store_true", help="include the ones already done")
+    sp.set_defaults(fn=cmd_todos)
+
+    sp = sub.add_parser("todo", help="check a to-do off or put it back: todo done|open <id>")
+    todo_sub = sp.add_subparsers(dest="todo_cmd", required=True)
+
+    tsp = todo_sub.add_parser("done", help="check a to-do off: todo done <id>")
+    tsp.add_argument("id", type=int)
+    tsp.set_defaults(fn=cmd_todo_done)
+
+    tsp = todo_sub.add_parser("open", help="put a to-do back on the list: todo open <id>")
+    tsp.add_argument("id", type=int)
+    tsp.set_defaults(fn=cmd_todo_open)
+
     sp = sub.add_parser("move", help="file a memo under a project: move <id> <project>")
     sp.add_argument("id", type=int)
     sp.add_argument("project")
@@ -456,9 +496,9 @@ def main() -> None:
     sp.add_argument("id", type=int)
     sp.set_defaults(fn=cmd_info)
 
-    # the one nested command in an otherwise flat set of verbs: a top-level
-    # `rename` already names a speaker, and hyphenating would put two more verbs
-    # in a list that is long enough to read through already
+    # nested rather than flat, like `todo`: a top-level `rename` already names a
+    # speaker, and hyphenating would put two more verbs in a list that is long
+    # enough to read through already
     sp = sub.add_parser("project", help="rename or empty a project")
     project_sub = sp.add_subparsers(dest="project_cmd", required=True)
 
