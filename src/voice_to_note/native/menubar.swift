@@ -54,12 +54,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     )
     private lazy var logURL = vtnHome().appendingPathComponent("menubar.log")
 
-    private var state = RecorderState.idle
+    /// The pulse belongs to one state and must not outlive it: a timer left
+    /// running would go on redrawing a button that has moved on to saying
+    /// something else entirely. Hanging it off the state itself is what makes
+    /// every way out of processing — finished, failed, quit — stop it too.
+    private var state = RecorderState.idle {
+        didSet {
+            if state == .processing {
+                startPulsing()
+            } else {
+                stopPulsing()
+            }
+        }
+    }
     private var recorder: Process?
     private var errors: Pipe?
     private var unread = ""
     private var startedAt: Date?
     private var ticker: Timer?
+    private var pulse: Timer?
+    private var pulseFrame = 0
     private var mayNotify = false
     private var logFile: FileHandle?
     private var projects: [(name: String, count: Int)]?
@@ -84,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// no reason to hold a quit. Stopping the tape first is what makes the
     /// meeting up to this point a memo instead of two half-written files.
     func applicationWillTerminate(_ notification: Notification) {
+        stopPulsing()
         if let recorder, recorder.isRunning, state == .starting || state == .recording {
             recorder.interrupt()
         }
@@ -98,34 +113,99 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let button = statusItem.button else { return }
         switch state {
         case .idle:
-            button.image = template("record.circle", "Not recording")
+            button.image = Mark.idle
             button.attributedTitle = NSAttributedString(string: "")
         case .starting:
-            button.image = template("record.circle", "Starting to record")
+            button.image = Mark.starting
             button.attributedTitle = label("…")
         case .recording:
-            button.image = redDot()
+            button.image = Mark.recording
             button.attributedTitle = label(elapsed())
         case .processing:
-            button.image = template("waveform", "Making notes from the meeting")
+            button.image = Mark.working[pulseFrame]
             button.attributedTitle = NSAttributedString(string: "")
         }
     }
 
-    private func template(_ symbol: String, _ description: String) -> NSImage? {
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)
-        image?.isTemplate = true
-        return image
-    }
+    /// The mark this app is known by in the menu bar, drawn here rather than
+    /// borrowed from SF Symbols: `waveform` is symmetric and already stands for
+    /// a dozen other audio apps, and the one job this glyph has is being picked
+    /// out of a crowded menu bar without being read. So it is five bars of
+    /// deliberately uneven height, and the shape never changes between states —
+    /// only its colour, and a slow shuffle while notes are being made. What is
+    /// in the corner of the screen stays the same thing all the way through a
+    /// meeting; what it is doing is told by how it is inked.
+    ///
+    /// Each image is built once and kept. A status item redraws its button on
+    /// every appearance change and once a second while a recording is running,
+    /// and none of that should cost a fresh bitmap.
+    private enum Mark {
+        /// A status item scales its image to the height of the menu bar, and
+        /// 18pt square is the size that arrives there unscaled — anything else
+        /// is resampled, which is exactly what a shape made of nothing but
+        /// straight edges cannot survive.
+        private static let side: CGFloat = 18
+        private static let barWidth: CGFloat = 2
+        private static let gap: CGFloat = 1.5
 
-    /// The one thing on screen saying a meeting is being taped, so it keeps its
-    /// colour instead of being tinted to match the menu bar the way every other
-    /// icon here is.
-    private func redDot() -> NSImage? {
-        let image = NSImage(systemSymbolName: "record.circle.fill", accessibilityDescription: "Recording")?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(hierarchicalColor: .systemRed))
-        image?.isTemplate = false
-        return image
+        /// ▁▃█▅▂ — low, mid, tall, high, low. Even numbers only: the bars are
+        /// centred vertically, so an odd height would put both ends of every
+        /// bar on a half point, and a half-point edge is a grey smear rather
+        /// than a line on a display that is not retina.
+        private static let resting: [CGFloat] = [4, 8, 14, 10, 6]
+
+        /// The same five bars with the flanks traded and the tall one held
+        /// where it is. Two frames of this is the whole processing animation:
+        /// the mark leans rather than spins or blinks, because something
+        /// flashing in the menu bar reads as a thing gone wrong rather than a
+        /// thing under way. Pinning the tall bar is what keeps the two frames
+        /// one mark swaying instead of two different marks alternating.
+        private static let leaning: [CGFloat] = [6, 10, 14, 8, 4]
+
+        static let idle = draw(resting, .black, template: true, "Not recording")
+
+        /// Half-inked, because the tape is not rolling yet. A template image is
+        /// tinted through its own alpha, so drawing the mark faint is all it
+        /// takes to have the menu bar show it faint in either appearance.
+        static let starting = draw(
+            resting, NSColor.black.withAlphaComponent(0.5), template: true, "Starting to record"
+        )
+
+        /// The one thing on screen saying a meeting is being taped, so it keeps
+        /// its own colour instead of being tinted to match the menu bar the way
+        /// everything else here is. Red is not decoration: it is the colour
+        /// macOS itself uses for a live capture, and borrowing it means this
+        /// needs no learning.
+        static let recording = draw(resting, .systemRed, template: false, "Recording")
+
+        static let working = [
+            draw(resting, .black, template: true, "Making notes from the meeting"),
+            draw(leaning, .black, template: true, "Making notes from the meeting"),
+        ]
+
+        /// One frame of the mark: bars of the given heights, rounded at both
+        /// ends, laid out from a left edge that centres the whole run inside
+        /// the square, so every frame sits in exactly the same place and the
+        /// animation is the bars moving rather than the mark shifting sideways.
+        private static func draw(
+            _ heights: [CGFloat], _ ink: NSColor, template: Bool, _ description: String
+        ) -> NSImage {
+            let run = CGFloat(heights.count) * barWidth + CGFloat(heights.count - 1) * gap
+            let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
+                ink.set()
+                var x = (side - run) / 2
+                for height in heights {
+                    let bar = NSRect(x: x, y: (side - height) / 2, width: barWidth, height: height)
+                    let cap = barWidth / 2
+                    NSBezierPath(roundedRect: bar, xRadius: cap, yRadius: cap).fill()
+                    x += barWidth + gap
+                }
+                return true
+            }
+            image.isTemplate = template
+            image.accessibilityDescription = description
+            return image
+        }
     }
 
     /// Monospaced digits: proportional ones would shuffle the whole menu bar
@@ -157,6 +237,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func stopTicking() {
         ticker?.invalidate()
         ticker = nil
+    }
+
+    /// The two frames of the mark, swapped slowly. Transcribing a meeting takes
+    /// minutes with nothing else on screen to show for it, and this is the only
+    /// thing saying the work is still going rather than quietly dead. Slow on
+    /// purpose: a beat under a second is movement caught out of the corner of
+    /// an eye, and anything quicker is a thing demanding to be looked at.
+    private func startPulsing() {
+        stopPulsing()
+        let pulse = Timer(timeInterval: 0.9, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.pulseFrame = (self.pulseFrame + 1) % Mark.working.count
+            self.show()
+        }
+        // the common modes, for the same reason the clock is added to them: a
+        // menu held open must not be the thing that freezes the animation
+        RunLoop.main.add(pulse, forMode: .common)
+        self.pulse = pulse
+    }
+
+    /// Back to the first frame as well as stopped, so the next spell of
+    /// processing starts from the mark at rest instead of wherever the last one
+    /// happened to be interrupted.
+    private func stopPulsing() {
+        pulse?.invalidate()
+        pulse = nil
+        pulseFrame = 0
     }
 
     // --- the menu ------------------------------------------------------------
