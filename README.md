@@ -90,22 +90,6 @@ Later:
 - [ ] Background worker & job queue — durable processing that survives restarts, batch imports, and the shape a future always-on server needs; deliberately deferred until that server becomes real
 - [ ] Full-text search across transcripts and notes
 
-## Similar projects
-
-Worth knowing about; each was closest to voice-to-note from a different angle
-when we looked (2026). What keeps this project separate is the combination:
-terminal-first with a real TUI, a project/tag memo archive, to-dos that
-survive re-extraction, and extraction through the LLM CLIs you already pay
-for — no API keys.
-
-| Project | Closest when | Tradeoff |
-|---|---|---|
-| [Mila](https://github.com/island-io/mila) | iPhone Voice Memos / imported files are central: local whisper.cpp, diarization with persistent names, Voice Memos folder watching | macOS GUI app; less of a project/TUI workflow |
-| [Meeting Transcriber](https://github.com/pasrom/meeting-transcriber) | very close pipeline: local transcription, diarization, Markdown protocol, Claude CLI / Ollama, file import | built around automatic live meeting capture rather than a memo archive |
-| [Minutes](https://github.com/silverstein/minutes) | local meeting/voice-note memory, Markdown storage, CLI and AI-agent recall | deliberately broader — MCP, cross-agent memory, policy controls |
-| [Muesli](https://github.com/Muesli-HQ/muesli) | mature native macOS option: import, diarization, local notes, folders, exports | a large product — dictation, calendar, hotkeys, many ASR engines, sync |
-| [ownscribe](https://github.com/paberr/ownscribe) | closest small Python CLI: WhisperX, diarization, templates, Ollama, cross-meeting questions | heavier WhisperX/pyannote stack; centers live system-audio capture |
-
 ## Development
 
 `./run.sh` is the development entry point — it keeps the database, models
