@@ -1,5 +1,6 @@
 from collections.abc import Callable, Hashable, Iterable
 from dataclasses import dataclass
+from enum import Enum, auto
 from pathlib import Path, PurePath
 
 from rich.text import Text
@@ -1151,14 +1152,27 @@ _BOARD_TITLE = "to-dos"
 _SCOPE_SEPARATOR = " — "
 
 
+class _OwnerScope(Enum):
+    """The two narrowings of the board that name nobody: the tasks that are
+    yours, and the ones no owner was named for at all. They stand as values of
+    their own rather than as owner strings because an owner is whatever a
+    transcript called somebody, and a person actually called "unassigned" would
+    otherwise take the narrowing's place."""
+
+    MINE = auto()
+    UNASSIGNED = auto()
+
+
 class TodoBoard(ModalScreen[int | None]):
     """Everything the memos have committed to, gathered off them and onto one
     screen, to be worked down and checked off. Opened from the app it spans
     every project on purpose — what a person owes is one list however many piles
     the recordings behind it are filed in — and opened against one memo it is
     that memo's own commitments, for checking off beside the note that states
-    them. Either way it can be narrowed to one owner, so a list of everybody's
-    work can be read as one person's.
+    them. Either way it can be narrowed to one owner — a named one, yourself,
+    or the nobody an extraction leaves behind when it could not tell who took
+    something on — so that a list of everybody's work can be read as one
+    person's.
 
     Closing it hands back the memo a to-do was committed in, when one was asked
     for, since acting on a task usually means going and reading what was
@@ -1191,9 +1205,10 @@ class TodoBoard(ModalScreen[int | None]):
         # board is what is left to do, and a list that grows forever as work gets
         # done stops being that
         self.show_done = False
-        # whose tasks are on the board, and nobody in particular by default:
-        # the board is what is owed before it is who owes it
-        self.owner: str | None = None
+        # whose tasks are on the board — a name, one of the two scopes that name
+        # nobody, or nobody in particular, which is how it opens: the board is
+        # what is owed before it is who owes it
+        self.owner: str | _OwnerScope | None = None
         # the owners there are to cycle through, taken from the board as it
         # stands before any owner filter narrows it — read off the filtered rows
         # they would collapse to the one being filtered to
@@ -1262,15 +1277,21 @@ class TodoBoard(ModalScreen[int | None]):
     def _rows(self) -> list[services.TodoRow]:
         """The to-dos this board is showing: the memo's own or everybody's, the
         finished ones in or out, and one owner's alone where an owner is being
-        filtered to. The owners there are to cycle through are taken here, off
-        the board before that last narrowing, so that filtering to one of them
-        cannot leave the rest unreachable."""
+        filtered to — the tasks that came back with your name on them, the ones
+        that came back with no name at all, or one named person's. The owners
+        there are to cycle through are taken here, off the board before that
+        last narrowing, so that filtering to one of them cannot leave the rest
+        unreachable."""
         rows = services.todo_rows(
             self.repo, include_done=self.show_done, memo_id=self.memo_id
         )
         self.owners = sorted({row.owner for row in rows if row.owner})
         if self.owner is None:
             return rows
+        if self.owner is _OwnerScope.MINE:
+            return [row for row in rows if services.owned_by_me(row.owner)]
+        if self.owner is _OwnerScope.UNASSIGNED:
+            return [row for row in rows if not row.owner]
         return [row for row in rows if row.owner == self.owner]
 
     def _scope_line(self) -> str:
@@ -1281,7 +1302,14 @@ class TodoBoard(ModalScreen[int | None]):
         narrowed = []
         if self.memo_id is not None:
             narrowed.append(self.memo_name or f"memo {self.memo_id}")
-        if self.owner is not None:
+        if self.owner is _OwnerScope.MINE:
+            # the name as well as the word: which tasks count as yours is
+            # whatever this machine has been told you are called, and a board
+            # showing fewer than expected is answered by seeing that name
+            narrowed.append(f"owner: me ({config.MY_NAME})")
+        elif self.owner is _OwnerScope.UNASSIGNED:
+            narrowed.append("owner: unassigned")
+        elif self.owner is not None:
             narrowed.append(f"owner: {self.owner}")
         return _SCOPE_SEPARATOR.join([_BOARD_TITLE, *narrowed])
 
@@ -1307,13 +1335,25 @@ class TodoBoard(ModalScreen[int | None]):
         self.show_done = not self.show_done
         self._refresh()
 
+    def _owner_cycle(self) -> list[str | _OwnerScope | None]:
+        """Every narrowing the owner key steps through, in the order it offers
+        them: everyone, then your own tasks, then the ones nobody was named
+        for, then a press per named owner. Yours come first because reading a
+        shared list as your own is what the key is mostly pressed for, and they
+        are left out altogether while this machine has no name to call you by,
+        a narrowing to nobody being one press that can only ever empty the
+        board. The unnamed are offered whether or not anyone is named, since a
+        board can be nothing but tasks the extraction could not place."""
+        mine = [_OwnerScope.MINE] if config.MY_NAME.strip() else []
+        return [None, *mine, _OwnerScope.UNASSIGNED, *self.owners]
+
     def action_filter_owner(self) -> None:
-        """Narrows the board to one person's tasks, a press per owner and round
-        to everyone again — the way a shared list is read as your own without
-        typing anybody's name. An owner whose last task has just left the board
-        is no longer one of them, and lands back on everyone rather than on a
-        filter matching nothing that a further press could not get out of."""
-        cycle: list[str | None] = [None, *self.owners]
+        """Narrows the board a press at a time and round to everyone again —
+        the way a shared list is read as your own without typing anybody's
+        name. An owner whose last task has just left the board is no longer one
+        of them, and lands back on everyone rather than on a filter matching
+        nothing that a further press could not get out of."""
+        cycle = self._owner_cycle()
         at = cycle.index(self.owner) if self.owner in cycle else -1
         self.owner = cycle[(at + 1) % len(cycle)]
         self._refresh()

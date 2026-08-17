@@ -3537,6 +3537,15 @@ def committed(repo, memo_id: int, *tasks: str, owner: str = "Alice") -> None:
     )
 
 
+def owned(repo, memo_id: int, *tasks: tuple[str, str]) -> None:
+    """Puts one memo's action items on the to-do list with an owner each, the
+    way an extraction that named a different person for every commitment — or
+    nobody at all for some of them — leaves them."""
+    repo.sync_todos(
+        memo_id, [{"task": task, "owner": owner, "deadline": ""} for task, owner in tasks]
+    )
+
+
 def board_table(pilot) -> DataTable:
     """The board of to-dos, once it is open."""
     return pilot.app.screen.query_one("#todos", DataTable)
@@ -3730,7 +3739,10 @@ async def test_the_board_offers_its_own_keys_rather_than_the_apps(repo):
 
 
 @pytest.mark.asyncio
-async def test_o_reads_the_board_as_one_persons_list_and_round_to_everyone_again(repo):
+async def test_o_reads_the_board_as_one_persons_list_and_round_to_everyone_again(
+    repo, monkeypatch
+):
+    monkeypatch.setattr(config, "MY_NAME", "Alex")
     work, home = seed(repo)
     committed(repo, work, "Cut the release", owner="Alice")
     committed(repo, home, "Buy milk", owner="Bob")
@@ -3739,7 +3751,9 @@ async def test_o_reads_the_board_as_one_persons_list_and_round_to_everyone_again
         await pilot.press("T")
         await pilot.pause()
 
-        await pilot.press("o")
+        # past the two narrowings that name nobody, which this board has no
+        # tasks for: nothing here is Alex's, and everything here is owned
+        await pilot.press("o", "o", "o")
         await pilot.pause()
         assert board_tasks(pilot) == ["Cut the release"]
         # nothing else on screen says the board is showing less than everything
@@ -3758,9 +3772,12 @@ async def test_o_reads_the_board_as_one_persons_list_and_round_to_everyone_again
 
 
 @pytest.mark.asyncio
-async def test_an_owner_with_nothing_left_leaves_a_board_that_still_cycles(repo):
+async def test_an_owner_with_nothing_left_leaves_a_board_that_still_cycles(
+    repo, monkeypatch
+):
     # the last of somebody's tasks going means an empty board with the filter
     # still on it, which a person has to be able to press their way out of
+    monkeypatch.setattr(config, "MY_NAME", "Alex")
     work, home = seed(repo)
     committed(repo, work, "Cut the release", owner="Alice")
     committed(repo, home, "Buy milk", owner="Bob")
@@ -3768,12 +3785,106 @@ async def test_an_owner_with_nothing_left_leaves_a_board_that_still_cycles(repo)
     async with MemoApp(repo).run_test() as pilot:
         await pilot.press("T")
         await pilot.pause()
-        await pilot.press("o")
+        await pilot.press("o", "o", "o")
         await pilot.pause()
         await pilot.press("space")
         await pilot.pause()
 
         assert showing(pilot.app, "#no-todos")
+
+        await pilot.press("o")
+        await pilot.pause()
+        assert board_tasks(pilot) == ["Buy milk"]
+
+
+@pytest.mark.asyncio
+async def test_o_offers_your_own_tasks_and_the_unowned_ones_before_the_named(
+    repo, monkeypatch
+):
+    # what the key is mostly pressed for is your own list, and after it the
+    # tasks nobody was named for, which no owner filter could ever reach
+    monkeypatch.setattr(config, "MY_NAME", "Alex")
+    work, _home = seed(repo)
+    owned(
+        repo, work,
+        ("Cut the release", "Alex Drobinin"), ("Buy milk", ""), ("Book the venue", "Bob"),
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("T")
+        await pilot.pause()
+
+        await pilot.press("o")
+        await pilot.pause()
+        assert board_tasks(pilot) == ["Cut the release"]
+        # the name as well as the word: which tasks count as yours is a setting,
+        # and a shorter board than expected is answered by reading it
+        assert "owner: me (Alex)" in board_scope(pilot)
+
+        await pilot.press("o")
+        await pilot.pause()
+        assert board_tasks(pilot) == ["Buy milk"]
+        assert "owner: unassigned" in board_scope(pilot)
+
+        # then the names the board actually carries, your own among them: it is
+        # a name on these tasks like any other, whatever else it also means here
+        await pilot.press("o")
+        await pilot.pause()
+        assert "owner: Alex Drobinin" in board_scope(pilot)
+
+        await pilot.press("o")
+        await pilot.pause()
+        assert board_tasks(pilot) == ["Book the venue"]
+        assert "owner: Bob" in board_scope(pilot)
+
+        await pilot.press("o")
+        await pilot.pause()
+        assert board_tasks(pilot) == ["Cut the release", "Buy milk", "Book the venue"]
+        assert board_scope(pilot) == "to-dos"
+
+
+@pytest.mark.asyncio
+async def test_your_own_list_gathers_every_way_the_memos_wrote_your_name(
+    repo, monkeypatch
+):
+    # an owner is whatever the speakers called somebody, so a first name has to
+    # find the full one — without collecting the next person along whose name
+    # merely starts the same way
+    monkeypatch.setattr(config, "MY_NAME", "Alex")
+    work, _home = seed(repo)
+    owned(
+        repo, work,
+        ("Cut the release", "Alex Drobinin"), ("Tag the build", "alex"),
+        ("Buy milk", "Alexandra"),
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("T")
+        await pilot.pause()
+        await pilot.press("o")
+        await pilot.pause()
+
+        assert board_tasks(pilot) == ["Cut the release", "Tag the build"]
+
+
+@pytest.mark.asyncio
+async def test_a_machine_told_no_name_never_offers_a_list_of_your_own(
+    repo, monkeypatch
+):
+    # a narrowing to nobody is a press that can only ever empty the board, so it
+    # is not offered at all until somebody says who they are
+    monkeypatch.setattr(config, "MY_NAME", "")
+    work, _home = seed(repo)
+    owned(repo, work, ("Cut the release", ""), ("Buy milk", "Bob"))
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("T")
+        await pilot.pause()
+
+        await pilot.press("o")
+        await pilot.pause()
+        assert board_tasks(pilot) == ["Cut the release"]
+        assert "owner: unassigned" in board_scope(pilot)
 
         await pilot.press("o")
         await pilot.pause()

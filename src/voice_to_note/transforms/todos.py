@@ -20,6 +20,27 @@ def normalize(task: str) -> str:
     return _SPACING.sub(" ", task).strip().rstrip(_TRAILING).casefold()
 
 
+def is_mine(owner: str, me: str) -> bool:
+    """Whether a task owned by that name is owned by you. An owner is whatever
+    the speakers called somebody, so the same person is "Alex" in one memo and
+    "Alex Drobinin" in the next, and either standing for the other is what lets
+    a list of everybody's work be read as one person's. The names are compared
+    a whole word at a time so that a shorter name is never read into a longer
+    one — an Al on the team does not thereby own Alex's work — and a name
+    nobody gave is nobody's: a blank on either side owns nothing, since an
+    extraction that could not name an owner has not named you either.
+
+    The name to match against is passed in rather than read here, so that this
+    stays a comparison of two strings and the machine's own identity stays the
+    caller's business."""
+    mine = me.casefold().split()
+    theirs = owner.casefold().split()
+    if not mine or not theirs:
+        return False
+    shorter, longer = sorted((mine, theirs), key=len)
+    return longer[: len(shorter)] == shorter
+
+
 @dataclass(frozen=True)
 class TodoItem:
     """One to-do as a fresh extraction states it, carrying the key it is

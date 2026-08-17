@@ -167,6 +167,12 @@ SETTINGS: dict[str, Setting] = {
         "whisper.cpp source cloned during setup",
         kind="url",
     ),
+    # an owner comes off a transcript as whatever the speakers called somebody,
+    # so this is the name to recognise rather than an account of any kind — one
+    # machine, one person, and a list of everybody's work readable as their own
+    "my_name": Setting(
+        "Alex", str, "the name you go by in memos; a first name is enough to claim a task"
+    ),
     # Textual's built-in theme names, copied rather than imported: every
     # command reads this module, and only `vtn tui` is worth the cost of
     # importing Textual. A name Textual later drops falls back at start-up
@@ -227,5 +233,7 @@ REFINE_WORKERS: int = _setting("refine_workers")
 REFINE_WINDOW: int = _setting("refine_window")
 
 WHISPER_REPO_URL: str = _setting("whisper_repo_url")
+
+MY_NAME: str = _setting("my_name")
 
 TUI_THEME: str = _setting("tui_theme")

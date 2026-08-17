@@ -37,7 +37,7 @@ from .transforms.speakers import (
     match_known_speakers,
     resolve_speaker_names,
 )
-from .transforms.todos import normalize
+from .transforms.todos import is_mine, normalize
 
 Log = Callable[[str], None]
 # how far through the pipeline a recording has got: which stage is starting, and
@@ -1427,6 +1427,14 @@ def todo_rows(
         )
         for todo in repo.todos(include_done=include_done, memo_id=memo_id)
     ]
+
+
+def owned_by_me(owner: str) -> bool:
+    """Whether a to-do written down against that name is the user's own. The
+    comparing of two names is a transform's; which of them is yours is this
+    machine's setting, and reading it here keeps the front ends asking about a
+    to-do rather than each holding its own idea of who is using them."""
+    return is_mine(owner, config.MY_NAME)
 
 
 def todos_text(
