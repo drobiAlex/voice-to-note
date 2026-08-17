@@ -1,5 +1,6 @@
 import json
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import GatewayError
@@ -84,3 +85,62 @@ def duration_seconds(path: Path) -> float:
         raise GatewayError(
             f"ffprobe reported no usable duration for {path.name}: {proc.stdout[:200]!r}"
         ) from e
+
+
+def recorded_at(path: Path) -> str:
+    """When a recording was actually made, as the container itself records it.
+    That instant is the one thing about a recording that survives being copied,
+    renamed and handed around, which makes it the only sound way to tell a file
+    already imported from a genuinely new one — filenames collide between
+    unrelated memos and differ between copies of the same one.
+
+    A container carrying no creation time falls back to when the file was last
+    written. That is a weaker answer, since copying can rewrite it, but it is
+    always an answer: a missing tag is an ordinary recording rather than a
+    broken one, and only ffprobe itself failing is worth an error."""
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format_tags=creation_time",
+                "-of", "json", str(path),
+            ],
+            capture_output=True, text=True, timeout=TIMEOUT_S,
+        )
+    except FileNotFoundError as e:
+        raise GatewayError(f"ffprobe not found — {INSTALL_HINT}") from e
+    except subprocess.TimeoutExpired as e:
+        raise GatewayError(f"ffprobe timed out after {TIMEOUT_S}s reading {path}") from e
+    if proc.returncode != 0:
+        raise GatewayError(f"ffprobe failed reading {path.name}:\n{proc.stderr[-2000:]}")
+    try:
+        tag = json.loads(proc.stdout)["format"]["tags"]["creation_time"]
+    except (ValueError, KeyError, TypeError):
+        tag = None
+    return _tagged(tag) or _utc(datetime.fromtimestamp(path.stat().st_mtime, UTC))
+
+
+def _tagged(tag: object) -> str | None:
+    """A container's creation-time tag as a comparable stamp, or nothing when
+    there was no tag or it is written in some spelling this cannot read.
+    Unparsable is not an error here: recorders disagree about the format, and a
+    stamp nobody can read leaves the caller exactly where a missing one does."""
+    if not isinstance(tag, str) or not tag:
+        return None
+    try:
+        when = datetime.fromisoformat(tag)
+    except ValueError:
+        return None
+    # a tag written without a zone is taken as the container's own UTC reckoning
+    # rather than as local time: reading it as local would stamp the same file
+    # differently on two machines, and an import is only recognised again by a
+    # key that does not move
+    return _utc(when if when.tzinfo else when.replace(tzinfo=UTC))
+
+
+def _utc(when: datetime) -> str:
+    """One spelling of an instant whatever clock stamped it: UTC, to the second.
+    Recorders disagree below that — some write microseconds, some none — and an
+    offset would let a single instant be written two ways, so a comparison of
+    raw tags would miss recordings that were made at the very same moment."""
+    return when.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

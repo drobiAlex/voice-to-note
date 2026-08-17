@@ -50,6 +50,11 @@ class StubRepo:
     def __exit__(self, *exc) -> bool:
         return False
 
+    def memo_by_recorded_at(self, recorded_at: str) -> None:
+        """Nothing was ever recorded at that moment. `vtn process` asks this
+        before it starts, and a stub holding no memos has no other answer."""
+        return None
+
 
 @pytest.fixture
 def repo(tmp_path):

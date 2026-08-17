@@ -11,7 +11,14 @@ from voice_to_note.storage.repository import Repository
 
 
 def add_memo(
-    repo, *, filename="standup.m4a", duration_s=12.0, language="en", segments=(), speakers=()
+    repo,
+    *,
+    filename="standup.m4a",
+    duration_s=12.0,
+    language="en",
+    segments=(),
+    speakers=(),
+    recorded_at=None,
 ) -> int:
     return repo.create_memo(
         filename=filename,
@@ -20,6 +27,7 @@ def add_memo(
         language=language,
         segments=list(segments),
         speakers=list(speakers),
+        recorded_at=recorded_at,
     )
 
 
@@ -28,6 +36,13 @@ def run(monkeypatch, repo, *argv) -> None:
     monkeypatch.setattr(cli, "Repository", lambda *a, **k: repo)
     monkeypatch.setattr(sys, "argv", ["vtn", *argv])
     cli.main()
+
+
+def fresh_import(monkeypatch) -> None:
+    """Says that nothing in the database was recorded when this file was, so a
+    test about what the pipeline does is not also a test about the duplicate
+    every `process` run asks after before it starts."""
+    monkeypatch.setattr(services, "find_duplicate", lambda _repo, _src: None)
 
 
 def listing_line(memo, dur: str) -> str:
@@ -349,6 +364,7 @@ def test_processing_files_the_new_memo_under_a_project(tmp_path, monkeypatch, ca
     monkeypatch.setattr(services, "process_memo", process_memo)
     monkeypatch.setattr(services, "run_extraction", lambda *a, **k: "claude")
     monkeypatch.setattr(services, "notes", lambda *a, **k: "the notes")
+    fresh_import(monkeypatch)
 
     run(monkeypatch, StubRepo(), "process", str(src), "--project", "work")
 
@@ -367,6 +383,7 @@ def test_processing_without_a_project_files_it_under_other(tmp_path, monkeypatch
     monkeypatch.setattr(services, "process_memo", process_memo)
     monkeypatch.setattr(services, "run_extraction", lambda *a, **k: "claude")
     monkeypatch.setattr(services, "notes", lambda *a, **k: "the notes")
+    fresh_import(monkeypatch)
 
     run(monkeypatch, StubRepo(), "process", str(src))
 
@@ -419,6 +436,7 @@ def test_an_empty_step_list_stores_only_the_transcript(tmp_path, monkeypatch, ca
 
     monkeypatch.setattr(services, "process_memo", process_memo)
     monkeypatch.setattr(services, "run_extraction", run_extraction)
+    fresh_import(monkeypatch)
 
     run(monkeypatch, StubRepo(), "process", str(src), "--steps", "")
 
@@ -446,10 +464,77 @@ def test_refine_runs_before_extraction_when_both_are_asked_for(tmp_path, monkeyp
     monkeypatch.setattr(services, "refine_transcript", refine_transcript)
     monkeypatch.setattr(services, "run_extraction", run_extraction)
     monkeypatch.setattr(services, "notes", lambda *a, **k: "the notes")
+    fresh_import(monkeypatch)
 
     run(monkeypatch, StubRepo(), "process", str(src), "--steps", "speakers,refine,notes")
 
     assert order == ["process", "refine", "extract"]
+
+
+# --- a recording offered a second time -------------------------------------
+
+
+def test_a_recording_already_stored_is_left_alone_when_the_answer_is_no(
+    repo, tmp_path, monkeypatch, capsys
+):
+    # the same memo arrives under another name; nothing is created, and the run
+    # ends the way a run that had nothing to do ends
+    src = tmp_path / "standup (1).m4a"
+    src.write_bytes(b"fake audio")
+    stored = add_memo(repo, filename="standup.m4a", recorded_at="2026-08-17T06:01:22Z")
+    monkeypatch.setattr(services.audio, "recorded_at", lambda _path: "2026-08-17T06:01:22Z")
+    monkeypatch.setattr(
+        services, "process_memo", lambda *a, **k: pytest.fail("processed after a no")
+    )
+    monkeypatch.setattr("builtins.input", lambda: "n")
+
+    run(monkeypatch, repo, "process", str(src))
+
+    err = capsys.readouterr().err
+    assert f"memo {stored} — standup.m4a" in err
+    assert err.endswith("skipped\n")
+    with Repository(repo.path) as after:
+        assert [m.id for m in after.memos()] == [stored]
+
+
+def test_a_recording_already_stored_goes_through_anyway_when_the_answer_is_yes(
+    repo, tmp_path, monkeypatch, capsys
+):
+    # taking one recording through a second time is something people do on
+    # purpose, so the question is a question rather than a refusal
+    src = tmp_path / "standup.m4a"
+    src.write_bytes(b"fake audio")
+    add_memo(repo, filename="standup.m4a", recorded_at="2026-08-17T06:01:22Z")
+    monkeypatch.setattr(services.audio, "recorded_at", lambda _path: "2026-08-17T06:01:22Z")
+    processed: list = []
+
+    def process_memo(_repo, path, project="other", log=None, num_speakers=None, diarize=True):
+        processed.append(path)
+        return services.ProcessResult(9, 0, [], "en")
+
+    monkeypatch.setattr(services, "process_memo", process_memo)
+    monkeypatch.setattr("builtins.input", lambda: "y")
+
+    run(monkeypatch, repo, "process", str(src), "--steps", "")
+
+    assert processed == [src.resolve()]
+
+
+def test_a_recording_nothing_here_shares_a_moment_with_is_never_asked_about(
+    repo, tmp_path, monkeypatch, capsys
+):
+    src = tmp_path / "review.m4a"
+    src.write_bytes(b"fake audio")
+    add_memo(repo, filename="standup.m4a", recorded_at="2026-08-17T06:01:22Z")
+    monkeypatch.setattr(services.audio, "recorded_at", lambda _path: "2026-08-20T11:30:00Z")
+    monkeypatch.setattr(
+        services, "process_memo", lambda *a, **k: services.ProcessResult(9, 0, [], "en")
+    )
+    monkeypatch.setattr("builtins.input", lambda: pytest.fail("asked about a new recording"))
+
+    run(monkeypatch, repo, "process", str(src), "--steps", "")
+
+    assert "memo 9" in capsys.readouterr().err
 
 
 def test_listing_can_be_narrowed_to_one_project(monkeypatch, capsys):

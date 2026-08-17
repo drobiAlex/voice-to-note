@@ -88,6 +88,10 @@ class Memo:
     # nothing has changed the memo since it was stored, which is not the same as
     # it having been changed at the moment it was made
     updated_at: str | None = None
+    # when the recording itself was made, as its container said — how a file
+    # offered a second time is recognised as one already here. Empty for a memo
+    # stored before this was kept, and for a source that never said
+    recorded_at: str | None = None
 
 
 @dataclass(frozen=True)

@@ -57,6 +57,16 @@ CREATE TABLE memos (
 """
 
 
+PRE_RECORDED_SCHEMA = """
+CREATE TABLE memos (
+  id INTEGER PRIMARY KEY, filename TEXT NOT NULL, wav_path TEXT NOT NULL,
+  duration_s REAL, language TEXT, status TEXT NOT NULL DEFAULT 'new',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  project TEXT NOT NULL DEFAULT 'other', notes_md TEXT, updated_at TEXT
+);
+"""
+
+
 PRE_NOTES_SCHEMA = """
 CREATE TABLE memos (
   id INTEGER PRIMARY KEY, filename TEXT NOT NULL, wav_path TEXT NOT NULL,
@@ -463,6 +473,60 @@ def test_an_ordinary_extraction_leaves_an_edit_where_it_is(repo):
     repo.save_extraction(memo_id, "claude", {"title": "Fresh"})
 
     assert repo.notes_md(memo_id) == "# My own words"
+
+
+# --- recognising a recording already stored -------------------------------
+
+
+def test_a_database_from_before_imports_were_recognised_gains_the_column(tmp_path):
+    path = tmp_path / "legacy.db"
+    con = sqlite3.connect(path)
+    con.executescript(PRE_RECORDED_SCHEMA)
+    con.execute("INSERT INTO memos (filename, wav_path) VALUES ('old.m4a', '/tmp/old.wav')")
+    con.commit()
+    con.close()
+
+    repo = Repository(path)
+
+    assert repo.memo(1).filename == "old.m4a"
+    # the memos that were already there say nothing about when they were taped,
+    # and nothing offered later may be turned away on the strength of that
+    assert repo.memo(1).recorded_at is None
+    assert repo.memo_by_recorded_at("2026-08-17T06:01:22Z") is None
+    repo.close()
+
+
+def test_a_memo_is_found_again_by_the_moment_its_recording_was_made(repo):
+    make_memo(repo, filename="standup.m4a", recorded_at="2026-08-17T06:01:22Z")
+
+    found = repo.memo_by_recorded_at("2026-08-17T06:01:22Z")
+
+    assert found.filename == "standup.m4a"
+    assert found.recorded_at == "2026-08-17T06:01:22Z"
+
+
+def test_a_moment_nothing_was_recorded_at_finds_no_memo(repo):
+    make_memo(repo, recorded_at="2026-08-17T06:01:22Z")
+
+    assert repo.memo_by_recorded_at("2026-08-20T11:30:00Z") is None
+
+
+def test_a_memo_stored_without_the_moment_is_never_found_as_one(repo):
+    # not knowing when a recording was made is no evidence that it is this one
+    make_memo(repo, filename="old.m4a")
+
+    assert repo.memos()[0].recorded_at is None
+    assert repo.memo_by_recorded_at("") is None
+    assert repo.memo_by_recorded_at("2026-08-17T06:01:22Z") is None
+
+
+def test_the_newest_memo_answers_when_several_share_a_recording_moment(repo):
+    # somebody has already said yes to processing this recording a second time;
+    # the copy that answers is the one carrying whatever was done to it since
+    make_memo(repo, filename="first.m4a", recorded_at="2026-08-17T06:01:22Z")
+    second = make_memo(repo, filename="second.m4a", recorded_at="2026-08-17T06:01:22Z")
+
+    assert repo.memo_by_recorded_at("2026-08-17T06:01:22Z").id == second
 
 
 def test_the_migration_accounts_for_every_column_it_adds(repo):

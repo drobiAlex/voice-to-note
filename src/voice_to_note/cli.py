@@ -66,54 +66,73 @@ def _checked(args: argparse.Namespace) -> tuple[frozenset[str], int | None]:
 
 
 def _pipeline(
-    src: Path, args: argparse.Namespace, steps: frozenset[str], count: int | None
+    repo: Repository,
+    src: Path,
+    args: argparse.Namespace,
+    steps: frozenset[str],
+    count: int | None,
 ) -> None:
     """Everything that happens to a recording once it exists and its options
     have been checked. Shared, so that a file handed in and a meeting taped a
-    moment ago travel exactly the same path."""
-    with Repository() as repo:
-        result = services.process_memo(
-            repo,
-            src,
-            project=args.project,
-            log=status,
-            num_speakers=count,
-            diarize="speakers" in steps,
-        )
-        status(
-            f"memo {result.memo_id} — {result.segment_count} segments,"
-            f" {len(result.labels)} speakers, language={result.language}"
-        )
-        if "refine" in steps:
-            try:
-                status("refining transcript …")
-                refined = services.refine_transcript(repo, result.memo_id)
-                status(
-                    f"refined — {len(refined.changes)} repaired,"
-                    f" {len(refined.flagged)} flagged"
-                )
-            except services.ExtractionError as e:
-                status(f"refine skipped: {e}")
-        if "notes" in steps:
-            try:
-                status("extracting notes …")
-                backend = services.run_extraction(repo, result.memo_id, template=args.template)
-                status(f"extracted via {backend}\n")
-                print(services.notes(repo, result.memo_id))
-            except services.ExtractionError as e:
-                status(f"extraction skipped: {e}")
-                status(f"retry later with: vtn extract {result.memo_id}")
-        else:
-            status(f"transcript stored — run `vtn extract {result.memo_id}` for notes")
+    moment ago travel exactly the same path. The database comes in already open:
+    the caller may have had to ask it something before any of this could start,
+    and one connection for the command keeps that question and this work reading
+    the same memos."""
+    result = services.process_memo(
+        repo,
+        src,
+        project=args.project,
+        log=status,
+        num_speakers=count,
+        diarize="speakers" in steps,
+    )
+    status(
+        f"memo {result.memo_id} — {result.segment_count} segments,"
+        f" {len(result.labels)} speakers, language={result.language}"
+    )
+    if "refine" in steps:
+        try:
+            status("refining transcript …")
+            refined = services.refine_transcript(repo, result.memo_id)
+            status(
+                f"refined — {len(refined.changes)} repaired,"
+                f" {len(refined.flagged)} flagged"
+            )
+        except services.ExtractionError as e:
+            status(f"refine skipped: {e}")
+    if "notes" in steps:
+        try:
+            status("extracting notes …")
+            backend = services.run_extraction(repo, result.memo_id, template=args.template)
+            status(f"extracted via {backend}\n")
+            print(services.notes(repo, result.memo_id))
+        except services.ExtractionError as e:
+            status(f"extraction skipped: {e}")
+            status(f"retry later with: vtn extract {result.memo_id}")
+    else:
+        status(f"transcript stored — run `vtn extract {result.memo_id}` for notes")
 
 
 def cmd_process(args: argparse.Namespace) -> None:
-    """Takes a recording all the way to notes on screen."""
+    """Takes a recording all the way to notes on screen, asking first when this
+    same recording has already been through here. Asked before the work rather
+    than after it: a second copy of a memo costs minutes of transcription and
+    then sits in the list looking like a separate meeting, and only the person
+    at the keyboard knows whether a file taped at the same moment as one already
+    stored is the same recording or a deliberate second pass over it."""
     src = Path(args.file).expanduser().resolve()
     if not src.exists():
         sys.exit(f"no such file: {src}")
     steps, count = _checked(args)
-    _pipeline(src, args, steps, count)
+    with Repository() as repo:
+        stored = services.find_duplicate(repo, src)
+        if stored is not None and not _confirmed(
+            f"memo {stored.id} — {stored.filename} was recorded at the same"
+            " moment; process this file anyway?"
+        ):
+            status("skipped")
+            return
+        _pipeline(repo, src, args, steps, count)
 
 
 def _taped(track: Path) -> bool:
@@ -156,7 +175,8 @@ def cmd_record(args: argparse.Namespace) -> None:
     mic_wav.unlink()
     tracks.rmdir()
     status(f"recorded {merged}")
-    _pipeline(merged, args, steps, count)
+    with Repository() as repo:
+        _pipeline(repo, merged, args, steps, count)
 
 
 def cmd_menubar(args: argparse.Namespace) -> None:

@@ -218,6 +218,9 @@ def test_a_failed_conversion_ends_process_with_a_message_not_a_traceback(tmp_pat
     src.write_bytes(b"fake audio")
     failure = "whisper-cli not built — run ./run.sh first"
     monkeypatch.setattr(cli, "Repository", lambda *a, **k: StubRepo())
+    # nothing already stored was recorded when this file was, so the run reaches
+    # the pipeline this test is about rather than stopping at the pre-check
+    monkeypatch.setattr(cli.services, "find_duplicate", lambda _repo, _src: None)
     monkeypatch.setattr(cli.services, "process_memo", boom(failure, GatewayError))
     monkeypatch.setattr(sys, "argv", ["vtn", "process", str(src)])
 

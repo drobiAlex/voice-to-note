@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS memos (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   project TEXT NOT NULL DEFAULT 'other',
   notes_md TEXT,
-  updated_at TEXT
+  updated_at TEXT,
+  recorded_at TEXT
 );
 CREATE TABLE IF NOT EXISTS segments (
   id INTEGER PRIMARY KEY,
@@ -70,7 +71,8 @@ CREATE TABLE IF NOT EXISTS todos (
 """
 
 MEMO_COLUMNS = (
-    "id, filename, wav_path, duration_s, language, status, created_at, project, updated_at"
+    "id, filename, wav_path, duration_s, language, status, created_at, project,"
+    " updated_at, recorded_at"
 )
 
 
@@ -111,8 +113,10 @@ class Repository:
         """Brings an older database up to the current shape, a column at a time:
         `embedding` for one made before voice matching, `refined_text` for one
         made before transcript repair, `project` for one made before memos were
-        grouped, `notes_md` for one made before notes could be edited, and
-        `updated_at` for one made before memos recorded when they last changed."""
+        grouped, `notes_md` for one made before notes could be edited,
+        `updated_at` for one made before memos recorded when they last changed,
+        and `recorded_at` for one made before an import could be recognised as a
+        recording already stored."""
         cols = {r["name"] for r in self.con.execute("PRAGMA table_info(speakers)")}
         if "embedding" not in cols:
             self.con.execute("ALTER TABLE speakers ADD COLUMN embedding BLOB")
@@ -128,6 +132,8 @@ class Repository:
             self.con.execute("ALTER TABLE memos ADD COLUMN notes_md TEXT")
         if "updated_at" not in cols:
             self.con.execute("ALTER TABLE memos ADD COLUMN updated_at TEXT")
+        if "recorded_at" not in cols:
+            self.con.execute("ALTER TABLE memos ADD COLUMN recorded_at TEXT")
 
     def close(self) -> None:
         """Closes the memo database."""
@@ -169,13 +175,17 @@ class Repository:
         segments: Sequence[Segment],
         speakers: Sequence[Speaker] = (),
         project: str = "other",
+        recorded_at: str | None = None,
     ) -> int:
-        """Stores a finished transcription: memo, segments and speakers together."""
+        """Stores a finished transcription: memo, segments and speakers together.
+        When the recording was made is stored beside it where the source said so
+        — the fact a later import is recognised by — and left empty where it did
+        not, which is not the same as a recording made at no particular time."""
         with self.con:
             cur = self.con.execute(
                 "INSERT INTO memos (filename, wav_path, duration_s, language, status,"
-                " project) VALUES (?,?,?,?,'transcribed',?)",
-                (filename, wav_path, duration_s, language, project),
+                " project, recorded_at) VALUES (?,?,?,?,'transcribed',?,?)",
+                (filename, wav_path, duration_s, language, project, recorded_at),
             )
             # sqlite always reports the row it just inserted; the check narrows
             # the type for everything downstream that treats this as an id
@@ -327,6 +337,22 @@ class Repository:
         """One memo's details, or nothing when that id was never stored."""
         row = self.con.execute(
             f"SELECT {MEMO_COLUMNS} FROM memos WHERE id=?", (memo_id,)
+        ).fetchone()
+        return _memo(row) if row else None
+
+    def memo_by_recorded_at(self, recorded_at: str) -> Memo | None:
+        """The memo already stored for a recording made at this instant, or
+        nothing when none is. The newest wins where several carry the stamp: a
+        duplicate found twice over is answered with the copy that reflects
+        whatever has been done to the memo since.
+
+        A memo stored without the stamp never matches, however the value is
+        asked for. Not knowing when a recording was made is no evidence that it
+        is this one, and sqlite agreeing — NULL is equal to nothing — is what
+        keeps every memo from before this was recorded out of the way."""
+        row = self.con.execute(
+            f"SELECT {MEMO_COLUMNS} FROM memos WHERE recorded_at=? ORDER BY id DESC LIMIT 1",
+            (recorded_at,),
         ).fetchone()
         return _memo(row) if row else None
 
@@ -628,4 +654,5 @@ def _memo(row: sqlite3.Row) -> Memo:
         row["created_at"],
         row["project"],
         row["updated_at"],
+        row["recorded_at"],
     )

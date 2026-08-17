@@ -723,9 +723,26 @@ def process_memo(
         segments=segs,
         speakers=speakers,
         project=project,
+        # read off the source rather than the wav beside it: that wav was made a
+        # moment ago by the conversion, so its own stamp says when this ran and
+        # nothing at all about when the recording was taped
+        recorded_at=audio.recorded_at(src),
     )
     _report_matches(log, matches, keep_names={})
     return ProcessResult(memo_id, len(segs), labels, language)
+
+
+def find_duplicate(repo: Repository, src: Path) -> Memo | None:
+    """The memo already stored for this recording, if there is one. Recognised
+    by when the recording was made rather than by what the file is called: the
+    same memo reaches this machine under different names — copied off a phone,
+    re-exported, downloaded a second time — and the instant it was taped is what
+    stays the same through all of that.
+
+    The lookup and nothing else. Whether a duplicate is worth stopping for is a
+    question for whoever is asking, and only a front end can put it to a
+    person."""
+    return repo.memo_by_recorded_at(audio.recorded_at(src))
 
 
 def _speaker_count(num_speakers: int | None) -> int | None:

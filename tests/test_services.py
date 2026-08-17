@@ -35,7 +35,7 @@ def wav(tmp_path):
     return path
 
 
-def add_memo(repo, wav, *, segments=(), speakers=(), filename="memo.m4a") -> int:
+def add_memo(repo, wav, *, segments=(), speakers=(), filename="memo.m4a", recorded_at=None) -> int:
     return repo.create_memo(
         filename=filename,
         wav_path=str(wav),
@@ -43,6 +43,7 @@ def add_memo(repo, wav, *, segments=(), speakers=(), filename="memo.m4a") -> int
         language="en",
         segments=list(segments),
         speakers=list(speakers),
+        recorded_at=recorded_at,
     )
 
 
@@ -146,6 +147,7 @@ def test_processing_gives_the_transcriber_the_audio_duration(repo, tmp_path, mon
     monkeypatch.setattr(services.config, "UPLOADS_DIR", tmp_path / "uploads")
     monkeypatch.setattr(services.audio, "to_wav16k", lambda _src, _dst: None)
     monkeypatch.setattr(services.audio, "duration_seconds", lambda _path: 137.5)
+    monkeypatch.setattr(services.audio, "recorded_at", lambda _path: "2026-01-01T09:00:00Z")
     seen = {}
 
     def transcribe(wav_path, duration_s):
@@ -177,6 +179,7 @@ def test_the_pipeline_says_which_stage_it_is_on_before_that_stage_runs(
     monkeypatch.setattr(services.config, "UPLOADS_DIR", tmp_path / "uploads")
     monkeypatch.setattr(services.audio, "to_wav16k", lambda _src, _dst: seen.append("converted"))
     monkeypatch.setattr(services.audio, "duration_seconds", lambda _path: 1.0)
+    monkeypatch.setattr(services.audio, "recorded_at", lambda _path: "2026-01-01T09:00:00Z")
     monkeypatch.setattr(
         services.whisper,
         "transcribe",
@@ -207,6 +210,7 @@ def test_a_pipeline_nobody_is_watching_runs_the_same_way(repo, tmp_path, monkeyp
     monkeypatch.setattr(services.config, "UPLOADS_DIR", tmp_path / "uploads")
     monkeypatch.setattr(services.audio, "to_wav16k", lambda _src, _dst: None)
     monkeypatch.setattr(services.audio, "duration_seconds", lambda _path: 1.0)
+    monkeypatch.setattr(services.audio, "recorded_at", lambda _path: "2026-01-01T09:00:00Z")
     monkeypatch.setattr(
         services.whisper,
         "transcribe",
@@ -231,6 +235,7 @@ def _process_setup(tmp_path, monkeypatch) -> Path:
     monkeypatch.setattr(services.config, "UPLOADS_DIR", tmp_path / "uploads")
     monkeypatch.setattr(services.audio, "to_wav16k", lambda _src, _dst: None)
     monkeypatch.setattr(services.audio, "duration_seconds", lambda _path: 1.0)
+    monkeypatch.setattr(services.audio, "recorded_at", lambda _path: "2026-01-01T09:00:00Z")
     monkeypatch.setattr(
         services.whisper,
         "transcribe",
@@ -273,6 +278,50 @@ def test_a_pinned_speaker_count_reaches_diarization(repo, tmp_path, monkeypatch)
     services.process_memo(repo, src, num_speakers=2)
 
     assert seen["num_speakers"] == 2
+
+
+# --- recognising a recording already stored -------------------------------
+
+
+def test_processing_stores_the_moment_the_source_recording_was_made(repo, tmp_path, monkeypatch):
+    # read off the file handed in, not the wav the conversion has just written:
+    # that wav was made a moment ago and says nothing about when this was taped
+    src = _process_setup(tmp_path, monkeypatch)
+    dated: list = []
+    monkeypatch.setattr(
+        services.audio,
+        "recorded_at",
+        lambda path: dated.append(path) or "2026-08-17T06:01:22Z",
+    )
+    fake_diarization(monkeypatch, [Turn(0, 1000, "S1")], {"S1": ALICE_VOICE})
+
+    result = services.process_memo(repo, src)
+
+    assert dated == [src]
+    assert repo.memo(result.memo_id).recorded_at == "2026-08-17T06:01:22Z"
+
+
+def test_a_recording_already_stored_is_found_whatever_the_file_is_called_now(
+    repo, wav, tmp_path, monkeypatch
+):
+    # one memo reaches this machine under any number of names — copied off a
+    # phone, re-exported, downloaded twice — and only the moment it was taped
+    # stays the same through all of that
+    memo_id = add_memo(repo, wav, filename="standup.m4a", recorded_at="2026-08-17T06:01:22Z")
+    monkeypatch.setattr(services.audio, "recorded_at", lambda _path: "2026-08-17T06:01:22Z")
+
+    found = services.find_duplicate(repo, tmp_path / "standup (1).m4a")
+
+    assert found.id == memo_id
+
+
+def test_a_recording_no_stored_memo_shares_a_moment_with_is_no_duplicate(
+    repo, wav, tmp_path, monkeypatch
+):
+    add_memo(repo, wav, filename="standup.m4a", recorded_at="2026-08-17T06:01:22Z")
+    monkeypatch.setattr(services.audio, "recorded_at", lambda _path: "2026-08-20T11:30:00Z")
+
+    assert services.find_duplicate(repo, tmp_path / "standup.m4a") is None
 
 
 def test_transcription_timeout_scales_with_duration_above_a_floor():
