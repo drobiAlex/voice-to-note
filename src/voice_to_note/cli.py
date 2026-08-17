@@ -228,7 +228,13 @@ def cmd_list(args: argparse.Namespace) -> None:
 def cmd_todos(args: argparse.Namespace) -> None:
     """Shows what the memos have committed to and nobody has done yet."""
     with Repository() as repo:
-        listing = services.todos_text(repo, project=args.project, include_done=args.all)
+        listing = services.todos_text(
+            repo,
+            project=args.project,
+            include_done=args.all,
+            mine=args.mine,
+            unassigned=args.unassigned,
+        )
         if listing:
             print(listing)
         else:
@@ -529,6 +535,14 @@ def main() -> None:
     sp = sub.add_parser("todos", help="list what the memos committed to")
     sp.add_argument("--project", help="only the to-dos of memos filed under this project")
     sp.add_argument("--all", action="store_true", help="include the ones already done")
+    # a to-do is either yours or nobody's, never both, so asking for both is refused
+    owner = sp.add_mutually_exclusive_group()
+    owner.add_argument("--mine", action="store_true", help="only the to-dos carrying your name")
+    owner.add_argument(
+        "--unassigned",
+        action="store_true",
+        help="only the to-dos the extraction named nobody for",
+    )
     sp.set_defaults(fn=cmd_todos)
 
     sp = sub.add_parser("todo", help="check a to-do off or put it back: todo done|open <id>")

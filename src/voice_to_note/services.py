@@ -1438,14 +1438,25 @@ def owned_by_me(owner: str) -> bool:
 
 
 def todos_text(
-    repo: Repository, project: str | None = None, *, include_done: bool = False
+    repo: Repository,
+    project: str | None = None,
+    *,
+    include_done: bool = False,
+    mine: bool = False,
+    unassigned: bool = False,
 ) -> str:
     """The to-do list as a person reads it: a box saying whether it is done, the
     task, who owns it and when it is due, and the memo it was committed in —
     column-aligned so they line up down the screen. One project at a time when
-    asked for, and the finished ones left out unless asked for. Empty when
-    nothing is outstanding, and equally empty when nothing is stored at all."""
+    asked for, the finished ones left out unless asked for, and narrowed to the
+    tasks carrying your name or to the ones the extraction named nobody for
+    when asked for either of those. Empty when nothing is outstanding, and
+    equally empty when nothing is stored at all."""
     listed = repo.todos(project, include_done=include_done)
+    if mine:
+        listed = [t for t in listed if owned_by_me(t.owner)]
+    if unassigned:
+        listed = [t for t in listed if not t.owner]
     task_w = max((len(t.text) for t in listed), default=0)
     owner_w = max((len(t.owner) for t in listed), default=0)
     deadline_w = max((len(t.deadline) for t in listed), default=0)

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from conftest import StubRepo
 
-from voice_to_note import cli, services
+from voice_to_note import cli, config, services
 from voice_to_note.domain import Memo, Segment, Speaker
 from voice_to_note.storage.repository import Repository
 
@@ -1000,6 +1000,54 @@ def test_the_to_do_list_prints_what_is_still_outstanding(repo, monkeypatch, caps
     assert capsys.readouterr().out == (
         f"{todo.id:>4}  [ ]  Cut the release  Alice  Friday  memo {memo_id} (other)\n"
     )
+
+
+def test_the_mine_flag_narrows_the_to_do_list_to_tasks_carrying_your_name(
+    repo, monkeypatch, capsys
+):
+    monkeypatch.setattr(config, "MY_NAME", "Alex")
+    memo_id = add_memo(repo)
+    repo.sync_todos(
+        memo_id,
+        [
+            {"task": "Cut the release", "owner": "Alex", "deadline": "Friday"},
+            {"task": "Write the changelog", "owner": "Alice", "deadline": None},
+        ],
+    )
+    mine = next(t for t in repo.todos() if t.owner == "Alex")
+
+    run(monkeypatch, repo, "todos", "--mine")
+
+    assert capsys.readouterr().out == (
+        f"{mine.id:>4}  [ ]  Cut the release  Alex  Friday  memo {memo_id} (other)\n"
+    )
+
+
+def test_the_unassigned_flag_narrows_the_to_do_list_to_tasks_nobody_was_named_for(
+    repo, monkeypatch, capsys
+):
+    memo_id = add_memo(repo)
+    repo.sync_todos(
+        memo_id,
+        [
+            {"task": "Cut the release", "owner": "Alice", "deadline": "Friday"},
+            {"task": "Water the plants", "owner": None, "deadline": None},
+        ],
+    )
+    unassigned = next(t for t in repo.todos() if not t.owner)
+
+    run(monkeypatch, repo, "todos", "--unassigned")
+
+    assert capsys.readouterr().out == (
+        f"{unassigned.id:>4}  [ ]  Water the plants      memo {memo_id} (other)\n"
+    )
+
+
+def test_asking_for_mine_and_unassigned_together_is_refused_by_the_parser(repo, monkeypatch):
+    with pytest.raises(SystemExit) as err:
+        run(monkeypatch, repo, "todos", "--mine", "--unassigned")
+
+    assert err.value.code == 2
 
 
 def test_nothing_left_to_do_says_so_without_polluting_stdout(repo, monkeypatch, capsys):
