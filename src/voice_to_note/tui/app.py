@@ -31,6 +31,7 @@ from textual.widgets import (
 )
 
 from .. import config, services
+from ..domain import Memo
 from ..gateways import GatewayError
 from ..storage.repository import Repository
 
@@ -235,6 +236,43 @@ class ImportOptions:
 _DEFAULT_STEPS = frozenset({"speakers", "notes"})
 
 
+class ConfirmDuplicate(ModalScreen[bool]):
+    """Stands between a recording already stored and the minutes of converting,
+    transcribing and extracting it a second time would cost. What matched is
+    when the recording was taped, not what the file is called, so the question
+    names the memo it matched: the file being brought in is under a different
+    name — which is exactly why nobody noticed — and only the stored one says
+    what would be doubled. Bringing a second copy in is still allowed, since a
+    re-import is sometimes the point."""
+
+    BINDINGS = [
+        ("y,enter", "process", "Process anyway"),
+        ("n,escape", "skip", "Skip it"),
+    ]
+
+    def __init__(self, memo_id: int, filename: str) -> None:
+        """Opens on the memo this recording is already stored as."""
+        super().__init__()
+        self.memo_id = memo_id
+        self.filename = filename
+
+    def compose(self) -> ComposeResult:
+        """Says what it is already here as, then asks."""
+        yield Static(
+            f"memo {self.memo_id} — {self.filename} was recorded at the same moment;"
+            " process this file anyway?  (y / n)",
+            id="confirm-duplicate",
+        )
+
+    def action_process(self) -> None:
+        """Brings the second copy in regardless."""
+        self.dismiss(True)
+
+    def action_skip(self) -> None:
+        """Leaves the memo already stored as the only copy."""
+        self.dismiss(False)
+
+
 class ProcessMemo(ModalScreen[None]):
     """Everything about bringing one recording in, decided in one place: where
     the file is, what to file it under, how many voices to look for, which
@@ -261,14 +299,19 @@ class ProcessMemo(ModalScreen[None]):
     ]
 
     def __init__(
-        self, root: Path, project: str, store: Callable[[str, str, ImportOptions], None]
+        self,
+        root: Path,
+        project: str,
+        store: Callable[[str, str, ImportOptions], None],
+        duplicate: Callable[[str], Memo | None],
     ) -> None:
-        """Opens on the folder to browse from, the project being browsed, and
-        the way to bring a file in."""
+        """Opens on the folder to browse from, the project being browsed, the
+        way to bring a file in, and the way to ask whether it is already in."""
         super().__init__()
         self.root = root
         self.project = project
         self.store = store
+        self.duplicate = duplicate
 
     def compose(self) -> ComposeResult:
         """Where the recording is, what to file it under, how it should be run
@@ -355,6 +398,27 @@ class ProcessMemo(ModalScreen[None]):
         return ImportOptions(num_speakers=num_speakers, template=str(template), steps=steps)
 
     def _process(self) -> None:
+        """Puts a recording the database already holds back to the person before
+        anything is converted, since bringing one in twice costs minutes and
+        leaves two memos of the same conversation to keep apart afterwards. The
+        question goes up over this form rather than in place of it: saying no to
+        a second copy is not saying to throw away everything typed here, and the
+        next thing somebody does is usually to pick a different file."""
+        stored = self.duplicate(self.query_one("#source-path", Input).value)
+        if stored is None:
+            self._send()
+        else:
+            self.app.push_screen(
+                ConfirmDuplicate(stored.id, stored.filename), self._duplicate_answered
+            )
+
+    def _duplicate_answered(self, agreed: bool | None) -> None:
+        """Sends the recording off only once a second copy is what they said
+        they wanted."""
+        if agreed:
+            self._send()
+
+    def _send(self) -> None:
         """Closes only once the recording has actually been sent off, so a
         path with a typo in it — or a speaker count that isn't one — can be
         corrected where it was typed."""
@@ -2031,8 +2095,33 @@ class MemoApp(App[None]):
     def action_process(self) -> None:
         """Offers to bring a new recording in, filed where you are looking."""
         self.push_screen(
-            ProcessMemo(self.browse_root, self.project or "other", self._process)
+            ProcessMemo(
+                self.browse_root,
+                self.project or "other",
+                self._process,
+                self._already_stored,
+            )
         )
+
+    def _already_stored(self, path: str) -> Memo | None:
+        """The memo this recording is already in the database as, when it is
+        one. Reading the instant it was taped is a single ffprobe over the
+        container, quick enough to answer while somebody's hand is still on the
+        Enter key.
+
+        Anything that cannot be read that far counts as no duplicate rather than
+        as a failure: a path with a typo in it, or a file ffprobe cannot make
+        sense of, is no evidence that the recording is already here, and both
+        are about to be refused where they are properly refused — one by the
+        import entry below, the other by the pipeline, saying what ffmpeg
+        said."""
+        src = Path(path.strip())
+        if not src.is_file():
+            return None
+        try:
+            return services.find_duplicate(self.repo, src)
+        except GatewayError:
+            return None
 
     def _process(self, path: str, project: str, options: ImportOptions) -> None:
         """Refuses what is plainly not a recording, and a project with no name,

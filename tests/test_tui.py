@@ -44,6 +44,20 @@ NOTES = {
 }
 
 
+# the moment every recording a test brings in claims to have been taped at
+TAPED_AT = "2026-08-17T06:01:22Z"
+
+
+@pytest.fixture(autouse=True)
+def taped_at(monkeypatch):
+    """Reads the same instant off every recording a test hands the app, without
+    ffprobe being run over the handful of bytes standing in for audio. Memos are
+    seeded carrying no such instant at all, which matches nothing, so a test
+    meaning to offer a recording that is already stored says so by seeding one
+    taped at this moment."""
+    monkeypatch.setattr(services.audio, "recorded_at", lambda _src: TAPED_AT)
+
+
 def seed(repo) -> tuple[int, int]:
     """Two projects, one memo each, only the work memo having notes."""
     work = repo.create_memo(
@@ -2330,6 +2344,174 @@ async def test_leaving_the_modal_brings_nothing_in(repo, tmp_path, monkeypatch):
 
         assert not showing(pilot.app, "#source-path")
         assert ran == []
+
+
+# --- a recording that is already here --------------------------------------
+
+
+def already_stored(repo, filename: str = "standup.m4a") -> int:
+    """A memo taped at the moment every recording a test offers claims, which is
+    what makes the next import of one a second copy of this."""
+    return repo.create_memo(
+        filename=filename, wav_path="/tmp/c.wav", duration_s=1.0, language="en",
+        segments=[Segment(0, 1000, "we ship on friday", speaker="S1")],
+        speakers=[Speaker("S1")], project="work", recorded_at=TAPED_AT,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_recording_already_stored_is_asked_about_before_it_comes_in_twice(
+    repo, tmp_path, monkeypatch
+):
+    # the copy offered carries another name, which is why nobody spotted it;
+    # naming the memo it matched is the only way to say what would be doubled
+    stored = already_stored(repo)
+    ran: list = []
+    monkeypatch.setattr(services, "process_memo", lambda *a, **k: ran.append(a) or None)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        await process_file(pilot, recording(tmp_path, "standup (1).m4a"), "work")
+        await pilot.pause()
+
+        asked = str(pilot.app.screen.query_one("#confirm-duplicate", Static).content)
+        assert f"memo {stored}" in asked
+        assert "standup.m4a" in asked
+
+        await pilot.press("n")
+        await finish_jobs(pilot)
+
+        assert not showing(pilot.app, "#confirm-duplicate")
+        assert ran == []
+        assert pilot.app.importing == {}
+        assert memo_names(pilot.app) == ["standup.m4a"]
+
+
+@pytest.mark.asyncio
+async def test_saying_no_to_a_second_copy_leaves_the_form_as_it_was(
+    repo, tmp_path, monkeypatch
+):
+    # a no is about this recording, not about everything typed into the form:
+    # the next thing a hand does is usually pick a different file
+    already_stored(repo)
+    ran: list = []
+    monkeypatch.setattr(services, "process_memo", lambda *a, **k: ran.append(a) or None)
+    src = recording(tmp_path, "standup (1).m4a")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await process_file(pilot, src, "work")
+        await pilot.pause()
+
+        await pilot.press("n")
+        await finish_jobs(pilot)
+
+        assert showing(pilot.app, "#source-path")
+        assert pilot.app.screen.query_one("#source-path", Input).value == str(src)
+        assert pilot.app.screen.query_one("#source-project", Input).value == "work"
+        assert ran == []
+
+
+@pytest.mark.asyncio
+async def test_escape_leaves_the_duplicate_question_without_bringing_it_in(
+    repo, tmp_path, monkeypatch
+):
+    already_stored(repo)
+    ran: list = []
+    monkeypatch.setattr(services, "process_memo", lambda *a, **k: ran.append(a) or None)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await process_file(pilot, recording(tmp_path, "standup (1).m4a"), "work")
+        await pilot.pause()
+        assert showing(pilot.app, "#confirm-duplicate")
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert not showing(pilot.app, "#confirm-duplicate")
+        assert showing(pilot.app, "#source-path")
+
+        await pilot.press("escape")  # and the second one closes the form behind it
+        await finish_jobs(pilot)
+
+        assert not showing(pilot.app, "#source-path")
+        assert ran == []
+
+
+@pytest.mark.asyncio
+async def test_saying_the_second_copy_is_wanted_brings_it_in(
+    repo, tmp_path, monkeypatch
+):
+    # re-importing on purpose is a real thing to do — a memo deleted down to its
+    # notes, a pipeline changed since — so the question is a question, not a bar
+    already_stored(repo)
+    monkeypatch.setattr(services, "process_memo", stores_a_memo())
+    monkeypatch.setattr(
+        services, "run_extraction", lambda _r, _i, force=False, template="notes": "claude"
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        await process_file(pilot, recording(tmp_path, "standup (1).m4a"), "work")
+        await pilot.pause()
+
+        await pilot.press("y")
+        await finish_jobs(pilot)
+
+        assert not showing(pilot.app, "#confirm-duplicate")
+        assert not showing(pilot.app, "#source-path")
+        assert memo_names(pilot.app) == ["standup (1).m4a", "standup.m4a"]
+
+
+@pytest.mark.asyncio
+async def test_a_recording_nothing_here_matches_is_brought_in_unasked(
+    repo, tmp_path, monkeypatch
+):
+    seed(repo)  # memos carrying no taping moment at all, which matches nothing
+    monkeypatch.setattr(services, "process_memo", stores_a_memo())
+    monkeypatch.setattr(
+        services, "run_extraction", lambda _r, _i, force=False, template="notes": "claude"
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        await process_file(pilot, recording(tmp_path, "planning.m4a"), "work")
+        await pilot.pause()
+
+        assert not showing(pilot.app, "#confirm-duplicate")
+
+        await finish_jobs(pilot)
+
+        assert memo_names(pilot.app) == ["planning.m4a", "standup.m4a"]
+
+
+@pytest.mark.asyncio
+async def test_a_recording_ffprobe_cannot_read_is_no_duplicate_and_no_crash(
+    repo, tmp_path, monkeypatch
+):
+    # the pipeline is where an unreadable file fails, with what ffmpeg said; a
+    # failure raised out of the modal handler would take the whole app down
+    already_stored(repo)
+
+    def unreadable(_src):
+        raise GatewayError("ffprobe failed reading standup (1).m4a")
+
+    monkeypatch.setattr(services.audio, "recorded_at", unreadable)
+    monkeypatch.setattr(services, "process_memo", stores_a_memo())
+    monkeypatch.setattr(
+        services, "run_extraction", lambda _r, _i, force=False, template="notes": "claude"
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        await process_file(pilot, recording(tmp_path, "standup (1).m4a"), "work")
+        await finish_jobs(pilot)
+
+        assert not showing(pilot.app, "#confirm-duplicate")
+        assert memo_names(pilot.app) == ["standup (1).m4a", "standup.m4a"]
 
 
 # --- the add-recording form's own choices ----------------------------------
