@@ -9,6 +9,11 @@ SCHEMA = {
     "type": "object",
     "properties": {
         "title": {"type": "string"},
+        # what the memo files itself under, asked for but never insisted on: a
+        # note template somebody wrote before this was asked for still parses,
+        # and a memo whose subject the model could not place keeps the filing
+        # it already had
+        "project": {"type": "string"},
         "summary": {"type": "string"},
         "action_items": {
             "type": "array",

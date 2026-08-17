@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 import numpy as np
 
@@ -20,10 +20,15 @@ class DateMention(TypedDict):
 
 
 class NotesPayload(TypedDict):
-    """The notes an LLM produces for one memo. Every section is required: the
-    reader shows them all, so a backend that omits one has not done the job."""
+    """The notes an LLM produces for one memo. Every section a reader is shown
+    is required: a backend that omits one has not done the job. The project the
+    memo belongs to is the exception — it is a suggestion for filing rather than
+    something the notes display, so a backend that has nothing to say about it,
+    or a note template written before it was asked for, still produces usable
+    notes."""
 
     title: str
+    project: NotRequired[str]
     summary: str
     action_items: list[ActionItem]
     decisions: list[str]

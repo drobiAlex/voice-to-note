@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from . import config
-from .domain import Extraction, Memo, Speaker, SpeakerMatch, Turn
+from .domain import Extraction, Memo, NotesPayload, Speaker, SpeakerMatch, Turn
 from .gateways import GatewayError, audio, bootstrap, llm, sherpa, whisper
 from .storage.repository import Repository
 from .transforms.notes import SCHEMA, parse_notes, render_notes, render_notes_markdown
@@ -914,6 +914,59 @@ def _complete(
     )
 
 
+# what a memo still named after the recording it was made from looks like. The
+# extension is the whole test: "standup.m4a" is a name the file system handed
+# over, "Sprint planning" is one somebody meant.
+AUDIO_SUFFIXES = frozenset(
+    {".m4a", ".wav", ".mp3", ".aac", ".flac", ".ogg", ".mp4", ".aiff", ".caf", ".qta", ".opus"}
+)
+
+
+def _suggested_project(data: NotesPayload) -> str | None:
+    """The project the notes place this memo in, or None when they place it
+    nowhere usable. A backend may leave the key out entirely, answer null, or
+    answer whitespace — a note template written before this was asked for does
+    the first of those every time — and all of them have to read as saying
+    nothing, rather than filing a memo under a name nobody could search for or
+    move it out of."""
+    suggestion = data.get("project")
+    if not isinstance(suggestion, str):
+        return None
+    try:
+        return _project_name(suggestion)
+    except InvalidInput:
+        return None
+
+
+def _auto_name(repo: Repository, memo_id: int, data: NotesPayload) -> None:
+    """Names a memo after what it turned out to be about — `<project> - <topic>`
+    — so a list of them reads as work rather than as a folder of recordings.
+
+    Whoever filed the memo outranks the model: a project a person chose is the
+    one the name carries, and only a memo still sitting in the default project
+    takes the model's suggestion — which then files it there as well, so the
+    name and the sidebar agree about where the memo belongs. Filing and naming
+    are answered separately, so a memo somebody named by hand still gets grouped
+    with its own work.
+
+    A name is only ever written over one nobody chose. A filename still carrying
+    an audio extension came off disk with the recording; anything else was typed
+    by a person or written by an earlier run of this, and either is a better name
+    than a fresh guess — which is why re-extracting keeps the first auto-name
+    rather than following the model's second thoughts."""
+    memo = repo.memo(memo_id)
+    if memo is None:
+        return
+    suggestion = _suggested_project(data)
+    if memo.project == "other" and suggestion:
+        repo.set_project(memo_id, suggestion)
+    project = memo.project if memo.project != "other" else suggestion or "other"
+    topic = data["title"].strip()
+    if not topic or Path(memo.filename).suffix.lower() not in AUDIO_SUFFIXES:
+        return
+    repo.set_filename(memo_id, f"{project} - {topic}")
+
+
 def run_extraction(
     repo: Repository, memo_id: int, force: bool = False, template: str = "notes"
 ) -> str:
@@ -927,7 +980,11 @@ def run_extraction(
     What the notes commit somebody to is taken into the memo's to-do list as
     part of the same run: the list is what gets checked off and counted, and an
     extraction that did not feed it would leave the two disagreeing about what
-    this memo said had to be done."""
+    this memo said had to be done.
+
+    The memo names and files itself from the same notes, last of all: the
+    notes are what the run was for, so they are stored before anything that only
+    changes how the memo is listed."""
     note_template(template)
     if not force and repo.notes_md(memo_id):
         raise InvalidInput(
@@ -943,6 +1000,7 @@ def run_extraction(
     )
     repo.save_extraction(memo_id, backend, data, clear_edited=force)
     repo.sync_todos(memo_id, data["action_items"])
+    _auto_name(repo, memo_id, data)
     return backend
 
 

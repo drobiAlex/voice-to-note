@@ -34,6 +34,16 @@ def test_extracts_json_embedded_in_prose():
     assert parse_notes(text) == NOTES
 
 
+def test_parses_notes_that_name_the_project_the_memo_belongs_to():
+    assert parse_notes(json.dumps(NOTES | {"project": "orbit"}))["project"] == "orbit"
+
+
+def test_parses_notes_that_name_no_project_at_all():
+    # a note template somebody saved before the project was ever asked for still
+    # produces notes; filing is a suggestion, not a section a reader is shown
+    assert "project" not in parse_notes(json.dumps(NOTES))
+
+
 def test_rejects_output_missing_required_keys():
     incomplete = {k: v for k, v in NOTES.items() if k != "tags"}
     with pytest.raises(ValueError, match="tags"):

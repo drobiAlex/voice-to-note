@@ -20,6 +20,7 @@ NOTES_PROMPT = """Extract structured notes from this voice-memo transcript.
 Return ONLY a JSON object, no markdown fences, exactly this shape:
 {
   "title": "short descriptive title",
+  "project": "short project name",
   "summary": "3-6 sentence summary",
   "action_items": [{"task": "...", "owner": "name or null", "deadline": "date or verbatim phrase or null"}],
   "decisions": ["..."],
@@ -30,6 +31,7 @@ Return ONLY a JSON object, no markdown fences, exactly this shape:
 }
 
 Rules:
+- project: the thing this conversation is about — the product, client or area of work it belongs to, lowercase, a word or two
 - action_items: concrete tasks someone committed to; owner = who does it (use speaker names from the transcript when clear, else null)
 - deadline: keep verbatim when not a clean date ("by Friday")
 - decisions: things agreed or settled in the conversation

@@ -2096,3 +2096,120 @@ def test_the_note_shows_a_task_ticked_once_it_has_been_checked_off(repo, wav, mo
 def test_checking_off_a_to_do_nobody_stored_is_refused(repo):
     with pytest.raises(services.NotFound):
         services.set_todo_status(repo, 999, "done")
+
+
+# --- a memo naming itself ---------------------------------------------------
+
+
+FILED = NOTES | {"title": "Sprint planning", "project": "orbit"}
+
+
+def spoken_memo(repo, wav, filename="memo.m4a") -> int:
+    """A transcribed memo waiting on notes, under the name it arrived with."""
+    return add_memo(
+        repo, wav, segments=[Segment(0, 1000, "Ship it", speaker="S1")], filename=filename
+    )
+
+
+def test_a_memo_nobody_filed_takes_both_its_name_and_its_project_from_the_notes(
+    repo, wav, monkeypatch
+):
+    # a list of recording filenames says nothing about what any of them was
+    # about, and the notes have just worked that out
+    memo_id = spoken_memo(repo, wav)
+    fake_llm(monkeypatch, claude=json.dumps(FILED))
+
+    services.run_extraction(repo, memo_id)
+
+    memo = repo.memo(memo_id)
+    assert (memo.filename, memo.project) == ("orbit - Sprint planning", "orbit")
+
+
+def test_the_project_somebody_filed_a_memo_under_is_the_one_its_name_carries(
+    repo, wav, monkeypatch
+):
+    # a person's filing is a decision about where the memo belongs; the model's
+    # is a guess at the same thing, and a guess must not overrule the decision
+    memo_id = add_project_memo(repo, wav, "memo.m4a", "work")
+    fake_llm(monkeypatch, claude=json.dumps(FILED))
+    refiled: list = []
+    monkeypatch.setattr(type(repo), "set_project", lambda _self, *args: refiled.append(args))
+
+    services.run_extraction(repo, memo_id)
+
+    assert repo.memo(memo_id).filename == "work - Sprint planning"
+    assert refiled == []
+
+
+def test_a_memo_somebody_named_themselves_comes_out_of_an_extraction_unrenamed(
+    repo, wav, monkeypatch
+):
+    # somebody typing a name said what this memo is to them; no later reading of
+    # the transcript knows better than that
+    memo_id = spoken_memo(repo, wav)
+    services.rename_memo(repo, memo_id, "What Ana actually meant")
+    fake_llm(monkeypatch, claude=json.dumps(FILED))
+
+    services.run_extraction(repo, memo_id)
+
+    assert repo.memo(memo_id).filename == "What Ana actually meant"
+
+
+def test_naming_a_memo_by_hand_does_not_stop_the_notes_filing_it(repo, wav, monkeypatch):
+    # what to call a memo and where it belongs are separate questions: keeping
+    # somebody's name must not leave the memo out of the project it is part of
+    memo_id = spoken_memo(repo, wav)
+    services.rename_memo(repo, memo_id, "What Ana actually meant")
+    fake_llm(monkeypatch, claude=json.dumps(FILED))
+
+    services.run_extraction(repo, memo_id)
+
+    assert repo.memo(memo_id).project == "orbit"
+
+
+def test_notes_that_name_no_project_still_name_the_memo_after_its_topic(repo, wav, monkeypatch):
+    # the topic alone is already worth more than the filename off the recorder
+    memo_id = spoken_memo(repo, wav)
+    fake_llm(monkeypatch, claude=json.dumps(NOTES | {"title": "Sprint planning"}))
+
+    services.run_extraction(repo, memo_id)
+
+    memo = repo.memo(memo_id)
+    assert (memo.filename, memo.project) == ("other - Sprint planning", "other")
+
+
+def test_a_blank_project_in_the_notes_reads_as_no_project_at_all(repo, wav, monkeypatch):
+    # a backend answering with whitespace has named nothing, and a nameless
+    # project is a blank sidebar row nobody could move a memo out of
+    memo_id = spoken_memo(repo, wav)
+    fake_llm(monkeypatch, claude=json.dumps(NOTES | {"title": "Sprint planning", "project": "   "}))
+
+    services.run_extraction(repo, memo_id)
+
+    memo = repo.memo(memo_id)
+    assert (memo.filename, memo.project) == ("other - Sprint planning", "other")
+
+
+def test_notes_with_nothing_for_a_title_leave_the_memo_named_as_it_arrived(
+    repo, wav, monkeypatch
+):
+    # half a name reads as a bug; the recording's own filename at least locates it
+    memo_id = spoken_memo(repo, wav, filename="standup.m4a")
+    fake_llm(monkeypatch, claude=json.dumps(NOTES | {"title": "  ", "project": "orbit"}))
+
+    services.run_extraction(repo, memo_id)
+
+    assert repo.memo(memo_id).filename == "standup.m4a"
+
+
+def test_re_extracting_keeps_the_name_the_first_extraction_gave(repo, wav, monkeypatch):
+    # by the second run the name is one somebody has been reading the memo
+    # under, and the model's rewording of the same topic is not worth moving it
+    memo_id = spoken_memo(repo, wav)
+    fake_llm(monkeypatch, claude=json.dumps(FILED))
+    services.run_extraction(repo, memo_id)
+    fake_llm(monkeypatch, claude=json.dumps(FILED | {"title": "Planning the sprint"}))
+
+    services.run_extraction(repo, memo_id)
+
+    assert repo.memo(memo_id).filename == "orbit - Sprint planning"
