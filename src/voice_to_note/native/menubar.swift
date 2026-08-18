@@ -65,6 +65,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } else {
                 stopPulsing()
             }
+            // the meters belong to one recording for the same reason, and
+            // emptying them on every state that is not recording is also what
+            // makes each recording start from silence rather than from
+            // whatever the last one ended on
+            if state != .recording {
+                forgetMeters()
+            }
         }
     }
     private var recorder: Process?
@@ -79,6 +86,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var projects: [(name: String, count: Int)]?
     private var devices: AudioDevices?
     private var refreshing = false
+
+    /// How loud each side has been, kept for the length of one recording. The
+    /// two of them are the model behind everything the meters draw, and the
+    /// state's own didSet is what empties them — a strip still showing the last
+    /// meeting's voices would be describing a tape that stopped.
+    private let systemLevels = LevelHistory()
+    private let microphoneLevels = LevelHistory()
+    private var meterView: MeterMenuView?
+
+    /// The composite handed to the button last, and when. Only Reduce Motion
+    /// looks at them: it asks for the strips to be redrawn twice a second
+    /// instead of ten times, and the way to honour that is to hand back what
+    /// was drawn before rather than to stop the readings arriving.
+    private var drawnMeters: NSImage?
+    private var drawnAt = Date.distantPast
+
+    /// What the button says to a screen reader and to a pointer resting on it,
+    /// composed once a second because that is as often as any of it changes.
+    private var spoken = ""
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let menu = NSMenu()
@@ -119,7 +145,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             button.image = Mark.starting
             button.attributedTitle = label("…")
         case .recording:
-            button.image = Mark.recording
+            speak()
+            button.image = meters()
             button.attributedTitle = label(elapsed())
         case .processing:
             button.image = Mark.working[pulseFrame]
@@ -127,85 +154,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// The mark this app is known by in the menu bar, drawn here rather than
-    /// borrowed from SF Symbols: `waveform` is symmetric and already stands for
-    /// a dozen other audio apps, and the one job this glyph has is being picked
-    /// out of a crowded menu bar without being read. So it is five bars of
-    /// deliberately uneven height, and the shape never changes between states —
-    /// only its colour, and a slow shuffle while notes are being made. What is
-    /// in the corner of the screen stays the same thing all the way through a
-    /// meeting; what it is doing is told by how it is inked.
-    ///
-    /// Each image is built once and kept. A status item redraws its button on
-    /// every appearance change and once a second while a recording is running,
-    /// and none of that should cost a fresh bitmap.
-    private enum Mark {
-        /// A status item scales its image to the height of the menu bar, and
-        /// 18pt square is the size that arrives there unscaled — anything else
-        /// is resampled, which is exactly what a shape made of nothing but
-        /// straight edges cannot survive.
-        private static let side: CGFloat = 18
-        private static let barWidth: CGFloat = 2
-        private static let gap: CGFloat = 1.5
-
-        /// ▁▃█▅▂ — low, mid, tall, high, low. Even numbers only: the bars are
-        /// centred vertically, so an odd height would put both ends of every
-        /// bar on a half point, and a half-point edge is a grey smear rather
-        /// than a line on a display that is not retina.
-        private static let resting: [CGFloat] = [4, 8, 14, 10, 6]
-
-        /// The same five bars with the flanks traded and the tall one held
-        /// where it is. Two frames of this is the whole processing animation:
-        /// the mark leans rather than spins or blinks, because something
-        /// flashing in the menu bar reads as a thing gone wrong rather than a
-        /// thing under way. Pinning the tall bar is what keeps the two frames
-        /// one mark swaying instead of two different marks alternating.
-        private static let leaning: [CGFloat] = [6, 10, 14, 8, 4]
-
-        static let idle = draw(resting, .black, template: true, "Not recording")
-
-        /// Half-inked, because the tape is not rolling yet. A template image is
-        /// tinted through its own alpha, so drawing the mark faint is all it
-        /// takes to have the menu bar show it faint in either appearance.
-        static let starting = draw(
-            resting, NSColor.black.withAlphaComponent(0.5), template: true, "Starting to record"
-        )
-
-        /// The one thing on screen saying a meeting is being taped, so it keeps
-        /// its own colour instead of being tinted to match the menu bar the way
-        /// everything else here is. Red is not decoration: it is the colour
-        /// macOS itself uses for a live capture, and borrowing it means this
-        /// needs no learning.
-        static let recording = draw(resting, .systemRed, template: false, "Recording")
-
-        static let working = [
-            draw(resting, .black, template: true, "Making notes from the meeting"),
-            draw(leaning, .black, template: true, "Making notes from the meeting"),
-        ]
-
-        /// One frame of the mark: bars of the given heights, rounded at both
-        /// ends, laid out from a left edge that centres the whole run inside
-        /// the square, so every frame sits in exactly the same place and the
-        /// animation is the bars moving rather than the mark shifting sideways.
-        private static func draw(
-            _ heights: [CGFloat], _ ink: NSColor, template: Bool, _ description: String
-        ) -> NSImage {
-            let run = CGFloat(heights.count) * barWidth + CGFloat(heights.count - 1) * gap
-            let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
-                ink.set()
-                var x = (side - run) / 2
-                for height in heights {
-                    let bar = NSRect(x: x, y: (side - height) / 2, width: barWidth, height: height)
-                    let cap = barWidth / 2
-                    NSBezierPath(roundedRect: bar, xRadius: cap, yRadius: cap).fill()
-                    x += barWidth + gap
-                }
-                return true
-            }
-            image.isTemplate = template
-            image.accessibilityDescription = description
-            return image
+    /// The mark with both strips beside it, as the two sides stand right now.
+    /// Under Reduce Motion the last one is handed back until half a second has
+    /// gone by: that setting asks for no scrolling history, and columns
+    /// redrawn ten times a second are the very movement at the edge of the eye
+    /// it exists to spare somebody.
+    private func meters() -> NSImage {
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let now = Date()
+        if reduceMotion, let drawn = drawnMeters, now.timeIntervalSince(drawnAt) < 0.5 {
+            return drawn
         }
+        let image = Meters.composite(
+            mark: Mark.recording, system: systemLevels, microphone: microphoneLevels,
+            reduceMotion: reduceMotion
+        )
+        // the sentence is composed once a second, but every composite has to
+        // carry it: the image is replaced ten times a second and a screen
+        // reader describes whichever one it finds on the button
+        image.accessibilityDescription = spoken
+        drawnMeters = image
+        drawnAt = now
+        return image
+    }
+
+    /// A fresh reading from each side. These are the only clock the strips
+    /// have — they arrive ten a second for as long as the tape rolls — which
+    /// is why nothing here starts a timer, and why the elapsed time, the
+    /// spoken sentence and the menu's footer are left to the one that exists.
+    private func metered(_ system: Double, _ microphone: Double) {
+        systemLevels.push(system)
+        microphoneLevels.push(microphone)
+        meterView?.show(system: systemLevels, microphone: microphoneLevels)
+        statusItem.button?.image = meters()
+    }
+
+    /// The recording put into a sentence, for a screen reader and for the
+    /// pointer resting on the button: how far in it is and what each side is
+    /// doing. Once a second, from the ticker, because formatting this ten
+    /// times a second would buy nothing that can be read in a tenth of one.
+    private func speak() {
+        let now = Date()
+        spoken = "Recording \(elapsed()) — "
+            + Meters.spoken("system audio", systemLevels, now: now) + ", "
+            + Meters.spoken("microphone", microphoneLevels, now: now)
+        statusItem.button?.toolTip = spoken
+        meterView?.showFooter(system: systemLevels, microphone: microphoneLevels, now: now)
+    }
+
+    /// Everything the meters were made of, dropped. The menu's view goes with
+    /// the readings: it was built around the devices this recording used, and
+    /// the next recording may be listening to something else entirely.
+    private func forgetMeters() {
+        systemLevels.reset()
+        microphoneLevels.reset()
+        meterView = nil
+        drawnMeters = nil
+        spoken = ""
+        statusItem.button?.toolTip = nil
     }
 
     /// Monospaced digits: proportional ones would shuffle the whole menu bar
@@ -291,6 +297,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             )))
             refresh()
         case .starting, .recording:
+            if state == .recording {
+                menu.addItem(meterItem())
+                menu.addItem(.separator())
+            }
             menu.addItem(action("Stop Recording", #selector(stopRecording)))
             menu.addItem(note(state == .recording ? "Recording \(elapsed())" : "Starting …"))
         case .processing:
@@ -298,6 +308,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
         menu.addItem(action("Quit", #selector(quit)))
+    }
+
+    /// The meters, at the top of the menu because checking them is what the
+    /// menu is opened for mid-meeting. The view is built once per recording and
+    /// handed to every opening after that: rebuilding it here would throw away
+    /// the readings arriving while somebody watches it. Like everything else in
+    /// this menu it runs no subprocess — a menu is drawn on the main thread,
+    /// and a menu that waits on `vtn` is a menu that does not open.
+    private func meterItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        let view = meterView ?? MeterMenuView(
+            system: chosenOutput?.name ?? "system mix",
+            microphone: chosenInput?.name ?? "default microphone"
+        )
+        meterView = view
+        view.show(system: systemLevels, microphone: microphoneLevels)
+        view.showFooter(system: systemLevels, microphone: microphoneLevels)
+        item.view = view
+        return item
     }
 
     private func action(_ title: String, _ selector: Selector) -> NSMenuItem {
@@ -558,8 +588,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// were left set to. A device is named only when one was chosen: leaving the
     /// flag off is what asks the recorder for the system mix and the default
     /// microphone, and passing a UID for either is what overrides that.
+    ///
+    /// `--levels` is the one flag nobody would type: the recorder draws its own
+    /// bars for a terminal, sees a pipe here and would draw nothing at all, and
+    /// the numbers it prints instead are what the strips in the menu bar are.
     private func recordArguments() -> [String] {
-        var arguments = ["record", "--project", chosenProject]
+        var arguments = ["record", "--project", chosenProject, "--levels"]
         if let output = chosenOutput {
             arguments += ["--output-device", output.uid]
         }
@@ -585,14 +619,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.terminate(nil)
     }
 
-    /// Everything the recorder says on its way through a meeting, kept whole in
-    /// the log and read for the one line that matters here: it is printed only
-    /// once both audio streams are live, so it is what the red dot waits for.
+    /// Everything the recorder says on its way through a meeting: the meter's
+    /// readings, which feed the strips and go no further, and every other line,
+    /// which is kept whole in the log and read for the one that matters here —
+    /// printed only once both audio streams are live, so it is what the red dot
+    /// waits for.
     private func heard(_ data: Data) {
         unread += String(decoding: data, as: UTF8.self)
         while let newline = unread.firstIndex(of: "\n") {
             let line = String(unread[..<newline])
             unread = String(unread[unread.index(after: newline)...])
+            if let reading = levels(in: line) {
+                // ten of these a second, and none of them logged: an hour of
+                // meeting would be thirty-six thousand lines of numbers nobody
+                // will read, and the one line saying what went wrong would be
+                // somewhere in the middle of them. A reading arriving before
+                // the tape rolls is dropped as well — it describes nothing
+                // that is being recorded yet
+                if state == .recording {
+                    metered(reading.system, reading.microphone)
+                }
+                continue
+            }
             write(line)
             if state == .starting, line.hasPrefix("recording —") {
                 startedAt = Date()
@@ -601,6 +649,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 show()
             }
         }
+    }
+
+    /// A reading from the recorder's meter, or nothing if this line is anything
+    /// else: `level`, the system side and the microphone side, tabs apart and
+    /// in dBFS. A line short of a field or carrying something that is not a
+    /// number is dropped rather than guessed at, the same as the device list —
+    /// a meter is not worth a wrong number.
+    private func levels(in line: String) -> (system: Double, microphone: Double)? {
+        guard line.hasPrefix("level\t") else { return nil }
+        let fields = line.components(separatedBy: "\t")
+        guard fields.count == 3, let system = Double(fields[1]),
+            let microphone = Double(fields[2])
+        else {
+            return nil
+        }
+        return (system: system, microphone: microphone)
     }
 
     /// The recorder is gone, however it went: stopped from this menu and then
@@ -710,6 +774,560 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         try? logFile?.write(contentsOf: data)
     }
 }
+
+// MARK: - Meters and marks (drawing and models only; no app state, no process handling)
+
+// imported again here, redundantly for this file, because everything between
+// this line and the end of the section is meant to compile on its own: lifted
+// out into a file of its own it renders the whole look of the meters offscreen,
+// which is the only way to see what a recording will look like without taping
+// one first.
+import AppKit
+
+/// The mark this app is known by in the menu bar, drawn here rather than
+/// borrowed from SF Symbols: `waveform` is symmetric and already stands for
+/// a dozen other audio apps, and the one job this glyph has is being picked
+/// out of a crowded menu bar without being read. So it is five bars of
+/// deliberately uneven height, and the shape never changes between states —
+/// only its colour, and a slow shuffle while notes are being made. What is
+/// in the corner of the screen stays the same thing all the way through a
+/// meeting; what it is doing is told by how it is inked.
+///
+/// Each image is built once and kept. A status item redraws its button on
+/// every appearance change and once a second while a recording is running,
+/// and none of that should cost a fresh bitmap.
+enum Mark {
+    /// A status item scales its image to the height of the menu bar, and
+    /// 18pt square is the size that arrives there unscaled — anything else
+    /// is resampled, which is exactly what a shape made of nothing but
+    /// straight edges cannot survive.
+    private static let side: CGFloat = 18
+    private static let barWidth: CGFloat = 2
+    private static let gap: CGFloat = 1.5
+
+    /// ▁▃█▅▂ — low, mid, tall, high, low. Even numbers only: the bars are
+    /// centred vertically, so an odd height would put both ends of every
+    /// bar on a half point, and a half-point edge is a grey smear rather
+    /// than a line on a display that is not retina.
+    private static let resting: [CGFloat] = [4, 8, 14, 10, 6]
+
+    /// The same five bars with the flanks traded and the tall one held
+    /// where it is. Two frames of this is the whole processing animation:
+    /// the mark leans rather than spins or blinks, because something
+    /// flashing in the menu bar reads as a thing gone wrong rather than a
+    /// thing under way. Pinning the tall bar is what keeps the two frames
+    /// one mark swaying instead of two different marks alternating.
+    private static let leaning: [CGFloat] = [6, 10, 14, 8, 4]
+
+    static let idle = draw(resting, .black, template: true, "Not recording")
+
+    /// Half-inked, because the tape is not rolling yet. A template image is
+    /// tinted through its own alpha, so drawing the mark faint is all it
+    /// takes to have the menu bar show it faint in either appearance.
+    static let starting = draw(
+        resting, NSColor.black.withAlphaComponent(0.5), template: true, "Starting to record"
+    )
+
+    /// The one thing on screen saying a meeting is being taped, so it keeps
+    /// its own colour instead of being tinted to match the menu bar the way
+    /// everything else here is. Red is not decoration: it is the colour
+    /// macOS itself uses for a live capture, and borrowing it means this
+    /// needs no learning.
+    static let recording = draw(resting, .systemRed, template: false, "Recording")
+
+    static let working = [
+        draw(resting, .black, template: true, "Making notes from the meeting"),
+        draw(leaning, .black, template: true, "Making notes from the meeting"),
+    ]
+
+    /// One frame of the mark: bars of the given heights, rounded at both
+    /// ends, laid out from a left edge that centres the whole run inside
+    /// the square, so every frame sits in exactly the same place and the
+    /// animation is the bars moving rather than the mark shifting sideways.
+    private static func draw(
+        _ heights: [CGFloat], _ ink: NSColor, template: Bool, _ description: String
+    ) -> NSImage {
+        let run = CGFloat(heights.count) * barWidth + CGFloat(heights.count - 1) * gap
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
+            ink.set()
+            var x = (side - run) / 2
+            for height in heights {
+                let bar = NSRect(x: x, y: (side - height) / 2, width: barWidth, height: height)
+                let cap = barWidth / 2
+                NSBezierPath(roundedRect: bar, xRadius: cap, yRadius: cap).fill()
+                x += barWidth + gap
+            }
+            return true
+        }
+        image.isTemplate = template
+        image.accessibilityDescription = description
+        return image
+    }
+}
+
+/// How loud one side of a recording has been over the last couple of seconds.
+/// Two of these — the system tap and the microphone — are the whole model both
+/// meters are drawn from: the strip in the menu bar draws the ring, the level
+/// indicator in the menu draws `latest`, and the silence clock is what lets
+/// either of them say a microphone has been dead for twelve seconds rather
+/// than only that it happens to be quiet at this instant.
+///
+/// The time is passed in rather than read in here, so a reading times its own
+/// silence — and so a scripted meeting can be walked through without waiting
+/// out the seconds it describes.
+final class LevelHistory {
+    /// dBFS, the way the recorder reports it: 0 is as loud as a sample can be
+    /// and −60 is what it prints for nothing at all. Under −50 is taken for
+    /// silence rather than a quiet room, because a room with anybody in it
+    /// sits well above that and a muted microphone sits on the floor.
+    static let silence: Double = -50
+    static let floor: Double = -60
+    static let ceiling: Double = 0
+
+    /// The newest reading, which is what a level indicator wants; the ring
+    /// behind it is what a scrolling strip wants.
+    private(set) var latest = LevelHistory.floor
+
+    /// When this side went quiet, or nothing while it is not. Kept as the
+    /// moment rather than a running count so nothing has to tick to age it:
+    /// whoever asks does the subtraction.
+    private(set) var silentSince: Date?
+
+    private var ring: [Double]
+
+    /// The slot the next reading overwrites, which is also the oldest one.
+    private var next = 0
+
+    /// Filled with the floor rather than left short, so a strip has a whole
+    /// row to draw from its first frame. Before any reading has arrived there
+    /// genuinely is no sound, and drawing that as silence is honest; a row
+    /// that grew in from the right would instead be claiming the meeting is
+    /// younger than it is every time this is emptied.
+    init(columns: Int = Meters.columns) {
+        ring = Array(repeating: LevelHistory.floor, count: max(columns, 1))
+    }
+
+    func push(_ level: Double, now: Date = Date()) {
+        ring[next] = level
+        next = (next + 1) % ring.count
+        latest = level
+        if level < LevelHistory.silence {
+            // only the first silent reading starts the clock: the ones behind
+            // it are the same silence going on, and restarting it ten times a
+            // second would hold the count at zero for as long as it lasted
+            if silentSince == nil {
+                silentSince = now
+            }
+        } else {
+            silentSince = nil
+        }
+    }
+
+    /// Back to silence for the next recording, rather than a new history for
+    /// it: the two are held for the life of the app, and what must not survive
+    /// a recording is the readings, not the object.
+    func reset() {
+        for slot in ring.indices {
+            ring[slot] = LevelHistory.floor
+        }
+        next = 0
+        latest = LevelHistory.floor
+        silentSince = nil
+    }
+
+    /// The readings oldest first. Copied out rather than handed over, because
+    /// whatever draws them runs later — an image's drawing handler runs when
+    /// the button is drawn, by which time more readings have landed in the
+    /// ring — and a strip has to be one moment rather than a smear of two.
+    var trace: [Double] {
+        var ordered = [Double]()
+        ordered.reserveCapacity(ring.count)
+        for step in 0..<ring.count {
+            ordered.append(ring[(next + step) % ring.count])
+        }
+        return ordered
+    }
+
+    /// How long this side has been silent, or nothing if it is not.
+    func silentFor(now: Date = Date()) -> TimeInterval? {
+        guard let silentSince else { return nil }
+        return now.timeIntervalSince(silentSince)
+    }
+}
+
+/// The strips that ride beside the mark while the tape rolls, and the words
+/// both meters are described in. Drawing and phrasing only: handed the two
+/// histories it gives back an image, which is what lets the whole look of the
+/// thing be rendered to a file and judged without a meeting being recorded.
+enum Meters {
+    /// One column per reading and a reading every 100 ms, so eighteen columns
+    /// is 1.8 seconds of history — about as much as is taken in at a glance,
+    /// and as much as 36 points holds at a width where a bar is still a bar.
+    static let columns = 18
+
+    /// Silence is worth mentioning after ten seconds and not before. Pauses
+    /// are ordinary in a meeting — somebody reading a slide, a question being
+    /// thought about — and a warning that fires on all of them is a warning
+    /// that gets ignored on the one that means a muted microphone.
+    static let silenceAfter: TimeInterval = 10
+
+    /// The mark's square, the gap that keeps the strips from reading as part
+    /// of it, and the block they are drawn in.
+    private static let side: CGFloat = 18
+    private static let gap: CGFloat = 6
+    private static let stripWidth: CGFloat = 36
+
+    /// Two rows of eight points with two between them fills the same 18pt the
+    /// mark is tall, which is what keeps the whole thing one status item high.
+    private static let rowHeight: CGFloat = 8
+    private static let rowGap: CGFloat = 2
+
+    /// A point of bar and a point of air. Any wider and 1.8 seconds does not
+    /// fit; any narrower and there is no bar left to see.
+    private static let columnWidth: CGFloat = 2
+    private static let barWidth: CGFloat = 1
+
+    /// The height of the track a level fills under Reduce Motion. Half the
+    /// row, so an empty one is plainly a container waiting to be filled rather
+    /// than a line that might be a flat signal.
+    private static let trackHeight: CGFloat = 4
+
+    /// Even numbers only, and the same reason the mark's are: a bar is
+    /// mirrored around the middle of its row, so an odd height puts both of
+    /// its ends on a half point, and a half-point edge is a grey smear rather
+    /// than a line on a display that is not retina.
+    private static let heights: [CGFloat] = [2, 4, 6, 8]
+
+    /// Fixed, whatever the levels do. Everything to the right of a menu bar
+    /// extra shifts when it changes width, so a status item that grew and
+    /// shrank with the loudness of the room would keep the entire menu bar
+    /// twitching for the length of a meeting.
+    static var size: NSSize {
+        NSSize(width: side + gap + stripWidth, height: side)
+    }
+
+    /// The red mark with both sides of the recording beside it: system audio
+    /// on top, microphone below, the way they are named everywhere else.
+    ///
+    /// The two histories are read out here and the closure keeps the copies,
+    /// not the histories, because the closure runs when the button draws —
+    /// which is after the next reading has already arrived.
+    static func composite(
+        mark: NSImage, system: LevelHistory, microphone: LevelHistory, reduceMotion: Bool
+    ) -> NSImage {
+        let top = system.trace
+        let bottom = microphone.trace
+        let image = NSImage(size: size, flipped: false) { _ in
+            mark.draw(in: NSRect(x: 0, y: 0, width: side, height: side))
+            row(top, from: side + gap, midline: rowHeight + rowGap + rowHeight / 2,
+                reduceMotion: reduceMotion)
+            row(bottom, from: side + gap, midline: rowHeight / 2, reduceMotion: reduceMotion)
+            return true
+        }
+        // not a template image: the mark's red is the one colour in this app
+        // that means something, and a template is flattened to the menu bar's
+        // own tint. The strips ask for a label colour instead, which comes to
+        // the same thing for the half that should follow the menu bar
+        image.isTemplate = false
+        return image
+    }
+
+    /// One side's history, oldest at the left and the newest reading against
+    /// the right edge — the direction a waveform has been read since tape.
+    private static func row(
+        _ trace: [Double], from left: CGFloat, midline: CGFloat, reduceMotion: Bool
+    ) {
+        guard let newest = trace.last else { return }
+        if reduceMotion {
+            fill(newest, from: left, midline: midline)
+            return
+        }
+        for (column, level) in trace.enumerated() {
+            // the newest column is nearly solid and the oldest is a ghost, so
+            // which end of the strip is now needs no explaining
+            let age = CGFloat(column) / CGFloat(max(trace.count - 1, 1))
+            bar(level, from: left + CGFloat(column) * columnWidth, width: barWidth,
+                flat: columnWidth, midline: midline, ink: 0.3 + 0.6 * age)
+        }
+    }
+
+    /// The newest reading as a track filling from the left, which is what
+    /// Reduce Motion leaves room for: nothing scrolls past, no column flickers
+    /// ten times a second, and the one thing the strip exists to show — how
+    /// loud this side is — is still there to be read. The scale is the whole
+    /// of it, floor to ceiling, because a fill has no shape to say anything
+    /// with and the length is all there is.
+    ///
+    /// Silence empties the track rather than shortening it, and the track is
+    /// drawn either way: an empty container is what says nothing is arriving,
+    /// where a missing one would only look like a strip that failed to draw.
+    private static func fill(_ level: Double, from left: CGFloat, midline: CGFloat) {
+        let track = NSRect(
+            x: left, y: midline - trackHeight / 2, width: stripWidth, height: trackHeight
+        )
+        NSColor.labelColor.withAlphaComponent(0.2).setFill()
+        track.fill()
+        guard level >= LevelHistory.silence else { return }
+        let span = LevelHistory.ceiling - LevelHistory.floor
+        let loud = (min(level, LevelHistory.ceiling) - LevelHistory.floor) / span
+        NSColor.labelColor.withAlphaComponent(0.9).setFill()
+        // rounded to a whole point, for the same reason every other edge here
+        // is: a fill ending on a half point frays instead of stopping
+        NSRect(
+            x: track.minX, y: track.minY, width: (CGFloat(loud) * stripWidth).rounded(),
+            height: trackHeight
+        ).fill()
+    }
+
+    /// One reading, mirrored around the middle of its row the way a waveform
+    /// is. Silence is not the shortest bar but a flat line: a difference in
+    /// shape, which somebody reads at a glance and still reads with the colour
+    /// taken away, where a two-point bar beside a four-point one is a guess.
+    ///
+    /// A flat line is drawn the full width of its column rather than the
+    /// width of a bar, so that neighbouring silent readings meet and make one
+    /// line: a row of dots at the spacing of the bars is a texture, and the
+    /// shape somebody has to recognise here is a flatline.
+    ///
+    /// The ink is resolved in here, inside the drawing handler, instead of
+    /// being passed in: this runs when the button draws, and only then is the
+    /// appearance the menu bar is actually wearing — light, dark, or vibrancy
+    /// over a desktop picture — the current one.
+    private static func bar(
+        _ level: Double, from left: CGFloat, width: CGFloat, flat: CGFloat, midline: CGFloat,
+        ink: CGFloat
+    ) {
+        guard level >= LevelHistory.silence else {
+            // dimmer again than a quiet bar, and sitting a whole point under
+            // the midline rather than astride it, since a one-point line
+            // centred there would land half in each of two rows of pixels
+            NSColor.labelColor.withAlphaComponent(ink * 0.6).setFill()
+            NSRect(x: left, y: midline - 1, width: flat, height: 1).fill()
+            return
+        }
+        let height = barHeight(for: level)
+        NSColor.labelColor.withAlphaComponent(ink).setFill()
+        NSRect(x: left, y: midline - height / 2, width: width, height: height).fill()
+    }
+
+    /// Which of the four heights a reading lands on. The scale runs −50 dBFS
+    /// to 0, everything below being silence with a shape of its own, and four
+    /// steps is as much as eight points of row can tell apart — a fifth would
+    /// be a difference nobody could see the meaning of.
+    private static func barHeight(for level: Double) -> CGFloat {
+        let span = LevelHistory.ceiling - LevelHistory.silence
+        let loud = (min(level, LevelHistory.ceiling) - LevelHistory.silence) / span
+        return heights[min(heights.count - 1, Int(loud * Double(heights.count)))]
+    }
+
+    /// How one side is said out loud: how loud it is, or how long it has been
+    /// silent. A screen reader gets no strip at all, so the sentence has to
+    /// carry the thing the shape of the strip carries — that this side is not
+    /// merely quiet, it has been quiet for long enough to be broken.
+    static func spoken(_ side: String, _ history: LevelHistory, now: Date = Date()) -> String {
+        if let quiet = history.silentFor(now: now) {
+            return quiet < 1 ? "\(side) silent" : "\(side) silent for \(lasting(quiet))"
+        }
+        let level = Int(history.latest.rounded())
+        return level >= 0 ? "\(side) 0 dB" : "\(side) −\(-level) dB"
+    }
+
+    /// The line under the meters in the menu, which always has something to
+    /// say: how long a side has been silent, or else that both of them are
+    /// being heard. Never blank, because the menu cannot change height while
+    /// it is open and so the line is standing there either way — and a line
+    /// standing there with nothing on it reads as something broken rather than
+    /// as nothing to report.
+    ///
+    /// It is also the whole of what this app says about silence. There is no
+    /// notification: a pause is not an event, and being interrupted in the
+    /// middle of a meeting is worse than what the interruption would be about.
+    static func footer(
+        system: LevelHistory, microphone: LevelHistory, now: Date = Date()
+    ) -> String {
+        switch (worthSaying(system, now), worthSaying(microphone, now)) {
+        case let (.some(quietSystem), .some(quietMicrophone)):
+            // the shorter of the two, because that is the span both sides have
+            // been silent for and the sentence has to be true of both
+            return "Both sides silent for \(lasting(min(quietSystem, quietMicrophone)))"
+        case let (.some(quietSystem), .none):
+            return "System audio silent for \(lasting(quietSystem))"
+        case let (.none, .some(quietMicrophone)):
+            return "Microphone silent for \(lasting(quietMicrophone))"
+        case (.none, .none):
+            return "Sound arriving on both sides"
+        }
+    }
+
+    /// How long a side has been silent, once that is long enough to be worth
+    /// a line of its own.
+    private static func worthSaying(_ history: LevelHistory, _ now: Date) -> TimeInterval? {
+        guard let quiet = history.silentFor(now: now), quiet >= silenceAfter else { return nil }
+        return quiet
+    }
+
+    /// A span of silence in words: seconds while there are few enough of them
+    /// to mean anything, minutes after that, because "silent for 214 s" is a
+    /// number to be worked out rather than a thing to be read.
+    private static func lasting(_ seconds: TimeInterval) -> String {
+        if seconds < 60 {
+            return "\(Int(seconds)) s"
+        }
+        return "\(Int(seconds / 60)) min"
+    }
+}
+
+/// The meters as the menu shows them: the control System Settings puts under
+/// a microphone, one per side, each named with the device it is listening to.
+/// The menu is where somebody goes to find out which of the two is dead, and
+/// the reading alone cannot say that — "Microphone · AirPods Pro" is what
+/// turns a flat meter into something that can be fixed.
+///
+/// Built once per recording and kept. A menu item's view is measured rather
+/// than laid out, so the frames in here are set by hand and must not depend
+/// on the text in them: a silence coming on while the menu is open cannot
+/// resize the window the menu is already in, which is why the footer under
+/// the meters is a line that is always there and always says something.
+final class MeterMenuView: NSView {
+    /// A menu item's own text starts 14 points in, and matching that is what
+    /// keeps this from reading as a panel that fell into a menu.
+    private static let inset: CGFloat = 14
+    private static let spacing: CGFloat = 6
+
+    /// The meters are as wide as the two captions need and no wider. Narrower
+    /// than this a level indicator is a smear rather than a reading; wider than
+    /// this and a menu has stopped being a menu. Between the two the device
+    /// name wins, because a name cut off at "MacBook Pr…" gives back the very
+    /// thing the caption is here for.
+    private static let narrowest: CGFloat = 160
+    private static let widest: CGFloat = 260
+
+    /// A caption belongs to the meter under it, so it sits nearer to that
+    /// than the rows sit to each other.
+    private static let tight: CGFloat = 2
+    private static let captionHeight: CGFloat = 14
+    private static let indicatorHeight: CGFloat = 12
+
+    /// Fixed, unlike the width: three lines of caption and two meters, the
+    /// third caption being the footer, which is standing there whatever the
+    /// two sides are doing.
+    private static let height =
+        spacing * 4 + tight * 2 + captionHeight * 3 + indicatorHeight * 2
+
+    private let size: NSSize
+    private let systemCaption: NSTextField
+    private let systemLevel: NSLevelIndicator
+    private let microphoneCaption: NSTextField
+    private let microphoneLevel: NSLevelIndicator
+    private let footer: NSTextField
+
+    /// The devices are taken at the start of a recording and never asked for
+    /// again: they are what this recording was started with, and a device
+    /// picked in the menu afterwards changes nothing about the tape running.
+    init(system: String, microphone: String) {
+        systemCaption = MeterMenuView.caption("System audio · \(system)")
+        systemLevel = MeterMenuView.indicator()
+        microphoneCaption = MeterMenuView.caption("Microphone · \(microphone)")
+        microphoneLevel = MeterMenuView.indicator()
+        footer = MeterMenuView.caption("")
+        let wanted = max(systemCaption.fittingSize.width, microphoneCaption.fittingSize.width)
+        size = NSSize(
+            width: MeterMenuView.inset * 2
+                + min(max(wanted, MeterMenuView.narrowest), MeterMenuView.widest),
+            height: MeterMenuView.height
+        )
+        super.init(frame: NSRect(origin: .zero, size: size))
+        var top = size.height - MeterMenuView.spacing
+        for (caption, level) in [
+            (systemCaption, systemLevel), (microphoneCaption, microphoneLevel),
+        ] {
+            caption.frame = place(top, MeterMenuView.captionHeight)
+            top -= MeterMenuView.captionHeight + MeterMenuView.tight
+            level.frame = place(top, MeterMenuView.indicatorHeight)
+            top -= MeterMenuView.indicatorHeight + MeterMenuView.spacing
+            addSubview(caption)
+            addSubview(level)
+        }
+        footer.frame = place(top, MeterMenuView.captionHeight)
+        addSubview(footer)
+    }
+
+    /// This view is only ever built in code; there is no nib in this app for
+    /// one to be loaded from.
+    required init?(coder: NSCoder) {
+        fatalError("MeterMenuView is built in code, not loaded from a nib")
+    }
+
+    /// A row of the given height hanging from `top`, inset the way a menu
+    /// insets its own text.
+    private func place(_ top: CGFloat, _ height: CGFloat) -> NSRect {
+        NSRect(
+            x: MeterMenuView.inset, y: top - height,
+            width: size.width - MeterMenuView.inset * 2, height: height
+        )
+    }
+
+    /// What a menu asks a view for when it is deciding how wide to be. It is
+    /// the size the frame was built at, because both are the same fixed
+    /// layout and a menu that measured one and drew the other would clip.
+    override var intrinsicContentSize: NSSize {
+        size
+    }
+
+    /// The newest reading on each side. Setting this on a level indicator
+    /// inside a menu that is already open is exactly the point: the readings
+    /// arrive on the main queue as the recorder prints them, ten a second, so
+    /// the meters move under the pointer of whoever is watching them.
+    func show(system: LevelHistory, microphone: LevelHistory) {
+        systemLevel.doubleValue = MeterMenuView.shown(system.latest)
+        microphoneLevel.doubleValue = MeterMenuView.shown(microphone.latest)
+    }
+
+    /// The line under the meters, refreshed once a second rather than with
+    /// every reading: it counts in whole seconds, and nothing in it can change
+    /// ten times between two of them.
+    func showFooter(system: LevelHistory, microphone: LevelHistory, now: Date = Date()) {
+        footer.stringValue = Meters.footer(system: system, microphone: microphone, now: now)
+    }
+
+    /// Small, secondary and one line: the type a menu uses for what it is
+    /// saying rather than offering. Truncated at the tail because a device is
+    /// recognised from the start of its name — "MacBook Pro Micro…" is still
+    /// the built-in microphone.
+    private static func caption(_ text: String) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        field.textColor = .secondaryLabelColor
+        field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byTruncatingTail
+        return field
+    }
+
+    /// The same control, on the same scale, that System Settings shows under
+    /// a microphone — which is the whole reason for it: nobody has to learn
+    /// what this one means. Not editable, because it reports rather than sets.
+    private static func indicator() -> NSLevelIndicator {
+        let level = NSLevelIndicator()
+        level.levelIndicatorStyle = .continuousCapacity
+        level.minValue = LevelHistory.floor
+        level.maxValue = LevelHistory.ceiling
+        // where a recording stops having headroom and where it starts losing
+        // the loud parts of a voice altogether
+        level.warningValue = -12
+        level.criticalValue = -3
+        level.isEditable = false
+        level.doubleValue = LevelHistory.floor
+        return level
+    }
+
+    /// Clamped to the scale the indicator was given, so a reading off either
+    /// end of it is drawn as that end rather than as nothing at all.
+    private static func shown(_ level: Double) -> Double {
+        min(max(level, LevelHistory.floor), LevelHistory.ceiling)
+    }
+}
+
+// MARK: - end of meters and marks
 
 let app = NSApplication.shared
 let delegate = AppDelegate()
