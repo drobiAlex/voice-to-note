@@ -1,5 +1,7 @@
 import signal
 import subprocess
+import threading
+from collections.abc import Callable
 from pathlib import Path
 
 from .. import config
@@ -7,6 +9,9 @@ from . import GatewayError
 
 STOP_TIMEOUT_S = 10
 BUILD_HINT = "meeting capture helper not built — run: vtn setup"
+# what the helper prefixes a reading with, ten times a second while it records:
+# `level<TAB>system dBFS<TAB>mic dBFS`
+LEVEL = "level\t"
 
 # what the helper's own exit codes mean, said in terms of the thing the user has
 # to go and click. It has already printed the detail on stderr, which goes
@@ -46,8 +51,53 @@ class Recording:
     without knowing how the helper is signalled or what it says on the way
     out."""
 
-    def __init__(self, proc: "subprocess.Popen[str]") -> None:
+    def __init__(
+        self,
+        proc: "subprocess.Popen[str]",
+        levels: Callable[[float, float], None] | None = None,
+    ) -> None:
         self._proc = proc
+        self._levels = levels
+        self._over = threading.Event()
+        # somebody has to keep reading the helper for as long as it talks, and
+        # it talks ten times a second once it is measuring: unread, the pipe
+        # fills within minutes and the helper blocks forever inside a print,
+        # taking the recording with it. A daemon thread so a caller that never
+        # stops the recording can still exit.
+        threading.Thread(target=self._drain, daemon=True).start()
+
+    def _drain(self) -> None:
+        """Everything the helper says while it records, read as it says it.
+        Runs until the helper closes stdout, which is the only thing that can
+        be relied on: `stopped` may or may not be the last line, but EOF always
+        is. Callbacks run on this thread — whoever is handed a level is being
+        handed it here, not on the thread that started the recording."""
+        if self._proc.stdout is not None:
+            for line in self._proc.stdout:
+                self._heard(line.strip())
+        self._over.set()
+
+    def _heard(self, line: str) -> None:
+        """One line from the helper. Anything unrecognised is dropped rather
+        than reported: a newer helper saying more than this one knows about
+        must not become an error in the middle of a meeting."""
+        if line == "stopped":
+            self._over.set()
+        elif line.startswith(LEVEL) and self._levels is not None:
+            system, tab, mic = line.removeprefix(LEVEL).partition("\t")
+            if not tab:
+                return
+            try:
+                reading = (float(system), float(mic))
+            except ValueError:
+                return
+            try:
+                self._levels(*reading)
+            except Exception:
+                # a meter that raises must not take this thread down with it:
+                # nobody reading the helper is what blocks the recording, and
+                # the levels are the decoration while the meeting is the point
+                pass
 
     def wait(self) -> int:
         """Sits through the meeting. Returning at all means the helper quit by
@@ -65,10 +115,11 @@ class Recording:
         forever, since by then both files are as complete as they will get."""
         if self._proc.poll() is None:
             self._proc.send_signal(signal.SIGINT)
-        while True:
-            line = _readline(self._proc)
-            if not line or line == "stopped":
-                break
+        # the last word comes to the thread that has been reading all along,
+        # after however many levels were still in the pipe ahead of it. Bounded
+        # so that a helper which says nothing at all still reaches the kill
+        # below rather than holding a person here for the rest of the evening
+        self._over.wait(STOP_TIMEOUT_S)
         try:
             self._proc.wait(timeout=STOP_TIMEOUT_S)
         except subprocess.TimeoutExpired:
@@ -81,6 +132,7 @@ def start(
     mic: Path,
     output_uid: str | None = None,
     input_uid: str | None = None,
+    levels: Callable[[float, float], None] | None = None,
 ) -> Recording:
     """Starts taping this Mac: what it is playing into one file, what the
     microphone hears into the other. Returns only once both streams are
@@ -90,6 +142,12 @@ def start(
 
     A side left unnamed is recorded from whatever the Mac itself is set to use,
     which is what most people mean and what happens when nobody has chosen.
+
+    Given somewhere to send them, the helper is asked to measure both sides and
+    reports how loud each is ten times a second, in dBFS, system first. Only
+    then: measuring is a pass over every buffer of the meeting, and a recording
+    nobody is watching should not pay for a meter nobody will see. Each reading
+    arrives on the thread that reads the helper rather than on this one.
 
     Waiting for that deliberately has no deadline: the first ever run stops at
     the macOS permission prompts, and a person may take minutes to answer them.
@@ -103,10 +161,14 @@ def start(
         argv += ["--output-uid", output_uid]
     if input_uid:
         argv += ["--input-uid", input_uid]
+    if levels is not None:
+        argv += ["--levels"]
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, text=True)
+    # read here rather than by the thread below, which only starts once the
+    # handshake is done: two readers on one pipe would race for the first word
     if _readline(proc) != "recording":
         raise _failure(proc)
-    return Recording(proc)
+    return Recording(proc, levels)
 
 
 def devices() -> str:

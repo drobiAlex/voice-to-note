@@ -2045,6 +2045,49 @@ def test_durations_read_like_a_person_says_them():
     assert services._duration(90061) == "1d 1h 1m 1s"
 
 
+# --- the meter a recording is watched through ------------------------------
+
+
+def test_silence_on_both_sides_draws_two_empty_bars():
+    line = services.meter_line(-60.0, -60.0, width=4)
+
+    assert line.count("█") == 0
+    assert line.count("░") == 8
+
+
+def test_audio_at_full_scale_fills_both_bars():
+    line = services.meter_line(0.0, 0.0, width=4)
+
+    assert line.count("█") == 8
+    assert line.count("░") == 0
+
+
+def test_a_bar_fills_in_proportion_to_how_loud_that_side_is():
+    # halfway down the scale is halfway along the bar, which is the only thing
+    # that makes a glance at it mean anything
+    line = services.meter_line(-30.0, -60.0, width=12)
+
+    assert "sys ██████░░░░░░" in line
+    assert "mic ░░░░░░░░░░░░" in line
+
+
+def test_a_level_off_the_ends_of_the_scale_stays_inside_the_bar():
+    # a peak over full scale and a silence below the floor both exist; neither
+    # may draw a bar longer or shorter than every other frame
+    assert services.meter_line(12.0, -120.0, width=4).count("█") == 4
+
+
+def test_every_meter_frame_is_the_same_width_whatever_the_levels_are():
+    # the meter is redrawn over itself with a carriage return, so a frame
+    # shorter than the one before would leave that one's tail on screen
+    widths = {
+        len(services.meter_line(system, mic))
+        for system, mic in [(-60.0, -60.0), (0.0, 0.0), (-18.2, -3.7), (-7.0, -60.0)]
+    }
+
+    assert len(widths) == 1
+
+
 # --- what a memo committed to ---------------------------------------------
 
 

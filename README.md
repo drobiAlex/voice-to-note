@@ -51,7 +51,7 @@ To upgrade, re-run the installer.
 | Command | What it does |
 |---|---|
 | `vtn setup` | install whisper.cpp and all models (idempotent) |
-| `vtn record` | record this Mac's meeting — system audio + mic — then process it; `--output-device`/`--input-device` pin devices |
+| `vtn record` | record this Mac's meeting — system audio + mic — then process it; a live level meter per side shows a muted mic while it can still be fixed (`--levels` for the raw numbers); `--output-device`/`--input-device` pin devices |
 | `vtn menubar` | open the menu bar recorder: one click to record, pickers for project and devices |
 | `vtn process <file>` | convert, transcribe, diarize, store, extract notes — shape the run with --speakers, --steps, --template |
 | `vtn list` | list stored memos |

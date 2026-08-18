@@ -6,6 +6,9 @@
 //
 // Recording runs until SIGINT or SIGTERM. Its parent reads two words on stdout:
 // "recording" once both streams are live, "stopped" once both files are closed.
+// Asked with --levels, it also says how loud each side is ten times a second in
+// between, so whatever started it can show that both sides are arriving while
+// the meeting can still be saved rather than an hour later in the transcript.
 //
 // Either side can be pointed at a particular device by UID. Named neither way,
 // it records the whole system mix and the default microphone — what somebody
@@ -13,13 +16,14 @@
 // there is to choose from and records nothing.
 
 import AVFoundation
+import Accelerate
 import AudioToolbox
 import CoreAudio
 import Darwin
 import Foundation
 
 let usage = """
-    usage: vtn-capture <system.wav> <mic.wav> [--output-uid <UID>] [--input-uid <UID>]
+    usage: vtn-capture <system.wav> <mic.wav> [--output-uid <UID>] [--input-uid <UID>] [--levels]
            vtn-capture --list-devices
     """
 
@@ -110,6 +114,7 @@ struct Options {
     var mic = ""
     var outputUID: String?
     var inputUID: String?
+    var levels = false
 }
 
 /// Reads the command line, or refuses it. Flags may come in any order and on
@@ -123,6 +128,9 @@ func parseOptions(_ argv: [String]) -> Options {
     while i < argv.count {
         let argument = argv[i]
         switch argument {
+        case "--levels":
+            options.levels = true
+            i += 1
         case "--output-uid", "--input-uid":
             guard i + 1 < argv.count else { die(usage, Exit.usage) }
             if argument == "--output-uid" {
@@ -281,12 +289,121 @@ func wavFile(at url: URL, like format: AVAudioFormat) throws -> AVAudioFile {
     )
 }
 
+/// How loud one stream has been since anybody last asked. Peak rather than
+/// average, because the question a meter answers is whether anything is
+/// arriving at all, and an average over a tenth of a second of speech reads as
+/// near-silence even on a microphone that is working perfectly.
+///
+/// One instance per stream, written from that stream's audio callback and read
+/// from the timer that reports — hence the lock, which is the most that thread
+/// can be asked to do.
+final class LevelMeter {
+    private let lock = NSLock()
+    private var loudest: Float = 0
+
+    /// Called on a real-time audio thread, so it does the least a peak can be
+    /// measured with: one pass over the buffer and a lock nobody holds for
+    /// more than two instructions. Printing, allocating or waiting here would
+    /// be heard as a gap in the recording — which is why what to do with the
+    /// number is somebody else's problem, on another queue entirely.
+    ///
+    /// A format this does not recognise leaves the meter where it was: no
+    /// reading is honest, and a wrong one would have a person chasing a
+    /// microphone that is fine.
+    func note(_ buffer: AVAudioPCMBuffer) {
+        guard buffer.frameLength > 0 else { return }
+        var peak: Float
+        if let channels = buffer.floatChannelData {
+            peak = self.peak(channels, buffer)
+        } else if let channels = buffer.int16ChannelData {
+            peak = self.peak(channels, buffer)
+        } else if let channels = buffer.int32ChannelData {
+            peak = self.peak(channels, buffer)
+        } else {
+            return
+        }
+        lock.lock()
+        loudest = max(loudest, peak)
+        lock.unlock()
+    }
+
+    /// The loudest this stream got since the last look, and a fresh start for
+    /// the next one. Resetting is what makes the next reading describe the
+    /// moment it is drawn in rather than the loudest thing all meeting.
+    func take() -> Float {
+        lock.lock()
+        defer { lock.unlock() }
+        let peak = loudest
+        loudest = 0
+        return peak
+    }
+
+    /// The largest sample magnitude in a buffer of floats, which are already
+    /// on the 0…1 scale dBFS is taken from. An interleaved buffer keeps every
+    /// channel woven into the one block, so it is walked in a single pass —
+    /// the largest magnitude in it is a peak across channels, and a peak
+    /// across channels is what one bar per side shows anyway.
+    private func peak(
+        _ channels: UnsafePointer<UnsafeMutablePointer<Float>>, _ buffer: AVAudioPCMBuffer
+    ) -> Float {
+        let frames = Int(buffer.frameLength)
+        let lanes = Int(buffer.format.channelCount)
+        var loudest: Float = 0
+        if buffer.format.isInterleaved {
+            vDSP_maxmgv(channels[0], 1, &loudest, vDSP_Length(frames * lanes))
+            return loudest
+        }
+        for lane in 0..<lanes {
+            var here: Float = 0
+            vDSP_maxmgv(channels[lane], 1, &here, vDSP_Length(frames))
+            loudest = max(loudest, here)
+        }
+        return loudest
+    }
+
+    /// The same peak from a device that hands over integers, scaled by what
+    /// that integer can hold so it lands on the same 0…1 scale. Walked by hand
+    /// rather than converted to floats first: converting would allocate a
+    /// buffer on the audio thread, and no meter is worth a glitch in the
+    /// recording it is measuring.
+    private func peak<Sample: FixedWidthInteger>(
+        _ channels: UnsafePointer<UnsafeMutablePointer<Sample>>, _ buffer: AVAudioPCMBuffer
+    ) -> Float {
+        let frames = Int(buffer.frameLength)
+        let channelCount = Int(buffer.format.channelCount)
+        let interleaved = buffer.format.isInterleaved
+        let lanes = interleaved ? 1 : channelCount
+        let count = interleaved ? frames * channelCount : frames
+        var loudest: Sample.Magnitude = 0
+        for lane in 0..<lanes {
+            let samples = channels[lane]
+            for index in 0..<count {
+                loudest = max(loudest, samples[index].magnitude)
+            }
+        }
+        return Float(loudest) / Float(Sample.max)
+    }
+}
+
+/// A peak on the 0…1 scale a sample can reach, said in the dBFS a meter is
+/// read on: 0 is as loud as the format goes and quiet is a long way below.
+/// Floored at -60 rather than at the negative infinity silence really is,
+/// because a bar has to be drawn from a number — and because nothing under
+/// -60 dB is anything a person would call a sound.
+func dBFS(_ peak: Float) -> Float {
+    guard peak > 0 else { return -60 }
+    let db = 20 * log10(peak)
+    guard db.isFinite else { return -60 }
+    return min(0, max(-60, db))
+}
+
 /// Records what this Mac is playing, by tapping its output and wrapping that
 /// tap in a private aggregate device only this process sees. Named an output
 /// device, it hears that one alone; named none, it hears the system-wide mix.
 final class SystemAudioRecorder {
     private let url: URL
     private let requestedUID: String?
+    private let meter: LevelMeter?
     private let queue = DispatchQueue(label: "app.vtn.capture.system")
     private var tap = AudioObjectID(kAudioObjectUnknown)
     private var aggregate = AudioObjectID(kAudioObjectUnknown)
@@ -294,9 +411,13 @@ final class SystemAudioRecorder {
     private var file: AVAudioFile?
     private var reportedWriteFailure = false
 
-    init(url: URL, deviceUID requestedUID: String?) {
+    /// Given no meter — which is every recording nobody asked to watch — the
+    /// callback below does nothing beyond writing the file, so measuring costs
+    /// a meeting exactly nothing when nobody will see it.
+    init(url: URL, deviceUID requestedUID: String?, meter: LevelMeter? = nil) {
         self.url = url
         self.requestedUID = requestedUID
+        self.meter = meter
     }
 
     func start() throws {
@@ -362,6 +483,9 @@ final class SystemAudioRecorder {
             guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: input) else {
                 return
             }
+            // measured before the write, so the meter goes on telling the truth
+            // about what is arriving even on a file that cannot be written
+            self.meter?.note(buffer)
             do {
                 try file.write(from: buffer)
             } catch {
@@ -420,13 +544,15 @@ final class SystemAudioRecorder {
 final class MicrophoneRecorder {
     private let url: URL
     private let requestedUID: String?
+    private let meter: LevelMeter?
     private let engine = AVAudioEngine()
     private var file: AVAudioFile?
     private var reportedWriteFailure = false
 
-    init(url: URL, deviceUID requestedUID: String?) {
+    init(url: URL, deviceUID requestedUID: String?, meter: LevelMeter? = nil) {
         self.url = url
         self.requestedUID = requestedUID
+        self.meter = meter
     }
 
     func start() throws {
@@ -441,6 +567,7 @@ final class MicrophoneRecorder {
         file = try wavFile(at: url, like: format)
         input.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, _ in
             guard let self, let file = self.file else { return }
+            self.meter?.note(buffer)
             do {
                 try file.write(from: buffer)
             } catch {
@@ -526,11 +653,16 @@ if let uid = options.inputUID, device(withUID: uid) == nil {
     die("no microphone with UID \(uid) — see: vtn devices", Exit.microphone)
 }
 
+// no meters unless somebody asked for them: the recorders then hand every
+// buffer straight to its file, exactly as they did before there was a meter
+let systemMeter = options.levels ? LevelMeter() : nil
+let microphoneMeter = options.levels ? LevelMeter() : nil
+
 let systemAudio = SystemAudioRecorder(
-    url: URL(fileURLWithPath: options.system), deviceUID: options.outputUID
+    url: URL(fileURLWithPath: options.system), deviceUID: options.outputUID, meter: systemMeter
 )
 let microphone = MicrophoneRecorder(
-    url: URL(fileURLWithPath: options.mic), deviceUID: options.inputUID
+    url: URL(fileURLWithPath: options.mic), deviceUID: options.inputUID, meter: microphoneMeter
 )
 
 guard microphoneAllowed() else {
@@ -564,7 +696,43 @@ do {
 
 say("recording")
 
+// every level line is printed from this one queue and from nowhere else. The
+// audio callbacks are the only other place that knows how loud a stream is,
+// and a write to a pipe whose reader has fallen behind blocks until it catches
+// up — on a real-time thread that is a hole in the recording, so those threads
+// only ever touch a lock
+let levelQueue = DispatchQueue(label: "app.vtn.capture.levels")
+
+/// The reading the parent draws its meters from, ten times a second, or
+/// nothing at all when nobody asked to measure. Ten a second is fast enough
+/// that a bar moves the way the sound does and slow enough that a meeting's
+/// worth of them is still a trickle down a pipe.
+func reportLevels(_ system: LevelMeter?, _ microphone: LevelMeter?) -> DispatchSourceTimer? {
+    guard let system, let microphone else { return nil }
+    let timer = DispatchSource.makeTimerSource(queue: levelQueue)
+    timer.schedule(deadline: .now() + .milliseconds(100), repeating: .milliseconds(100))
+    timer.setEventHandler {
+        say(
+            String(
+                format: "level\t%.1f\t%.1f",
+                Double(dBFS(system.take())),
+                Double(dBFS(microphone.take()))
+            )
+        )
+    }
+    timer.resume()
+    return timer
+}
+
+let levelTimer = reportLevels(systemMeter, microphoneMeter)
+
 func stopEverything() -> Never {
+    // the meter is silenced first, and the queue is then waited on so that a
+    // tick already under way finishes before anything else is said: "stopped"
+    // is the last word this program speaks, and a level line after it would be
+    // read by the parent as a recording that has not ended
+    levelTimer?.cancel()
+    levelQueue.sync {}
     systemAudio.stop()
     microphone.stop()
     say("stopped")

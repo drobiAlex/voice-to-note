@@ -1,12 +1,13 @@
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 from conftest import StubRepo
 
-from voice_to_note import cli
+from voice_to_note import cli, services
 from voice_to_note.gateways import GatewayError, audio, capture
 
 # stand-ins for the native helper, which cannot run in a test: it would ask
@@ -26,6 +27,21 @@ time.sleep(60)
 
 QUITS_AT_ONCE = """
 print("recording", flush=True)
+"""
+
+REPORTS_LEVELS = """
+import signal, sys, time
+
+def stop(_sig, _frame):
+    print("stopped", flush=True)
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, stop)
+print("recording", flush=True)
+print("level\\t-18.2\\t-60.0", flush=True)
+print("level\\t-3.0\\t-12.5", flush=True)
+print("a word from a newer helper than this one", flush=True)
+time.sleep(60)
 """
 
 DENIES_THE_MICROPHONE = """
@@ -80,6 +96,16 @@ def helper(tmp_path: Path, body: str) -> Path:
     return path
 
 
+def heard(readings: list, count: int) -> list:
+    """Waits for the levels the helper printed to reach the callback, which
+    they do on a thread of their own — a test that looked once would read an
+    empty list and call that the answer."""
+    deadline = time.time() + 5
+    while len(readings) < count and time.time() < deadline:
+        time.sleep(0.01)
+    return readings
+
+
 def run(monkeypatch, repo, *argv) -> None:
     """Runs the real command line against a test database."""
     monkeypatch.setattr(cli, "Repository", lambda *a, **k: repo)
@@ -127,6 +153,73 @@ def test_recording_before_setup_has_built_the_helper_says_to_run_setup(tmp_path,
 
     with pytest.raises(GatewayError, match="vtn setup"):
         capture.start(tmp_path / "system.wav", tmp_path / "mic.wav")
+
+
+# --- watching the levels while it tapes ------------------------------------
+
+
+def test_the_helper_is_asked_to_measure_only_when_somebody_is_listening(tmp_path, monkeypatch):
+    # measuring costs a pass over every buffer of a meeting, and a recording
+    # nobody is watching must not pay for what it will never show
+    log = tmp_path / "argv.json"
+    monkeypatch.setattr(
+        capture.config, "CAPTURE_BIN", helper(tmp_path, records_how_it_was_called(log))
+    )
+    system, mic = tmp_path / "system.wav", tmp_path / "mic.wav"
+
+    capture.start(system, mic).stop()
+    assert "--levels" not in json.loads(log.read_text())
+
+    capture.start(system, mic, levels=lambda _system_db, _mic_db: None).stop()
+    assert json.loads(log.read_text())[-1] == "--levels"
+
+
+def test_the_levels_the_helper_reports_arrive_as_two_numbers_system_first(tmp_path, monkeypatch):
+    monkeypatch.setattr(capture.config, "CAPTURE_BIN", helper(tmp_path, REPORTS_LEVELS))
+    readings: list = []
+
+    recording = capture.start(
+        tmp_path / "system.wav",
+        tmp_path / "mic.wav",
+        levels=lambda system_db, mic_db: readings.append((system_db, mic_db)),
+    )
+
+    assert heard(readings, 2) == [(-18.2, -60.0), (-3.0, -12.5)]
+    recording.stop()
+
+
+def test_stopping_returns_on_the_last_word_however_many_levels_came_before_it(
+    tmp_path, monkeypatch
+):
+    # ten lines a second stand between the stop and the word that answers it,
+    # and a stop that gave up at the first of them would leave the two wav
+    # files unfinished
+    monkeypatch.setattr(capture.config, "CAPTURE_BIN", helper(tmp_path, REPORTS_LEVELS))
+    recording = capture.start(
+        tmp_path / "system.wav", tmp_path / "mic.wav", levels=lambda _s, _m: None
+    )
+
+    recording.stop()
+
+    assert recording.wait() == 0
+
+
+def test_a_meter_that_blows_up_costs_only_the_reading_it_was_handed(tmp_path, monkeypatch):
+    # levels are cosmetic and the recording is not: a caller whose meter raised
+    # must not leave the helper's output unread, since that is what fills the
+    # pipe and stops a meeting mid-sentence
+    monkeypatch.setattr(capture.config, "CAPTURE_BIN", helper(tmp_path, REPORTS_LEVELS))
+    readings: list = []
+
+    def explode(system_db: float, mic_db: float) -> None:
+        readings.append((system_db, mic_db))
+        raise RuntimeError("the meter is on fire")
+
+    recording = capture.start(tmp_path / "system.wav", tmp_path / "mic.wav", levels=explode)
+
+    assert heard(readings, 2) == [(-18.2, -60.0), (-3.0, -12.5)]
+    recording.stop()
+    assert recording.wait() == 0
 
 
 # --- choosing what to record from ------------------------------------------
@@ -289,7 +382,7 @@ def taped_nothing(monkeypatch) -> dict:
     monkeypatch.setattr(sys, "platform", "darwin")
     seen: dict = {}
 
-    def start(_system, _mic, output_uid=None, input_uid=None):
+    def start(_system, _mic, output_uid=None, input_uid=None, levels=None):
         seen.update(output_uid=output_uid, input_uid=input_uid)
         return StoppedAtOnce()
 
@@ -321,3 +414,69 @@ def test_recording_without_choosing_devices_pins_neither(monkeypatch):
         run(monkeypatch, StubRepo(), "record")
 
     assert seen == {"output_uid": None, "input_uid": None}
+
+
+class ReportedOneLevel:
+    """A recording that reports a single reading and is then over, standing in
+    for the helper where a test cares what was on screen while it taped."""
+
+    def __init__(self, levels) -> None:
+        self._levels = levels
+
+    def wait(self) -> int:
+        if self._levels is not None:
+            self._levels(-18.24, -60.0)
+        return 0
+
+    def stop(self) -> None:
+        pass
+
+
+def taped_one_reading(monkeypatch) -> dict:
+    """Runs a recording that reports one level and stops, reporting who was
+    told about it — which is decided before a single buffer is measured."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    seen: dict = {}
+
+    def start(_system, _mic, output_uid=None, input_uid=None, levels=None):
+        seen["levels"] = levels
+        return ReportedOneLevel(levels)
+
+    monkeypatch.setattr(cli.capture, "start", start)
+    return seen
+
+
+def test_asking_for_levels_prints_the_numbers_themselves_for_another_program(
+    monkeypatch, capsys
+):
+    # the flag exists for whatever wraps this command and draws its own meter,
+    # so what it gets has to be parseable rather than pretty
+    taped_one_reading(monkeypatch)
+
+    with pytest.raises(SystemExit):
+        run(monkeypatch, StubRepo(), "record", "--levels")
+
+    assert "level\t-18.2\t-60.0\n" in capsys.readouterr().err
+
+
+def test_a_terminal_is_shown_a_meter_redrawn_over_itself(monkeypatch, capsys):
+    taped_one_reading(monkeypatch)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
+
+    with pytest.raises(SystemExit):
+        run(monkeypatch, StubRepo(), "record")
+
+    # the meter is ended by a newline of its own: the line after it would
+    # otherwise be printed over the bars and read as part of them
+    assert "\r" + services.meter_line(-18.24, -60.0) + "\n" in capsys.readouterr().err
+
+
+def test_a_recording_nobody_can_watch_is_not_measured_at_all(monkeypatch):
+    # output redirected into a file has nowhere to draw a meter, and measuring
+    # for a meter that is never drawn costs a meeting's worth of buffers
+    seen = taped_one_reading(monkeypatch)
+
+    with pytest.raises(SystemExit):
+        run(monkeypatch, StubRepo(), "record")
+
+    assert seen["levels"] is None

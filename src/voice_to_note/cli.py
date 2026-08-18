@@ -1,6 +1,7 @@
 import argparse
 import subprocess
 import sys
+from collections.abc import Callable
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -141,13 +142,52 @@ def _taped(track: Path) -> bool:
     return track.exists() and track.stat().st_size > 0
 
 
+def _meter(raw: bool) -> tuple[Callable[[float, float], None] | None, Callable[[], None]]:
+    """How loud each side is while the meeting runs, and how to leave the
+    screen tidy afterwards. A terminal gets bars redrawn over themselves, so a
+    muted microphone or a silent system tap is visible while it can still be
+    fixed rather than an hour later in the transcript; --levels gets the raw
+    numbers instead, for whatever wraps this command and draws its own meter.
+    Output going anywhere but a terminal gets nothing at all, and nothing is
+    then measured either — a meter nobody can see is not worth a pass over
+    every buffer of a meeting.
+
+    Anything redrawn in place has to be ended by a newline of its own before
+    the next line is printed, or that line lands on top of the bars and reads
+    as part of them; the caller does that by calling the second half of this
+    once the recording is over."""
+    fresh = {"line": False}
+
+    def done() -> None:
+        if fresh["line"]:
+            print(file=sys.stderr)
+            fresh["line"] = False
+
+    def numbers(system_db: float, mic_db: float) -> None:
+        print(f"level\t{system_db:.1f}\t{mic_db:.1f}", file=sys.stderr, flush=True)
+
+    def bars(system_db: float, mic_db: float) -> None:
+        print(
+            "\r" + services.meter_line(system_db, mic_db), end="", file=sys.stderr, flush=True
+        )
+        fresh["line"] = True
+
+    if raw:
+        return numbers, done
+    if sys.stderr.isatty():
+        return bars, done
+    return None, done
+
+
 def cmd_record(args: argparse.Namespace) -> None:
     """Tapes a meeting on this Mac and takes it straight through to notes. The
     two sides — what the Mac plays and what the microphone hears — are recorded
     apart and then merged, because everything downstream reads a single
     recording. Once the merged file exists the raw tracks are dropped; until
     then they are kept whatever goes wrong, since they are the only copy of a
-    meeting nobody can hold twice."""
+    meeting nobody can hold twice. A meter runs the whole time on a terminal,
+    because a side that is recording silence is worth knowing about while
+    somebody is still in the room to fix it."""
     if sys.platform != "darwin":
         sys.exit("meeting recording is macOS-only")
     steps, count = _checked(args)
@@ -156,16 +196,25 @@ def cmd_record(args: argparse.Namespace) -> None:
     system_wav, mic_wav = tracks / "system.wav", tracks / "mic.wav"
     merged = config.RECORDINGS_DIR / f"meeting-{stamp}.m4a"
 
+    levels, meter_done = _meter(args.levels)
     recording = capture.start(
-        system_wav, mic_wav, output_uid=args.output_device, input_uid=args.input_device
+        system_wav,
+        mic_wav,
+        output_uid=args.output_device,
+        input_uid=args.input_device,
+        levels=levels,
     )
     status(f"recording — press Ctrl+C to stop ({tracks})")
     try:
         code = recording.wait()
-        status(f"recording ended on its own: vtn-capture exited with code {code}")
+        ended = f"recording ended on its own: vtn-capture exited with code {code}"
     except KeyboardInterrupt:
-        status("")
+        ended = ""
+    # the helper is stopped before the meter is ended and anything else said: a
+    # reading arriving afterwards would draw half a frame under the line below
     recording.stop()
+    meter_done()
+    status(ended)
 
     if not _taped(system_wav) or not _taped(mic_wav):
         sys.exit(f"nothing was recorded — no audio in {tracks}")
@@ -511,6 +560,12 @@ def main() -> None:
         "--input-device",
         metavar="UID",
         help="record this microphone instead of the default one (see: vtn devices)",
+    )
+    sp.add_argument(
+        "--levels",
+        action="store_true",
+        help="stream one machine-readable line per 100ms on stderr instead of a meter:"
+        " level<TAB>system dBFS<TAB>mic dBFS",
     )
     sp.set_defaults(fn=cmd_record)
 

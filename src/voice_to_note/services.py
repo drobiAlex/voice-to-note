@@ -839,6 +839,25 @@ def _duration(duration_s: float | None) -> str:
     return " ".join(parts)
 
 
+def meter_line(system_db: float, mic_db: float, width: int = 12) -> str:
+    """Both sides of a recording as one line a person can read at a glance: a
+    bar each for what the Mac is playing and what the microphone hears, and the
+    level in dB beside it. Drawn from -60 dB — quiet enough to be silence — up
+    to full scale, so a muted microphone shows as an empty bar while the meeting
+    can still be saved.
+
+    Every frame is exactly as wide as every other, bars and numbers alike: this
+    line is redrawn over its predecessor with a carriage return rather than on a
+    line of its own, and a shorter frame would leave the tail of a louder one
+    behind to be read as part of it."""
+
+    def bar(db: float) -> str:
+        filled = min(width, max(0, round((db + 60) / 60 * width)))
+        return "█" * filled + "░" * (width - filled)
+
+    return f"sys {bar(system_db)} {system_db:>4.0f} dB   mic {bar(mic_db)} {mic_db:>4.0f} dB"
+
+
 def memos_text(repo: Repository, project: str | None = None, tag: str | None = None) -> str:
     """The memo list as a person reads it, newest first and column-aligned so the
     ids, dates and states line up down the screen. One project or one tag at a
