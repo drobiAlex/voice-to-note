@@ -42,6 +42,13 @@ MENUBAR_PLIST = NATIVE_DIR / "menubar-Info.plist"
 MENUBAR_APP = ROOT / "bin" / "VTN Recorder.app"
 MENUBAR_BIN = MENUBAR_APP / "Contents" / "MacOS" / "vtn-menubar"
 
+# where setup records a content hash of each helper's source once it has built
+# it, so a later run can tell a stale binary from a current one. Kept beside
+# the binary rather than inside the .app bundle: the bundle is codesigned as a
+# whole, and a stray file added inside it afterward would break that seal.
+CAPTURE_STAMP = ROOT / "bin" / "vtn-capture.built"
+MENUBAR_STAMP = ROOT / "bin" / "vtn-menubar.built"
+
 T = TypeVar("T")
 
 

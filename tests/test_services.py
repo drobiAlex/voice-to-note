@@ -1694,9 +1694,11 @@ def configured_paths(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(services.config, "EMB_MODEL_PATH", models / "nemo_en_titanet_large.onnx")
     monkeypatch.setattr(services.config, "CAPTURE_BIN", tmp_path / "bin" / "vtn-capture")
+    monkeypatch.setattr(services.config, "CAPTURE_STAMP", tmp_path / "bin" / "vtn-capture.built")
     app = tmp_path / "bin" / "VTN Recorder.app"
     monkeypatch.setattr(services.config, "MENUBAR_APP", app)
     monkeypatch.setattr(services.config, "MENUBAR_BIN", app / "Contents" / "MacOS" / "vtn-menubar")
+    monkeypatch.setattr(services.config, "MENUBAR_STAMP", tmp_path / "bin" / "vtn-menubar.built")
     return vendor
 
 
@@ -1709,9 +1711,17 @@ def _write_binary(path: Path) -> None:
 
 def _write_native_helpers() -> None:
     """Puts both macOS-only builds — the capture helper and the menu bar
-    recorder — where setup looks for them."""
+    recorder — where setup looks for them, stamped to match their real
+    current source so a test that means "already installed" does not also
+    read as "source changed"."""
     _write_binary(services.config.CAPTURE_BIN)
     _write_binary(services.config.MENUBAR_BIN)
+    services.config.CAPTURE_STAMP.write_text(
+        services._source_stamp([services.config.CAPTURE_SRC, services.config.CAPTURE_PLIST])
+    )
+    services.config.MENUBAR_STAMP.write_text(
+        services._source_stamp([services.config.MENUBAR_SRC, services.config.MENUBAR_PLIST])
+    )
 
 
 def stub_bootstrap(monkeypatch, *, vad_fails=False, cloned_urls: list | None = None) -> list:
@@ -1964,6 +1974,61 @@ def test_setup_skips_the_menu_bar_recorder_away_from_a_mac(monkeypatch, tmp_path
 
     assert "menubar" not in calls
     assert "[8/8] menu bar recorder — macOS only, skipped" in logged
+
+
+def test_setup_skips_a_native_helper_whose_stamp_matches_its_current_source(monkeypatch, tmp_path):
+    # a rebuild is only warranted when capture.swift, menubar.swift or either
+    # Info.plist actually changed; a stamp that still matches both files means
+    # the binary on disk was built from exactly this source, whatever its own
+    # mtime says
+    configured_paths(monkeypatch, tmp_path)
+    _write_native_helpers()
+    calls = stub_bootstrap(monkeypatch)
+    logged: list = []
+
+    services.setup(log=logged.append)
+
+    assert "capture" not in calls
+    assert "menubar" not in calls
+    assert "[7/8] meeting-capture helper — already installed" in logged
+    assert "[8/8] menu bar recorder — already installed" in logged
+
+
+def test_setup_rebuilds_a_native_helper_whose_stamp_no_longer_matches_its_source(
+    monkeypatch, tmp_path
+):
+    # a build left over from before capture.swift last changed must not pass
+    # as current just because the binary happens to already be on disk
+    configured_paths(monkeypatch, tmp_path)
+    _write_native_helpers()
+    services.config.CAPTURE_STAMP.write_text("stale-hash-from-a-previous-version")
+    calls = stub_bootstrap(monkeypatch)
+    logged: list = []
+
+    services.setup(log=logged.append)
+
+    assert "capture" in calls
+    assert "menubar" not in calls
+    assert any(
+        "meeting-capture helper — source changed, rebuilding" in line for line in logged
+    )
+    assert services.config.CAPTURE_STAMP.read_text() == services._source_stamp(
+        [services.config.CAPTURE_SRC, services.config.CAPTURE_PLIST]
+    )
+
+
+def test_setup_stamps_a_freshly_built_native_helper_with_its_source_hash(monkeypatch, tmp_path):
+    configured_paths(monkeypatch, tmp_path)
+    stub_bootstrap(monkeypatch)
+
+    services.setup()
+
+    assert services.config.CAPTURE_STAMP.read_text() == services._source_stamp(
+        [services.config.CAPTURE_SRC, services.config.CAPTURE_PLIST]
+    )
+    assert services.config.MENUBAR_STAMP.read_text() == services._source_stamp(
+        [services.config.MENUBAR_SRC, services.config.MENUBAR_PLIST]
+    )
 
 
 def test_mock_world_previews_setup_without_touching_the_network_or_disk(monkeypatch, tmp_path):

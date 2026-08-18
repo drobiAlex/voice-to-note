@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import sys
@@ -125,6 +126,33 @@ def _built(path: Path) -> bool:
     return path.exists() and os.access(path, os.X_OK)
 
 
+def _read_stamp(path: Path) -> str:
+    """A helper's recorded build stamp, or "" once there is none to read — a
+    fresh install and a stamp written before this feature existed must both
+    read as "unknown" rather than raise, so setup falls through to a rebuild
+    instead of failing on a file that was never written."""
+    return path.read_text() if path.exists() else ""
+
+
+def _write_stamp(path: Path, value: str) -> None:
+    """Records a helper's build stamp once its build succeeds."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(value)
+
+
+def _source_stamp(sources: list[Path]) -> str:
+    """A content fingerprint for a set of source files, taken together in
+    order: setup compares this against what got stamped after a helper's last
+    successful build to tell a stale binary from a current one. Compared by
+    content rather than by mtime, since both a uv install and a git checkout
+    set mtimes to whatever the operation happened to touch, not to when a
+    file's content last actually changed."""
+    digest = hashlib.sha256()
+    for path in sources:
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
 def _download_line(name: str, read: int, total: int) -> str:
     """One line of a download's progress, sized the way a person reads a
     file's weight rather than in raw bytes: megabytes to one decimal, with a
@@ -165,6 +193,8 @@ class World:
     script: Callable[[Path, str, list[str]], None]
     fetch: Callable[[str, Path, Callable[[int, int], None]], None]
     fetch_tar: Callable[[str, Path, Callable[[int, int], None]], None]
+    read: Callable[[Path], str]
+    write: Callable[[Path, str], None]
 
 
 def _real_world() -> World:
@@ -182,6 +212,8 @@ def _real_world() -> World:
         script=bootstrap.download_model_script,
         fetch=bootstrap.fetch,
         fetch_tar=bootstrap.fetch_tar_bz2,
+        read=_read_stamp,
+        write=_write_stamp,
     )
 
 
@@ -234,6 +266,8 @@ def mock_world(sleep: Callable[[float], None] = time.sleep) -> World:
         script=script,
         fetch=simulated_fetch,
         fetch_tar=simulated_fetch,
+        read=lambda _p: "",
+        write=lambda _p, _v: None,
     )
 
 
@@ -250,7 +284,13 @@ def setup(
     just without the pause-aware segmentation VAD gives it. The meeting-capture
     helper and the menu bar recorder are compiled last and only on a Mac, since
     recording a call is a macOS-only feature that the rest of the pipeline does
-    not depend on. A World stands in
+    not depend on. Either one is rebuilt, not just skipped, once its source no
+    longer matches the stamp left by its last build — compared by content hash
+    rather than mtime, since a uv install and a git checkout both reset mtimes
+    to whatever the operation touched. The rebuild can happen unprompted
+    because bootstrap signs each helper under a fixed identifier, so the
+    microphone or recording permission macOS already granted it survives the
+    rebuild rather than being asked for again. A World stands in
     for every step that touches git, cmake or the network; passing mock_world()
     previews the same flow without doing any of it."""
     world = world or _real_world()
@@ -348,11 +388,15 @@ def setup(
             ),
         )
 
+    capture_sources = [config.CAPTURE_SRC, config.CAPTURE_PLIST]
+    capture_stamp = _source_stamp(capture_sources)
     if sys.platform != "darwin":
         log("[7/8] meeting-capture helper — macOS only, skipped")
-    elif world.built(config.CAPTURE_BIN):
+    elif world.built(config.CAPTURE_BIN) and world.read(config.CAPTURE_STAMP) == capture_stamp:
         log("[7/8] meeting-capture helper — already installed")
     else:
+        if world.built(config.CAPTURE_BIN):
+            log("[7/8] meeting-capture helper — source changed, rebuilding")
         _report_step(
             log,
             now,
@@ -362,12 +406,17 @@ def setup(
                 config.CAPTURE_SRC, config.CAPTURE_PLIST, config.CAPTURE_BIN
             ),
         )
+        world.write(config.CAPTURE_STAMP, capture_stamp)
 
+    menubar_sources = [config.MENUBAR_SRC, config.MENUBAR_PLIST]
+    menubar_stamp = _source_stamp(menubar_sources)
     if sys.platform != "darwin":
         log("[8/8] menu bar recorder — macOS only, skipped")
-    elif world.built(config.MENUBAR_BIN):
+    elif world.built(config.MENUBAR_BIN) and world.read(config.MENUBAR_STAMP) == menubar_stamp:
         log("[8/8] menu bar recorder — already installed")
     else:
+        if world.built(config.MENUBAR_BIN):
+            log("[8/8] menu bar recorder — source changed, rebuilding")
         _report_step(
             log,
             now,
@@ -377,6 +426,7 @@ def setup(
                 config.MENUBAR_SRC, config.MENUBAR_PLIST, config.MENUBAR_APP
             ),
         )
+        world.write(config.MENUBAR_STAMP, menubar_stamp)
 
     return "setup complete"
 
