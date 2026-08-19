@@ -265,9 +265,15 @@ def cmd_list(args: argparse.Namespace) -> None:
     """Shows what has been processed so far."""
     with Repository() as repo:
         if args.json:
-            print(services.memos_json(repo, project=args.project, tag=args.tag))
+            print(
+                services.memos_json(
+                    repo, project=args.project, tag=args.tag, sort=args.sort
+                )
+            )
             return
-        listing = services.memos_text(repo, project=args.project, tag=args.tag)
+        listing = services.memos_text(
+            repo, project=args.project, tag=args.tag, sort=args.sort
+        )
         if listing:
             print(listing)
         else:
@@ -585,6 +591,12 @@ def main() -> None:
     sp.add_argument("--json", action="store_true", help="print memos as JSON")
     sp.add_argument("--project", help="only the memos filed under this project")
     sp.add_argument("--tag", help="only the memos whose notes carry this tag")
+    sp.add_argument(
+        "--sort",
+        choices=services.SORTS,
+        default="created",
+        help="newest first by creation (default) or by last update",
+    )
     sp.set_defaults(fn=cmd_list)
 
     sp = sub.add_parser("todos", help="list what the memos committed to")

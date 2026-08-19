@@ -946,6 +946,21 @@ def test_the_json_listing_can_be_narrowed_too(repo, wav):
     assert [m["filename"] for m in listed] == ["work.m4a"]
 
 
+def test_the_listing_can_be_ordered_by_when_a_memo_was_last_updated(repo, wav):
+    # a memo nobody has touched sorts by when it was made, so touching the
+    # older of two recordings is enough on its own to move it back to the top
+    older = add_project_memo(repo, wav, "a.m4a", "work")
+    newer = add_project_memo(repo, wav, "b.m4a", "work")
+    repo.con.execute(
+        "UPDATE memos SET updated_at=datetime('now', '+1 hour') WHERE id=?", (older,)
+    )
+    repo.con.commit()
+
+    lines = services.memos_text(repo, sort="updated").splitlines()
+
+    assert [line.split()[0] for line in lines] == [str(older), str(newer)]
+
+
 def test_the_json_listing_says_which_project_a_memo_is_in(repo, wav):
     add_project_memo(repo, wav, "work.m4a", "work")
 
@@ -1327,6 +1342,37 @@ def test_the_table_can_be_narrowed_to_one_project_or_one_tag(repo, wav):
 
     assert [r.name for r in services.memo_rows(repo, project="work")] == ["work.m4a"]
     assert [r.name for r in services.memo_rows(repo, tag="  release  ")] == ["work.m4a"]
+
+
+def test_the_table_can_be_ordered_by_when_a_memo_was_last_updated(repo, wav):
+    older = add_project_memo(repo, wav, "a.m4a", "work")
+    add_project_memo(repo, wav, "b.m4a", "work")
+    repo.con.execute(
+        "UPDATE memos SET updated_at=datetime('now', '+1 hour') WHERE id=?", (older,)
+    )
+    repo.con.commit()
+
+    assert [r.name for r in services.memo_rows(repo, sort="updated")] == ["a.m4a", "b.m4a"]
+    assert [r.name for r in services.memo_rows(repo, sort="created")] == ["b.m4a", "a.m4a"]
+
+
+@pytest.mark.parametrize("typed", [" UPDATED ", "Updated", "updated"])
+def test_a_sort_choice_is_tidied_before_its_checked(repo, wav, typed):
+    # a sort typed with stray spacing or the wrong case is still one of the
+    # two this app knows, not a mistake worth refusing over
+    older = add_project_memo(repo, wav, "a.m4a", "work")
+    newer = add_project_memo(repo, wav, "b.m4a", "work")
+    repo.con.execute(
+        "UPDATE memos SET updated_at=datetime('now', '+1 hour') WHERE id=?", (older,)
+    )
+    repo.con.commit()
+
+    assert [m.id for m in services.memos(repo, sort=typed)] == [older, newer]
+
+
+def test_a_sort_this_app_does_not_recognise_is_refused(repo):
+    with pytest.raises(services.InvalidInput, match="created, updated"):
+        services.memo_rows(repo, sort="nonsense")
 
 
 @pytest.mark.parametrize("tag", ["", "   "])

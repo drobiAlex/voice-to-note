@@ -54,7 +54,7 @@ To upgrade, re-run the installer.
 | `vtn record` | record this Mac's meeting — system audio + mic — then process it; a live level meter per side shows a muted mic while it can still be fixed (`--levels` for the raw numbers); `--output-device`/`--input-device` pin devices |
 | `vtn menubar` | open the menu bar recorder: one click to record, pickers for project and devices |
 | `vtn process <file>` | convert, transcribe, diarize, store, extract notes — shape the run with --speakers, --steps, --template |
-| `vtn list` | list stored memos |
+| `vtn list` | list stored memos — `--sort created\|updated` |
 | `vtn show <id>` | print a memo's transcript |
 | `vtn notes <id>` | print the extracted notes |
 | `vtn todos` | list open to-dos across memos; `vtn todo done <id>` checks one off |
@@ -85,6 +85,7 @@ Shipped:
 - [x] Memo management like a file system — delete, rename and move memos from the list or the command line
 - [x] To-dos as first-class items — counted per memo, reconciled through re-extraction, checked off from the board (`T`), beside a note (`c`) or the command line
 - [x] Live level meters in the recorder — a waveform strip per side beside the timer in the menu bar, native level indicators and a silence hint in its menu, a live meter in the terminal for `vtn record`, and `--levels` for anything else that wants the numbers
+- [x] Every memo at once — an All row above the projects in the TUI sidebar, a project column in the table, and every listing sortable by creation or last update (`s` in the TUI, `vtn list --sort`)
 
 Later:
 - [ ] Conversations about a memo — `vtn ask` answers one question and forgets it; keep the exchange as a stored thread so follow-ups ("and who agreed to that?") carry the earlier turns, and let the TUI browse past chats beside the note

@@ -153,7 +153,9 @@ def test_showing_a_memo_that_was_never_stored_prints_no_json(repo, monkeypatch, 
 
 def test_listing_prints_exactly_what_services_formatted(monkeypatch, capsys):
     monkeypatch.setattr(
-        services, "memos_text", lambda _repo, project=None, tag=None: "  12  a listing line"
+        services,
+        "memos_text",
+        lambda _repo, project=None, tag=None, sort="created": "  12  a listing line",
     )
 
     run(monkeypatch, StubRepo(), "list")
@@ -540,7 +542,7 @@ def test_a_recording_nothing_here_shares_a_moment_with_is_never_asked_about(
 def test_listing_can_be_narrowed_to_one_project(monkeypatch, capsys):
     seen: dict = {}
 
-    def memos_text(_repo, project=None, tag=None):
+    def memos_text(_repo, project=None, tag=None, sort="created"):
         seen["project"] = project
         return "   1  2026-01-01  1s  en  transcribed  work     a.m4a"
 
@@ -555,7 +557,7 @@ def test_listing_can_be_narrowed_to_one_project(monkeypatch, capsys):
 def test_listing_can_be_narrowed_to_one_tag(monkeypatch, capsys):
     seen: dict = {}
 
-    def memos_text(_repo, project=None, tag=None):
+    def memos_text(_repo, project=None, tag=None, sort="created"):
         seen["project"], seen["tag"] = project, tag
         return "   1  2026-01-01  1s  en  transcribed  work     a.m4a"
 
@@ -571,7 +573,7 @@ def test_a_tag_and_a_project_narrow_the_listing_together(monkeypatch, capsys):
     # both asked for means both applied, not whichever the code checked first
     seen: dict = {}
 
-    def memos_text(_repo, project=None, tag=None):
+    def memos_text(_repo, project=None, tag=None, sort="created"):
         seen["project"], seen["tag"] = project, tag
         return ""
 
@@ -582,8 +584,25 @@ def test_a_tag_and_a_project_narrow_the_listing_together(monkeypatch, capsys):
     assert seen == {"project": "work", "tag": "release"}
 
 
+def test_listing_defaults_to_newest_created_and_can_be_sorted_by_update(monkeypatch, capsys):
+    seen: dict = {}
+
+    def memos_text(_repo, project=None, tag=None, sort="created"):
+        seen["sort"] = sort
+        return "   1  2026-01-01  1s  en  transcribed  work     a.m4a"
+
+    monkeypatch.setattr(services, "memos_text", memos_text)
+
+    run(monkeypatch, StubRepo(), "list")
+    assert seen["sort"] == "created"
+
+    run(monkeypatch, StubRepo(), "list", "--sort", "updated")
+    assert seen["sort"] == "updated"
+    assert "a.m4a" in capsys.readouterr().out
+
+
 def test_a_tag_of_nothing_ends_the_listing_with_a_message(monkeypatch, capsys):
-    def memos_text(_repo, project=None, tag=None):
+    def memos_text(_repo, project=None, tag=None, sort="created"):
         raise services.InvalidInput("a tag needs some text")
 
     monkeypatch.setattr(services, "memos_text", memos_text)

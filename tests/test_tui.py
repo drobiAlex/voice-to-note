@@ -221,6 +221,83 @@ async def test_a_row_says_which_project_its_memo_is_filed_under(repo):
         assert row_for(pilot.app, "shopping.m4a")["project"] == "personal"
 
 
+# --- sorting the memo list --------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pressing_s_sorts_the_list_by_when_a_memo_was_last_updated(repo):
+    # a memo nobody has touched sorts by when it was made, so touching the
+    # older of two recordings has to be enough on its own to move it to the top
+    work, _home = seed(repo)
+    repo.con.execute(
+        "UPDATE memos SET updated_at=datetime('now', '+1 hour') WHERE id=?", (work,)
+    )
+    repo.con.commit()
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+
+        await pilot.press("s")
+        await pilot.pause()
+        assert pilot.app.sub_title == "by updated"
+
+        await pilot.press("s")
+        await pilot.pause()
+        assert pilot.app.sub_title == ""
+
+
+@pytest.mark.asyncio
+async def test_pressing_s_on_the_all_listing_reorders_it_and_says_so(repo):
+    work, _home = seed(repo)
+    repo.con.execute(
+        "UPDATE memos SET updated_at=datetime('now', '+1 hour') WHERE id=?", (work,)
+    )
+    repo.con.commit()
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_everything()
+        await pilot.pause()
+        assert memo_names(pilot.app) == ["shopping.m4a", "standup.m4a"]
+
+        await pilot.press("s")
+        await pilot.pause()
+
+        assert memo_names(pilot.app) == ["standup.m4a", "shopping.m4a"]
+        assert pilot.app.sub_title == "all projects · by updated"
+
+        await pilot.press("s")
+        await pilot.pause()
+
+        assert memo_names(pilot.app) == ["shopping.m4a", "standup.m4a"]
+        assert pilot.app.sub_title == "all projects"
+
+
+@pytest.mark.asyncio
+async def test_sorting_the_list_leaves_the_cursor_on_the_memo_it_was_on(repo):
+    work, home = seed(repo)
+    repo.con.execute(
+        "UPDATE memos SET updated_at=datetime('now', '+1 hour') WHERE id=?", (work,)
+    )
+    repo.con.commit()
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_everything()
+        await pilot.pause()
+        table = memo_table(pilot.app)
+        table.focus()
+        table.move_cursor(row=table.get_row_index(str(home)))
+        await pilot.pause()
+
+        await pilot.press("s")
+        await pilot.pause()
+
+        # home slides from the top to the bottom of the reordered list; the
+        # cursor has to follow it there rather than stay on whatever row now
+        # happens to occupy the position it was resting on
+        assert pilot.app._cursor_key() == str(home)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["rename_project", "remove_project"])
 async def test_the_project_keys_are_not_offered_on_the_row_that_holds_every_project(

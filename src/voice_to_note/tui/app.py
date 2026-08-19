@@ -1626,6 +1626,10 @@ class MemoApp(App[None]):
         Binding("R", "rename_project", "Rename project", show=False),
         Binding("X", "remove_project", "Empty project", show=False),
         ("slash", "find_tag", "Find tag"),
+        # the same exemption as o and / above: sort acts on no memo and no
+        # project, only on how the list already on screen is ordered. Upper
+        # case S is settings, which leaves the lower case free for this
+        ("s", "toggle_sort", "Sort"),
         # upper case here means neither half of the case rule, only that the
         # lower case key is taken by the raw transcript. Like the settings under
         # S, this opens a screen of its own rather than acting on anything
@@ -1644,6 +1648,11 @@ class MemoApp(App[None]):
         # the tag whose answers are in the memo list, when they are not a
         # project's: the two fill the same list and only one can be showing
         self.tag: str | None = None
+        # how the memo list is ordered, newest first either way: by when a
+        # memo was made, or by when it last changed. Its own state rather than
+        # something read off the list on screen, since every redraw has to
+        # keep asking for it the same way until a press of "s" says otherwise
+        self.sort: str = "created"
         # whether the list is the whole library rather than one project's. Its
         # own flag rather than a third value of project above, because "no
         # project" already means "nothing has been browsed yet" — a state the
@@ -1915,6 +1924,13 @@ class MemoApp(App[None]):
         if was_on is not None and was_on in memos.rows:
             memos.move_cursor(row=memos.get_row_index(was_on))
 
+    def action_toggle_sort(self) -> None:
+        """Flips the memo list between newest-created and newest-updated.
+        Redrawn in place rather than fresh: reordering a list somebody is
+        already reading must not also move what their next keypress acts on."""
+        self.sort = "updated" if self.sort == "created" else "created"
+        self._relist_in_place()
+
     def _take_in_outside_writes(self) -> None:
         """Draws what some other process has written since the last look. The
         recorder runs the pipeline in a process of its own, so a memo can be
@@ -1946,40 +1962,56 @@ class MemoApp(App[None]):
         """Whether a memo is among the rows the table is showing."""
         return str(memo_id) in self.query_one("#memos", DataTable).rows
 
+    def _subtitle(self) -> str:
+        """What the header says about the listing on screen, beyond the memos
+        themselves: every project at once, a tag search, and an order other
+        than the default, whichever of those apply, joined in that order. A
+        plain project's own listing needs none of them — its name is already
+        the highlighted row in the sidebar — so the ordinary case is the empty
+        string, not a bug in it."""
+        pieces = []
+        if self.everything:
+            pieces.append("all projects")
+        if self.tag is not None:
+            pieces.append(f"tag: {self.tag}")
+        if self.sort != "created":
+            pieces.append("by updated")
+        return " · ".join(pieces)
+
     def show_everything(self) -> None:
-        """Lists every recording there is, whatever it is filed under, newest
-        first as everywhere else. The subtitle says so, since a list that no
+        """Lists every recording there is, whatever it is filed under, ordered
+        as the sort state says. The subtitle says so, since a list that no
         project accounts for would otherwise read as one project's, and the
         project column beside each name says where each of them lives."""
         self.project = None
         self.tag = None
         self.everything = True
-        self.sub_title = "all projects"
-        self._list_memos(services.memo_rows(self.repo))
+        self.sub_title = self._subtitle()
+        self._list_memos(services.memo_rows(self.repo, sort=self.sort))
         self.refresh_bindings()
 
     def show_project(self, project: str) -> None:
-        """Lists one project's recordings, newest first as everywhere else. This
-        is also the way back from a tag search, so it takes the search down with
-        it rather than leaving the subtitle claiming a tag."""
+        """Lists one project's recordings, ordered as the sort state says.
+        This is also the way back from a tag search, so it takes the search
+        down with it rather than leaving the subtitle claiming a tag."""
         self.project = project
         self.tag = None
         self.everything = False
-        self.sub_title = ""
-        self._list_memos(services.memo_rows(self.repo, project=project))
+        self.sub_title = self._subtitle()
+        self._list_memos(services.memo_rows(self.repo, project=project, sort=self.sort))
         self.refresh_bindings()
 
     def show_tagged(self, tag: str) -> None:
         """Fills the memo list with everything carrying one tag, from whatever
-        project it is filed under. The subtitle says so: the list no longer
-        matches the highlighted project, and leaving that unsaid makes the
-        sidebar read as a lie.
+        project it is filed under, ordered as the sort state says. The
+        subtitle says so: the list no longer matches the highlighted project,
+        and leaving that unsaid makes the sidebar read as a lie.
 
         What was being read before the search is left standing, whole library or
         one project, because escape comes back to it."""
-        self._list_memos(services.memo_rows(self.repo, tag=tag))
+        self._list_memos(services.memo_rows(self.repo, tag=tag, sort=self.sort))
         self.tag = tag
-        self.sub_title = f"tag: {tag}"
+        self.sub_title = self._subtitle()
         self.refresh_bindings()
 
     def show_memo(self, memo_id: int) -> None:
@@ -2423,7 +2455,7 @@ class MemoApp(App[None]):
         else:
             self.query_one("#memos", DataTable).clear()
             self.tag = None
-            self.sub_title = ""
+            self.sub_title = self._subtitle()
             self.refresh_bindings()
 
     def action_action_menu(self) -> None:

@@ -199,10 +199,26 @@ class Repository:
             self._write_speakers(memo_id, speakers)
         return memo_id
 
-    def _narrowed(self, project: str | None, tag: str | None) -> tuple[str, tuple]:
-        """How a listing is narrowed, as SQL and the values it reads: the plain
-        list and the one carrying each memo's state are narrowed the same ways,
-        and a filter written twice is a filter that comes to differ."""
+    def _narrowed(
+        self, project: str | None, tag: str | None, order: str = "created"
+    ) -> tuple[str, tuple]:
+        """How a listing is narrowed and ordered, as SQL and the values it
+        reads: the plain list and the one carrying each memo's state are
+        narrowed and ordered the same ways, and a filter or an order written
+        twice is one that comes to differ.
+
+        A memo nobody has touched carries no updated_at at all, so ordering by
+        it falls back to created_at through COALESCE — the same rule
+        `memo_rows` already applies to the column it shows a memo's update
+        time in, so a listing and the column beside it never disagree about
+        when an untouched memo last changed. Every ordering breaks ties on id
+        DESC, so two memos that land in the same second — sqlite's own
+        resolution for these timestamps — still come back in a stable order
+        rather than whichever sqlite happens to hand back that run.
+
+        order is a name only this app's own code passes, never one a person
+        types, so a value neither order recognises is a caller's bug and
+        raises rather than silently falling back to one of the two it does."""
         where = []
         params: list = []
         if project is not None:
@@ -218,31 +234,40 @@ class Repository:
             )
             params.append(tag)
         clause = " WHERE " + " AND ".join(where) if where else ""
-        return clause + " ORDER BY id DESC", tuple(params)
+        if order == "created":
+            order_sql = "id DESC"
+        elif order == "updated":
+            order_sql = "COALESCE(updated_at, created_at) DESC, id DESC"
+        else:
+            raise ValueError(f"unknown order: {order!r}")
+        return clause + " ORDER BY " + order_sql, tuple(params)
 
-    def memos(self, project: str | None = None, tag: str | None = None) -> list[Memo]:
-        """Every memo, newest first, narrowed to a project, to a tag its notes
-        carry, or to both at once. Tags are matched whole and whatever case they
-        were written in; a memo nobody has extracted has no tags to be found by."""
-        tail, params = self._narrowed(project, tag)
+    def memos(
+        self, project: str | None = None, tag: str | None = None, order: str = "created"
+    ) -> list[Memo]:
+        """Every memo, newest first whichever order asked for, narrowed to a
+        project, to a tag its notes carry, or to both at once. Tags are matched
+        whole and whatever case they were written in; a memo nobody has
+        extracted has no tags to be found by."""
+        tail, params = self._narrowed(project, tag, order)
         return [
             _memo(r)
             for r in self.con.execute(f"SELECT {MEMO_COLUMNS} FROM memos" + tail, params)
         ]
 
     def memo_listings(
-        self, project: str | None = None, tag: str | None = None
+        self, project: str | None = None, tag: str | None = None, order: str = "created"
     ) -> list[MemoListing]:
-        """Every memo a list shows, narrowed the same ways as `memos`, each one
-        carrying how many voices are in it, how much of what it committed to is
-        still outstanding, and whether its transcript has been repaired or its
-        notes written by hand.
+        """Every memo a list shows, narrowed and ordered the same ways as
+        `memos`, each one carrying how many voices are in it, how much of what
+        it committed to is still outstanding, and whether its transcript has
+        been repaired or its notes written by hand.
 
         One statement however many memos come back: a screen draws the whole
         list at once and redraws it after every job, so counting each row's
         speakers, to-dos and repairs on its own would cost a query per row on
         screen."""
-        tail, params = self._narrowed(project, tag)
+        tail, params = self._narrowed(project, tag, order)
         rows = self.con.execute(
             f"SELECT {MEMO_COLUMNS},"
             " (SELECT count(*) FROM speakers s WHERE s.memo_id=memos.id) AS speakers,"

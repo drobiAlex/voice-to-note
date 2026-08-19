@@ -908,15 +908,19 @@ def meter_line(system_db: float, mic_db: float, width: int = 12) -> str:
     return f"sys {bar(system_db)} {system_db:>4.0f} dB   mic {bar(mic_db)} {mic_db:>4.0f} dB"
 
 
-def memos_text(repo: Repository, project: str | None = None, tag: str | None = None) -> str:
-    """The memo list as a person reads it, newest first and column-aligned so the
-    ids, dates and states line up down the screen. One project or one tag at a
-    time when asked for, and both together when both are. Empty when nothing is
-    stored, and equally empty when nothing matches."""
+def memos_text(
+    repo: Repository, project: str | None = None, tag: str | None = None,
+    sort: str = "created",
+) -> str:
+    """The memo list as a person reads it, newest first — by creation or by
+    last update — and column-aligned so the ids, dates and states line up down
+    the screen. One project or one tag at a time when asked for, and both
+    together when both are. Empty when nothing is stored, and equally empty
+    when nothing matches."""
     return "\n".join(
         f"{m.id:>4}  {m.created_at}  {_duration(m.duration_s):>10}  {m.language or '?':<3}"
         f"  {m.status:<12} {m.project:<8} {m.filename}"
-        for m in memos(repo, project, tag)
+        for m in memos(repo, project, tag, sort)
     )
 
 
@@ -1229,12 +1233,29 @@ def data_version(repo: Repository) -> int:
 
 
 def memos(
-    repo: Repository, project: str | None = None, tag: str | None = None
+    repo: Repository, project: str | None = None, tag: str | None = None,
+    sort: str = "created",
 ) -> list[Memo]:
     """The stored memos as records, for a screen that lays out its own rows.
-    Every listing goes through here, so a tag is tidied and refused in one place
-    however it was asked for."""
-    return repo.memos(project, _tag(tag))
+    Every listing goes through here, so a tag and a sort choice are each tidied
+    and refused in one place however either was asked for."""
+    return repo.memos(project, _tag(tag), order=_sort(sort))
+
+
+# the two ways a memo listing can be ordered, both newest first: when a memo
+# was made, or when it — or anything stored on it — last changed
+SORTS = ("created", "updated")
+
+
+def _sort(sort: str) -> str:
+    """A sort choice with its spacing tidied and its case folded, refusing
+    anything that is not one of SORTS: an order this app does not recognise
+    would otherwise reach the repository only to raise several layers down,
+    in place of one line naming what was actually typed."""
+    tidied = sort.strip().lower()
+    if tidied not in SORTS:
+        raise InvalidInput(f"sort by one of: created, updated — not {sort!r}")
+    return tidied
 
 
 # what a table of memos puts beside each name, in the order a reader scans it.
@@ -1277,13 +1298,15 @@ def _status(status: str, refined: bool, edited: bool) -> str:
 
 
 def memo_rows(
-    repo: Repository, project: str | None = None, tag: str | None = None
+    repo: Repository, project: str | None = None, tag: str | None = None,
+    sort: str = "created",
 ) -> list[MemoRow]:
-    """The memo list as a table lays it out, narrowed as the caller asked: a row
-    per memo, saying the same about each one as its info would, and gathered in
-    a single query so that a list of a hundred memos costs what a list of one
-    does. A memo nobody has changed reads as updated when it was made, exactly
-    as the info does, since a column has to say something."""
+    """The memo list as a table lays it out, narrowed and ordered as the caller
+    asked: a row per memo, saying the same about each one as its info would,
+    and gathered in a single query so that a list of a hundred memos costs
+    what a list of one does. A memo nobody has changed reads as updated when
+    it was made, exactly as the info does, since a column has to say
+    something."""
     return [
         MemoRow(
             id=listed.memo.id,
@@ -1296,16 +1319,18 @@ def memo_rows(
             updated=listed.memo.updated_at or listed.memo.created_at,
             project=listed.memo.project,
         )
-        for listed in repo.memo_listings(project, _tag(tag))
+        for listed in repo.memo_listings(project, _tag(tag), order=_sort(sort))
     ]
 
 
 def memos_json(
-    repo: Repository, project: str | None = None, tag: str | None = None
+    repo: Repository, project: str | None = None, tag: str | None = None,
+    sort: str = "created",
 ) -> str:
-    """The memo list as a script reads it, narrowed as the caller asked."""
+    """The memo list as a script reads it, narrowed and ordered as the caller
+    asked."""
     return json.dumps(
-        [asdict(m) for m in memos(repo, project, tag)], ensure_ascii=False
+        [asdict(m) for m in memos(repo, project, tag, sort)], ensure_ascii=False
     )
 
 

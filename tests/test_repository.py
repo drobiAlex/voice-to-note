@@ -865,3 +865,42 @@ def test_a_listing_counts_what_is_still_outstanding_on_every_memo(repo):
     (listing,) = repo.memo_listings()
 
     assert listing.open_todos == 1
+
+
+# --- ordering a listing -----------------------------------------------
+
+
+def test_ordering_by_update_puts_a_touched_memo_above_a_newer_untouched_one(repo):
+    # a memo nobody has touched sorts by when it was made, so touching the
+    # older of two recordings has to be enough on its own to move it back
+    # above one made after it
+    older = make_memo(repo, filename="a.m4a")
+    newer = make_memo(repo, filename="b.m4a")
+    repo.con.execute(
+        "UPDATE memos SET updated_at=datetime('now', '+1 hour') WHERE id=?", (older,)
+    )
+    repo.con.commit()
+
+    assert [m.id for m in repo.memos(order="updated")] == [older, newer]
+    assert [m.id for m in repo.memos(order="created")] == [newer, older]
+
+
+def test_memo_listings_can_be_ordered_by_update_too(repo):
+    older = make_memo(repo, filename="a.m4a")
+    newer = make_memo(repo, filename="b.m4a")
+    repo.con.execute(
+        "UPDATE memos SET updated_at=datetime('now', '+1 hour') WHERE id=?", (older,)
+    )
+    repo.con.commit()
+
+    listed = repo.memo_listings(order="updated")
+
+    assert [listing.memo.id for listing in listed] == [older, newer]
+
+
+def test_an_order_the_app_does_not_recognise_is_refused(repo):
+    # order is a name only the app's own code passes, never something a person
+    # types, so a value this does not know is a caller's bug and raises
+    # rather than guessing which of the two known orders was meant
+    with pytest.raises(ValueError):
+        repo.memos(order="bogus")
