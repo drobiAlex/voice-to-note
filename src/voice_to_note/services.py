@@ -1240,7 +1240,16 @@ def memos(
 # what a table of memos puts beside each name, in the order a reader scans it.
 # The screen takes its headings from here rather than naming them itself, so the
 # columns and the values under them cannot come to disagree.
-MEMO_COLUMNS = ("name", "duration", "speakers", "todos", "status", "created", "updated")
+#
+# The project comes last and is always there, even in a listing narrowed to one
+# project, where every cell under it repeats the same word. A screen fixes its
+# columns once, when the table is built, while what fills the table changes from
+# one project to a tag search to the whole library — so a column that came and
+# went would have to be a rebuild of the table, and the listings that reach
+# across projects are the ones that most need to say where a memo lives.
+MEMO_COLUMNS = (
+    "name", "duration", "speakers", "todos", "status", "created", "updated", "project",
+)
 
 
 @dataclass(frozen=True)
@@ -1256,6 +1265,7 @@ class MemoRow:
     status: str
     created: str
     updated: str
+    project: str
 
 
 def _status(status: str, refined: bool, edited: bool) -> str:
@@ -1284,6 +1294,7 @@ def memo_rows(
             status=_status(listed.memo.status, listed.refined, listed.edited),
             created=listed.memo.created_at,
             updated=listed.memo.updated_at or listed.memo.created_at,
+            project=listed.memo.project,
         )
         for listed in repo.memo_listings(project, _tag(tag))
     ]

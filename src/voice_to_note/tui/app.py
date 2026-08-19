@@ -1520,6 +1520,12 @@ MEMO_ACTIONS = frozenset(
 )
 PROJECT_ACTIONS = frozenset({"rename_project", "remove_project"})
 
+# what the sidebar row for the whole library is named behind its label. The
+# empty name is the one no project can ever carry — services refuses a project
+# whose name is really empty — so the row that means "narrowed by nothing"
+# cannot be confused with a project somebody happened to call All
+EVERYTHING = ""
+
 # how a row says work is running on it: a block travelling along a short bar,
 # beside the word for what is being done. The bar is drawn out of characters
 # rather than being a Rich progress bar, whose pulse is carried entirely in
@@ -1638,6 +1644,11 @@ class MemoApp(App[None]):
         # the tag whose answers are in the memo list, when they are not a
         # project's: the two fill the same list and only one can be showing
         self.tag: str | None = None
+        # whether the list is the whole library rather than one project's. Its
+        # own flag rather than a third value of project above, because "no
+        # project" already means "nothing has been browsed yet" — a state the
+        # app opens in and comes back to, and one that must keep listing nothing
+        self.everything = False
         # what has work running on it, one job each: two passes over the same
         # thing would race each other's writes. A memo already stored is keyed by
         # its id, a recording still being brought in by the path it came from,
@@ -1774,13 +1785,17 @@ class MemoApp(App[None]):
         whenever there is a memo to act on — open below the list, or merely
         pointed at in it — whatever holds focus, because a memo is on screen
         either way. A project action is offered only while the sidebar holds the
-        cursor, because the thing it acts on is the row the cursor rests on."""
+        cursor, because the thing it acts on is the row the cursor rests on —
+        and only while that row is a project, since the row standing for the
+        whole library has no name to rename and nothing of its own to empty."""
         if action in MEMO_ACTIONS:
             return self._target_memo() is not None
         if action in PROJECT_ACTIONS:
             # checked while the screen is still being built, before there is one
             sidebar = self.query("#projects")
-            return bool(sidebar) and self.focused is sidebar.first()
+            if not sidebar or self.focused is not sidebar.first():
+                return False
+            return self._pointed_project() is not None
         if action == "step_back":
             if self.memo_id is not None or self.tag is not None:
                 return True
@@ -1791,10 +1806,16 @@ class MemoApp(App[None]):
 
     def load_projects(self) -> None:
         """Draws the sidebar from what is in the database now, counts and all,
-        leaving the cursor on the project it was resting on. Every count on it
-        moves whenever anything is stored, here or in another process, and a
-        cursor thrown back to the top by each of those would keep changing which
+        leaving the cursor on the row it was resting on. Every count on it moves
+        whenever anything is stored, here or in another process, and a cursor
+        thrown back to the top by each of those would keep changing which
         project the project keys act on under the hand pressing them.
+
+        The whole library is offered first, above the projects and counted as
+        all of them together: a sidebar of projects alone can only ever answer
+        "what is in this one", and it is where the cursor rests on the first
+        draw, so the session opens on everything rather than on whichever
+        project happens to sort first.
 
         A project that is no longer listed leaves the cursor at the top, which
         is also where the first draw of the session puts it: a sidebar
@@ -1805,9 +1826,11 @@ class MemoApp(App[None]):
         was_on = resting.name if resting else None
         listed = services.projects(self.repo)
         sidebar.clear()
+        held = sum(count for _name, count in listed)
+        sidebar.append(ListItem(Label(f"All ({held})"), name=EVERYTHING))
         for name, count in listed:
             sidebar.append(ListItem(Label(f"{name} ({count})"), name=name))
-        names = [name for name, _count in listed]
+        names = [EVERYTHING, *(name for name, _count in listed)]
         sidebar.index = names.index(was_on) if was_on in names else 0
 
     def _list_memos(self, rows: list[services.MemoRow]) -> None:
@@ -1826,6 +1849,7 @@ class MemoApp(App[None]):
                 row.status,
                 row.created,
                 row.updated,
+                row.project,
                 key=str(row.id),
             )
         # the rows have just come back from the database, which knows nothing of
@@ -1841,7 +1865,7 @@ class MemoApp(App[None]):
         name and its stage bar is blank, because nothing else about it is known
         until the pipeline has read it."""
         self.query_one("#memos", DataTable).add_row(
-            Path(key).name, "", "", "", "", "", "", key=key
+            Path(key).name, "", "", "", "", "", "", "", key=key
         )
 
     def _draw_importing(self) -> None:
@@ -1867,9 +1891,14 @@ class MemoApp(App[None]):
 
     def _relist(self) -> None:
         """Redraws whichever listing is on screen, so that the status column
-        stops describing the memos as they were when the list was opened."""
+        stops describing the memos as they were when the list was opened. The
+        listing has to be redrawn as the same listing: a redraw that reached for
+        a project while the whole library was on screen would narrow the list
+        nobody asked to narrow, and there is no project to reach for anyway."""
         if self.tag is not None:
             self.show_tagged(self.tag)
+        elif self.everything:
+            self.show_everything()
         elif self.project is not None:
             self.show_project(self.project)
 
@@ -1917,12 +1946,25 @@ class MemoApp(App[None]):
         """Whether a memo is among the rows the table is showing."""
         return str(memo_id) in self.query_one("#memos", DataTable).rows
 
+    def show_everything(self) -> None:
+        """Lists every recording there is, whatever it is filed under, newest
+        first as everywhere else. The subtitle says so, since a list that no
+        project accounts for would otherwise read as one project's, and the
+        project column beside each name says where each of them lives."""
+        self.project = None
+        self.tag = None
+        self.everything = True
+        self.sub_title = "all projects"
+        self._list_memos(services.memo_rows(self.repo))
+        self.refresh_bindings()
+
     def show_project(self, project: str) -> None:
         """Lists one project's recordings, newest first as everywhere else. This
         is also the way back from a tag search, so it takes the search down with
         it rather than leaving the subtitle claiming a tag."""
         self.project = project
         self.tag = None
+        self.everything = False
         self.sub_title = ""
         self._list_memos(services.memo_rows(self.repo, project=project))
         self.refresh_bindings()
@@ -1931,7 +1973,10 @@ class MemoApp(App[None]):
         """Fills the memo list with everything carrying one tag, from whatever
         project it is filed under. The subtitle says so: the list no longer
         matches the highlighted project, and leaving that unsaid makes the
-        sidebar read as a lie."""
+        sidebar read as a lie.
+
+        What was being read before the search is left standing, whole library or
+        one project, because escape comes back to it."""
         self._list_memos(services.memo_rows(self.repo, tag=tag))
         self.tag = tag
         self.sub_title = f"tag: {tag}"
@@ -1952,13 +1997,21 @@ class MemoApp(App[None]):
         self.refresh_bindings()
 
     def _reload(self, project: str | None) -> None:
-        """Redraws the sidebar and, where one is being browsed, that project's
-        memo list, dropping the detail panes when the memo they describe is no
-        longer among its rows. Every bulk refiling ends here."""
+        """Redraws the sidebar and whatever listing is under it, dropping the
+        detail panes when the memo they describe is no longer among its rows.
+        Every bulk refiling ends here.
+
+        A refiling moves memos between projects, so the whole library shows
+        exactly the same rows afterwards and one project rarely does — which is
+        why the listing that is up decides what is redrawn, rather than the
+        project the caller was working from."""
         self.load_projects()
-        if project is None:
+        if self.everything:
+            self.show_everything()
+        elif project is not None:
+            self.show_project(project)
+        else:
             return
-        self.show_project(project)
         memo_id = self.memo_id
         if memo_id is not None and not self._listed(memo_id):
             self.clear_memo()
@@ -2355,18 +2408,23 @@ class MemoApp(App[None]):
             memos.focus()
 
     def _clear_tag(self) -> None:
-        """Puts the project back in the list once a tag search has been read.
-        With no search showing there is nothing to come back from, so the
-        escape ladder never reaches this rung in that case."""
+        """Puts whatever the search was run from back in the list once it has
+        been read — the project, or the whole library when the search reached
+        out of that. A search run before anything was ever browsed has nothing
+        behind it, and leaves the list empty rather than inventing one. With no
+        search showing there is nothing to come back from, so the escape ladder
+        never reaches this rung in that case."""
         if self.tag is None:
             return
-        if self.project is None:
+        if self.project is not None:
+            self.show_project(self.project)
+        elif self.everything:
+            self.show_everything()
+        else:
             self.query_one("#memos", DataTable).clear()
             self.tag = None
             self.sub_title = ""
             self.refresh_bindings()
-        else:
-            self.show_project(self.project)
 
     def action_action_menu(self) -> None:
         """Lays out everything that can be done to the memo being pointed at, if
@@ -2507,12 +2565,19 @@ class MemoApp(App[None]):
     def _pointed_project(self) -> str | None:
         """The project the sidebar cursor is resting on, and nothing at all once
         the cursor is no longer what the person is pointing at: the project keys
-        read the sidebar, so they stay out of the way while the memos have focus."""
+        read the sidebar, so they stay out of the way while the memos have focus.
+
+        Nothing either on the row standing for the whole library, which is not a
+        project: it is every project at once, so renaming or emptying it names
+        nothing. That answer is what keeps those keys hidden there, and what
+        makes them harmless if one is reached some other way."""
         sidebar = self.query_one("#projects", ListView)
         if self.focused is not sidebar:
             return None
         chosen = sidebar.highlighted_child
-        return chosen.name if chosen else None
+        if chosen is None or chosen.name == EVERYTHING:
+            return None
+        return chosen.name
 
     def action_rename_project(self) -> None:
         """Offers to rename the project the sidebar cursor is on."""
@@ -2553,9 +2618,16 @@ class MemoApp(App[None]):
         self._reload(self.project)
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
-        """A project fills the memo list, and hands the cursor to it."""
+        """A project fills the memo list, and hands the cursor to it. The row
+        above them all fills it with every memo there is, narrowed by nothing —
+        it carries the one name a project cannot have, so no project can be
+        mistaken for it."""
         if event.list_view.id == "projects":
-            self.show_project(event.item.name or "")
+            chosen = event.item.name or EVERYTHING
+            if chosen == EVERYTHING:
+                self.show_everything()
+            else:
+                self.show_project(chosen)
             self.query_one("#memos", DataTable).focus()
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:

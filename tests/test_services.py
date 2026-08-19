@@ -1244,6 +1244,7 @@ def test_the_memo_table_puts_a_memos_state_in_columns_beside_its_name(repo, wav)
 
     assert services.MEMO_COLUMNS == (
         "name", "duration", "speakers", "todos", "status", "created", "updated",
+        "project",
     )
     assert row.id == memo_id
     assert (row.name, row.duration, row.speakers) == ("standup.m4a", "1m 15s", "2")
@@ -1251,6 +1252,17 @@ def test_the_memo_table_puts_a_memos_state_in_columns_beside_its_name(repo, wav)
     assert row.status == "transcribed"
     assert row.created != ""
     assert row.updated == row.created
+
+
+def test_every_row_says_which_project_its_memo_is_filed_under(repo, wav):
+    # a listing that reaches across projects has to say where each memo lives,
+    # since the sidebar is no longer answering that question for it
+    add_project_memo(repo, wav, "work.m4a", "work")
+    add_project_memo(repo, wav, "home.m4a", "personal")
+
+    filed = {row.name: row.project for row in services.memo_rows(repo)}
+
+    assert filed == {"work.m4a": "work", "home.m4a": "personal"}
 
 
 def test_a_repaired_transcript_and_a_hand_written_note_are_marked_in_the_status(repo, wav):

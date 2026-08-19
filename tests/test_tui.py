@@ -117,10 +117,14 @@ def row_for(app, name: str) -> dict[str, str]:
 
 @pytest.mark.asyncio
 async def test_the_app_opens_on_the_projects_that_exist(repo):
+    # the row for every memo at once comes first on purpose: it is where the
+    # cursor rests on the first draw, so the session opens on the whole library
+    # rather than on whichever project happens to sort first
     seed(repo)
 
     async with MemoApp(repo).run_test() as pilot:
         assert labels(pilot.app.query_one("#projects", ListView)) == [
+            "All (2)",
             "personal (1)",
             "work (1)",
         ]
@@ -162,26 +166,97 @@ async def test_a_memo_nobody_extracted_says_so_instead_of_failing(repo):
 
 
 @pytest.mark.asyncio
-async def test_the_first_project_opens_without_a_keypress_to_wake_it(repo):
+async def test_the_first_enter_of_the_session_lists_every_memo_there_is(repo):
     # a sidebar highlighting nothing makes the first Enter of every session do
-    # nothing at all, which reads as the app being broken
+    # nothing at all, which reads as the app being broken. What that Enter now
+    # opens is the All row it rests on, so a session starts on the whole library
     seed(repo)
 
     async with MemoApp(repo).run_test() as pilot:
         await pilot.press("enter")
 
-        assert memo_names(pilot.app) == ["shopping.m4a"]
+        assert memo_names(pilot.app) == ["shopping.m4a", "standup.m4a"]
 
 
 @pytest.mark.asyncio
 async def test_the_keyboard_walks_on_to_the_next_project(repo):
-    # the sidebar is focused on open, so every project is reachable without a mouse
+    # the sidebar is focused on open, so every project is reachable without a
+    # mouse. One step down off the All row reaches the first project of all
     seed(repo)
 
     async with MemoApp(repo).run_test() as pilot:
         await pilot.press("down", "enter")
 
-        assert memo_names(pilot.app) == ["standup.m4a"]
+        assert memo_names(pilot.app) == ["shopping.m4a"]
+
+
+# --- every memo at once ---------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_all_row_lists_the_memos_of_every_project_at_once(repo):
+    # the sidebar could only ever answer "what is in this one project"; the
+    # question people actually open the app with is "what have I recorded"
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_everything()
+        await pilot.pause()
+
+        assert memo_names(pilot.app) == ["shopping.m4a", "standup.m4a"]
+        assert pilot.app.sub_title == "all projects"
+
+
+@pytest.mark.asyncio
+async def test_a_row_says_which_project_its_memo_is_filed_under(repo):
+    # a listing that reaches across projects has to say where each memo lives,
+    # since the highlighted sidebar row is no longer answering that
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_everything()
+        await pilot.pause()
+
+        assert row_for(pilot.app, "standup.m4a")["project"] == "work"
+        assert row_for(pilot.app, "shopping.m4a")["project"] == "personal"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["rename_project", "remove_project"])
+async def test_the_project_keys_are_not_offered_on_the_row_that_holds_every_project(
+    repo, action
+):
+    # All is not a project: there is no name to rename and nothing to empty
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        sidebar = pilot.app.query_one("#projects", ListView)
+        await pilot.pause()
+        assert pilot.app.focused is sidebar
+
+        assert pilot.app.check_action(action, ()) is False
+
+        sidebar.index = 1  # personal, the first project under All
+        await pilot.pause()
+        assert pilot.app.check_action(action, ()) is True
+
+
+@pytest.mark.asyncio
+async def test_the_project_keys_do_nothing_when_reached_on_the_all_row_anyway(repo):
+    # a hidden key is only hidden: anything that reaches the action another way
+    # still has to find nothing to act on
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.query_one("#projects", ListView).focus()
+        await pilot.pause()
+
+        pilot.app.action_rename_project()
+        pilot.app.action_remove_project()
+        await pilot.pause()
+
+        assert len(pilot.app.screen_stack) == 1
+        assert said(pilot) == []
 
 
 def test_the_tui_leaves_database_reads_and_formatting_to_services():
@@ -480,7 +555,11 @@ async def test_typing_a_new_project_refiles_the_memo_and_moves_the_count(repo):
 
         assert not showing(pilot.app, "#project-name")
         assert [m.project for m in services.memos(repo) if m.id == work] == ["side"]
-        assert labels(pilot.app.query_one("#projects", ListView)) == ["personal (1)", "side (1)"]
+        assert labels(pilot.app.query_one("#projects", ListView)) == [
+            "All (2)",
+            "personal (1)",
+            "side (1)",
+        ]
 
 
 @pytest.mark.asyncio
@@ -716,7 +795,10 @@ async def test_delete_asks_by_name_before_throwing_the_pointed_at_memo_away(repo
 
         assert [m.id for m in services.memos(repo)] == [home]
         assert memo_names(pilot.app) == []
-        assert labels(pilot.app.query_one("#projects", ListView)) == ["personal (1)"]
+        assert labels(pilot.app.query_one("#projects", ListView)) == [
+            "All (1)",
+            "personal (1)",
+        ]
         assert "deleted standup.m4a" in [
             str(n.message) for n in pilot.app._notifications
         ]
@@ -945,7 +1027,8 @@ async def test_a_memo_moved_out_of_view_takes_the_raw_claim_with_it(repo):
 
 async def point_at_project(pilot, index: int) -> None:
     """Puts the sidebar cursor on one project, which is what the project keys
-    act on: the row you are pointing at, not the one whose memos are listed."""
+    act on: the row you are pointing at, not the one whose memos are listed.
+    Row 0 is All, which is no project, so the projects themselves start at 1."""
     sidebar = pilot.app.query_one("#projects", ListView)
     sidebar.focus()
     sidebar.index = index
@@ -958,6 +1041,7 @@ async def test_shift_r_offers_to_rename_the_project_under_the_cursor(repo):
     seed(repo)
 
     async with MemoApp(repo).run_test() as pilot:
+        await point_at_project(pilot, 1)
         await pilot.press("R")
         await pilot.pause()
 
@@ -969,6 +1053,7 @@ async def test_renaming_a_project_renames_it_in_the_sidebar(repo):
     seed(repo)
 
     async with MemoApp(repo).run_test() as pilot:
+        await point_at_project(pilot, 1)
         await pilot.press("R")
         await pilot.pause()
         pilot.app.screen.query_one("#project-rename", Input).value = "home"
@@ -976,7 +1061,11 @@ async def test_renaming_a_project_renames_it_in_the_sidebar(repo):
         await pilot.pause()
 
         assert not showing(pilot.app, "#project-rename")
-        assert labels(pilot.app.query_one("#projects", ListView)) == ["home (1)", "work (1)"]
+        assert labels(pilot.app.query_one("#projects", ListView)) == [
+            "All (2)",
+            "home (1)",
+            "work (1)",
+        ]
 
 
 @pytest.mark.asyncio
@@ -984,6 +1073,7 @@ async def test_renaming_a_project_to_nothing_is_refused_without_losing_the_modal
     seed(repo)
 
     async with MemoApp(repo).run_test() as pilot:
+        await point_at_project(pilot, 1)
         await pilot.press("R")
         await pilot.pause()
         pilot.app.screen.query_one("#project-rename", Input).value = "   "
@@ -1002,7 +1092,7 @@ async def test_renaming_the_project_being_viewed_keeps_its_memos_in_front_of_you
     async with MemoApp(repo).run_test() as pilot:
         pilot.app.show_project("work")
         await open_memo(pilot, work)
-        await point_at_project(pilot, 1)
+        await point_at_project(pilot, 2)  # work, under All and personal
         await pilot.press("R")
         await pilot.pause()
         pilot.app.screen.query_one("#project-rename", Input).value = "client"
@@ -1022,7 +1112,7 @@ async def test_a_renamed_project_is_found_again_under_its_tidied_name(repo):
     async with MemoApp(repo).run_test() as pilot:
         pilot.app.show_project("work")
         await open_memo(pilot, work)
-        await point_at_project(pilot, 1)
+        await point_at_project(pilot, 2)  # work, under All and personal
         await pilot.press("R")
         await pilot.pause()
         pilot.app.screen.query_one("#project-rename", Input).value = "  client  "
@@ -1030,6 +1120,7 @@ async def test_a_renamed_project_is_found_again_under_its_tidied_name(repo):
         await pilot.pause()
 
         assert labels(pilot.app.query_one("#projects", ListView)) == [
+            "All (2)",
             "client (1)",
             "personal (1)",
         ]
@@ -1046,12 +1137,16 @@ async def test_emptying_the_other_project_is_refused_without_taking_the_app_down
     )
 
     async with MemoApp(repo).run_test() as pilot:
+        await point_at_project(pilot, 1)
         await pilot.press("X")
         await pilot.pause()
         await pilot.press("y")
         await pilot.pause()
 
-        assert labels(pilot.app.query_one("#projects", ListView)) == ["other (1)"]
+        assert labels(pilot.app.query_one("#projects", ListView)) == [
+            "All (1)",
+            "other (1)",
+        ]
         assert [str(n.message) for n in pilot.app._notifications] == [
             "other is where emptied projects go"
         ]
@@ -1063,11 +1158,13 @@ async def test_shift_x_asks_before_emptying_a_project(repo):
     seed(repo)
 
     async with MemoApp(repo).run_test() as pilot:
+        await point_at_project(pilot, 1)
         await pilot.press("X")
         await pilot.pause()
 
         assert showing(pilot.app, "#confirm-remove")
         assert labels(pilot.app.query_one("#projects", ListView)) == [
+            "All (2)",
             "personal (1)",
             "work (1)",
         ]
@@ -1078,13 +1175,18 @@ async def test_agreeing_to_empty_a_project_files_its_memos_under_other(repo):
     seed(repo)
 
     async with MemoApp(repo).run_test() as pilot:
+        await point_at_project(pilot, 1)
         await pilot.press("X")
         await pilot.pause()
         await pilot.press("y")
         await pilot.pause()
 
         assert not showing(pilot.app, "#confirm-remove")
-        assert labels(pilot.app.query_one("#projects", ListView)) == ["other (1)", "work (1)"]
+        assert labels(pilot.app.query_one("#projects", ListView)) == [
+            "All (2)",
+            "other (1)",
+            "work (1)",
+        ]
 
 
 @pytest.mark.asyncio
@@ -1092,6 +1194,7 @@ async def test_declining_to_empty_a_project_leaves_every_memo_where_it_was(repo)
     seed(repo)
 
     async with MemoApp(repo).run_test() as pilot:
+        await point_at_project(pilot, 1)
         await pilot.press("X")
         await pilot.pause()
         assert showing(pilot.app, "#confirm-remove")
@@ -1101,6 +1204,7 @@ async def test_declining_to_empty_a_project_leaves_every_memo_where_it_was(repo)
 
         assert not showing(pilot.app, "#confirm-remove")
         assert labels(pilot.app.query_one("#projects", ListView)) == [
+            "All (2)",
             "personal (1)",
             "work (1)",
         ]
@@ -1115,7 +1219,7 @@ async def test_emptying_the_project_being_viewed_stops_showing_its_memos(repo):
     async with MemoApp(repo).run_test() as pilot:
         pilot.app.show_project("work")
         await open_memo(pilot, work)
-        await point_at_project(pilot, 1)
+        await point_at_project(pilot, 2)  # work, under All and personal
         await pilot.press("X")
         await pilot.pause()
         await pilot.press("y")
@@ -1252,6 +1356,25 @@ async def test_leaving_a_tag_search_puts_the_project_back_in_the_list(repo):
 
         assert memo_names(pilot.app) == ["shopping.m4a"]
         assert pilot.app.sub_title == ""
+
+
+@pytest.mark.asyncio
+async def test_leaving_a_tag_search_started_on_all_puts_every_memo_back(repo):
+    # escape means "back to what I was reading", and what was being read was the
+    # whole library — falling back to an empty table would lose the listing
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_everything()
+        await pilot.pause()
+        await search_tag(pilot, "release")
+        assert memo_names(pilot.app) == ["standup.m4a"]
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert memo_names(pilot.app) == ["shopping.m4a", "standup.m4a"]
+        assert pilot.app.sub_title == "all projects"
 
 
 @pytest.mark.asyncio
@@ -2089,6 +2212,7 @@ async def test_a_processed_recording_joins_the_project_on_screen(repo, tmp_path,
             "standup.m4a",
         ]
         assert labels(pilot.app.query_one("#projects", ListView)) == [
+            "All (3)",
             "personal (1)",
             "work (2)",
         ]
@@ -3132,6 +3256,9 @@ async def test_the_memo_list_shows_each_memos_state_beside_its_name(repo):
         pilot.app.show_project("work")
         await pilot.pause()
 
+        # the project is there even here, where every cell under it would say
+        # work: the columns are fixed when the table is built, and the listings
+        # that reach across projects are the ones that need it
         assert memo_columns(pilot.app) == [
             "name",
             "duration",
@@ -3140,6 +3267,7 @@ async def test_the_memo_list_shows_each_memos_state_beside_its_name(repo):
             "status",
             "created",
             "updated",
+            "project",
         ]
         info = services.memo_info(repo, memo_id)
         assert row_for(pilot.app, "interview.m4a") == {
@@ -3150,6 +3278,7 @@ async def test_the_memo_list_shows_each_memos_state_beside_its_name(repo):
             "status": "extracted",
             "created": info.created,
             "updated": info.updated,
+            "project": "work",
         }
 
 
@@ -3652,7 +3781,7 @@ async def test_closing_the_board_leaves_the_memo_list_counting_what_is_left(repo
 
     async with MemoApp(repo).run_test() as pilot:
         sidebar = pilot.app.query_one("#projects", ListView)
-        sidebar.index = 1  # work, the project being browsed
+        sidebar.index = 2  # work, the project being browsed, under All
         pilot.app.show_project("work")
         await pilot.pause()
         assert row_for(pilot.app, "standup.m4a")["todos"] == "1"
@@ -3667,7 +3796,7 @@ async def test_closing_the_board_leaves_the_memo_list_counting_what_is_left(repo
         assert row_for(pilot.app, "standup.m4a")["todos"] == "0"
         # nothing the board offers can change what the sidebar counts, so the
         # project being browsed is still the one under the cursor
-        assert sidebar.index == 1
+        assert sidebar.index == 2
 
 
 @pytest.mark.asyncio
@@ -3983,9 +4112,28 @@ async def test_a_memo_another_process_stored_turns_up_without_a_keypress(repo, m
 
         assert memo_names(pilot.app) == ["retro.m4a", "standup.m4a"]
         assert labels(pilot.app.query_one("#projects", ListView)) == [
+            "All (3)",
             "personal (1)",
             "work (2)",
         ]
+
+
+@pytest.mark.asyncio
+async def test_a_memo_stored_elsewhere_joins_a_listing_of_every_project(repo):
+    # the All listing is narrowed by nothing, so there is no project for a
+    # redraw to fall back to — one that reached for one would empty the table
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_everything()
+        await pilot.pause()
+
+        stored_elsewhere(repo, "retro.m4a", "work")
+        pilot.app._take_in_outside_writes()
+        await pilot.pause()
+
+        assert memo_names(pilot.app) == ["retro.m4a", "shopping.m4a", "standup.m4a"]
+        assert pilot.app.sub_title == "all projects"
 
 
 @pytest.mark.asyncio
@@ -3998,7 +4146,7 @@ async def test_taking_in_an_outside_write_leaves_the_reader_where_they_were(repo
 
     async with MemoApp(repo).run_test() as pilot:
         sidebar = pilot.app.query_one("#projects", ListView)
-        sidebar.index = 1  # work, the project being browsed
+        sidebar.index = 2  # work, the project being browsed, under All
         pilot.app.show_project("work")
         await pilot.pause()
         table = memo_table(pilot.app)
@@ -4012,5 +4160,5 @@ async def test_taking_in_an_outside_write_leaves_the_reader_where_they_were(repo
 
         assert memo_names(pilot.app) == ["planning.m4a", "retro.m4a", "standup.m4a"]
         assert memo_rows(pilot.app)[table.cursor_row][0] == "standup.m4a"
-        assert sidebar.index == 1
+        assert sidebar.index == 2
         assert pilot.app.focused is table
