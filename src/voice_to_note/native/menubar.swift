@@ -463,11 +463,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// The panel put on screen as the status item growing downwards rather than
-    /// as a window switched on: the whole thing fades up while the view inside
-    /// it grows the last few per cent into place, on one curve so the two read
-    /// as a single movement. The window's frame never moves — it sits at the
-    /// menu bar's own level, and a panel that slid down into place would be
-    /// drawn over the menu bar for as long as it took to arrive.
+    /// as a window switched on: the whole thing fades up quickly, and the view
+    /// inside it goes on growing into place long after it has, so what there is
+    /// to watch is the island settling rather than a rectangle brightening. The
+    /// window's frame never moves — it sits at the menu bar's own level, and a
+    /// panel that slid down into place would be drawn over the menu bar for as
+    /// long as it took to arrive.
     ///
     /// Reduce Motion gets the panel and none of this. The opening itself still
     /// happens either way: a window saying the tape is rolling is information,
@@ -481,7 +482,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.orderFrontRegardless()
         view.appear()
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = RecordingPanelView.appearing
+            context.duration = RecordingPanelView.fadingUp
             context.timingFunction = RecordingPanelView.easing
             panel.animator().alphaValue = 1
         }
@@ -515,9 +516,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// The window taken off screen, faded first wherever anything is allowed to
-    /// move. It goes in half the time it came: arriving is the part somebody
-    /// watches, and a window that takes as long to leave is a window in the way
-    /// of whatever the click that dismissed it was meant for.
+    /// move. It goes in the time it took to fade up and not the time it took to
+    /// arrive: what the rest of arriving buys is the island growing, which is
+    /// the part somebody watches, and a window that takes as long to leave is a
+    /// window in the way of whatever the click that dismissed it was meant for.
     ///
     /// The completion handler is the only thing holding the panel by then, and
     /// that is deliberate: it keeps the window alive exactly as long as it
@@ -1833,18 +1835,27 @@ final class RecordingPanelView: NSVisualEffectView {
     /// having grown downwards.
     static let corner: CGFloat = 16
 
-    /// How long the island takes to arrive, how long it takes to go, and how
-    /// small it starts. Arriving is given nearly twice what going gets: the
-    /// arrival is the part somebody watches, since it is what says this window
-    /// came out of the status item above it, and a window that takes as long to
-    /// leave is a window standing in the way of whatever dismissed it.
+    /// How long the window takes to fade up, how long the island inside it
+    /// takes to grow into place, how long it all takes to go, and how small the
+    /// island starts. The fade is short because this panel stands in for a
+    /// menu, and a menu is on screen when it is asked for; the third of a
+    /// second is the island settling, which is the part that says this window
+    /// came out of the status item above it.
     ///
-    /// Four per cent is a long way short of a zoom — twelve points across a
+    /// The fade has to be over while the growth is still moving. Run the two on
+    /// one duration and the panel spends its opening frames too faint to read,
+    /// and by the time there is anything to read the growth has all but
+    /// finished — a movement that happens correctly and is never seen.
+    ///
+    /// Eight per cent is still short of a zoom — twenty-four points across a
     /// panel this wide — because the thing being shown is where the window came
-    /// from, not that it made an entrance.
-    static let appearing: TimeInterval = 0.22
+    /// from, not that it made an entrance. Going is the fade and nothing else:
+    /// a window that takes as long to leave is a window standing in the way of
+    /// whatever dismissed it.
+    static let fadingUp: TimeInterval = 0.12
+    static let appearing: TimeInterval = 0.30
     static let vanishing: TimeInterval = 0.12
-    private static let arrivingFrom: CGFloat = 0.96
+    private static let arrivingFrom: CGFloat = 0.92
 
     /// The curve both movements run on. Ease-out rather than something slow at
     /// both ends: this island stands in for a menu, and a menu is on screen the
