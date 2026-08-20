@@ -1391,6 +1391,7 @@ _MENU_ROWS: tuple[tuple[tuple[str, ...], str, str], ...] = (
     (("m",), "move_memo", "Move"),
     (("n",), "title_memo", "Rename"),
     (("delete", "backspace"), "delete_memo", "Delete"),
+    (("h",), "toggle_archive", "Archive / Unarchive"),
     (("r",), "rename_speaker", "Rename speaker"),
     (("t",), "toggle_raw", "Raw transcript"),
     (("x",), "extract", "Extract"),
@@ -1509,6 +1510,7 @@ MEMO_ACTIONS = frozenset(
         "move_memo",
         "title_memo",
         "delete_memo",
+        "toggle_archive",
         "rename_speaker",
         "toggle_raw",
         "extract",
@@ -1525,6 +1527,13 @@ PROJECT_ACTIONS = frozenset({"rename_project", "remove_project"})
 # whose name is really empty — so the row that means "narrowed by nothing"
 # cannot be confused with a project somebody happened to call All
 EVERYTHING = ""
+
+# what the sidebar row for the archive is named behind its label. A name made of
+# a single space is the other one no project can ever carry — services strips a
+# project name before it stores it and refuses whatever is left empty — so the
+# drawer memos are put away in cannot be confused with a project somebody
+# happened to call Archived
+ARCHIVED = " "
 
 # how a row says work is running on it: a block travelling along a short bar,
 # beside the word for what is being done. The bar is drawn out of characters
@@ -1606,6 +1615,10 @@ class MemoApp(App[None]):
         # reaches for; the action menu under space is where they are spelled out
         Binding("delete", "delete_memo", "Delete", show=False),
         Binding("backspace", "delete_memo", "Delete", show=False),
+        # "h" for hide, which is what archiving does to a memo: it acts on the
+        # one memo, so the case rule makes it lower case, and the first letter
+        # of archive is already Ask
+        Binding("h", "toggle_archive", "Archive / Unarchive", show=False),
         # "r" rather than "n": renaming the memo has n, and n means "no" in
         # every dialog that asks
         Binding("r", "rename_speaker", "Rename speaker", show=False),
@@ -1658,6 +1671,11 @@ class MemoApp(App[None]):
         # project" already means "nothing has been browsed yet" — a state the
         # app opens in and comes back to, and one that must keep listing nothing
         self.everything = False
+        # whether the list is the archive drawer rather than a live listing.
+        # Exclusive with all three of the ways of narrowing above it: a memo put
+        # away is meant to be gone from the list, so a view holding both at once
+        # would leave the archiving no visible effect at all
+        self.archived = False
         # what has work running on it, one job each: two passes over the same
         # thing would race each other's writes. A memo already stored is keyed by
         # its id, a recording still being brought in by the path it came from,
@@ -1826,6 +1844,12 @@ class MemoApp(App[None]):
         draw, so the session opens on everything rather than on whichever
         project happens to sort first.
 
+        The archive comes last, under the projects, and is offered even while
+        nothing has been put in it: it is where a memo goes, and a row that only
+        appears once somebody has archived something is a row nobody discovers
+        beforehand. Its count is its own, since none of the counts above it
+        include an archived memo.
+
         A project that is no longer listed leaves the cursor at the top, which
         is also where the first draw of the session puts it: a sidebar
         highlighting nothing makes the session's first Enter do nothing, which
@@ -1839,7 +1863,9 @@ class MemoApp(App[None]):
         sidebar.append(ListItem(Label(f"All ({held})"), name=EVERYTHING))
         for name, count in listed:
             sidebar.append(ListItem(Label(f"{name} ({count})"), name=name))
-        names = [EVERYTHING, *(name for name, _count in listed)]
+        put_away = services.archived_count(self.repo)
+        sidebar.append(ListItem(Label(f"Archived ({put_away})"), name=ARCHIVED))
+        names = [EVERYTHING, *(name for name, _count in listed), ARCHIVED]
         sidebar.index = names.index(was_on) if was_on in names else 0
 
     def _list_memos(self, rows: list[services.MemoRow]) -> None:
@@ -1903,8 +1929,15 @@ class MemoApp(App[None]):
         stops describing the memos as they were when the list was opened. The
         listing has to be redrawn as the same listing: a redraw that reached for
         a project while the whole library was on screen would narrow the list
-        nobody asked to narrow, and there is no project to reach for anyway."""
-        if self.tag is not None:
+        nobody asked to narrow, and there is no project to reach for anyway.
+
+        The archive is asked about first because it is exclusive with all three
+        of the others: the drawer is on screen with no project, no tag and no
+        whole library behind it, and every one of those would redraw it as a
+        listing of memos that are not in it."""
+        if self.archived:
+            self.show_archived()
+        elif self.tag is not None:
             self.show_tagged(self.tag)
         elif self.everything:
             self.show_everything()
@@ -1964,12 +1997,14 @@ class MemoApp(App[None]):
 
     def _subtitle(self) -> str:
         """What the header says about the listing on screen, beyond the memos
-        themselves: every project at once, a tag search, and an order other
-        than the default, whichever of those apply, joined in that order. A
-        plain project's own listing needs none of them — its name is already
-        the highlighted row in the sidebar — so the ordinary case is the empty
-        string, not a bug in it."""
+        themselves: the archive drawer, every project at once, a tag search,
+        and an order other than the default, whichever of those apply, joined
+        in that order. A plain project's own listing needs none of them — its
+        name is already the highlighted row in the sidebar — so the ordinary
+        case is the empty string, not a bug in it."""
         pieces = []
+        if self.archived:
+            pieces.append("archived")
         if self.everything:
             pieces.append("all projects")
         if self.tag is not None:
@@ -1986,8 +2021,26 @@ class MemoApp(App[None]):
         self.project = None
         self.tag = None
         self.everything = True
+        self.archived = False
         self.sub_title = self._subtitle()
         self._list_memos(services.memo_rows(self.repo, sort=self.sort))
+        self.refresh_bindings()
+
+    def show_archived(self) -> None:
+        """Lists the memos somebody has put away, and only those: the drawer is
+        opened in place of a live listing rather than merged into one, since a
+        list holding both would leave archiving with no visible effect at all.
+        The subtitle says so, because a listing no sidebar project accounts for
+        would otherwise read as a project that has emptied itself.
+
+        Nothing under an archived memo was rewritten while it sat there, so
+        every memo key still means here what it means in a live listing."""
+        self.project = None
+        self.tag = None
+        self.everything = False
+        self.archived = True
+        self.sub_title = self._subtitle()
+        self._list_memos(services.memo_rows(self.repo, sort=self.sort, archived=True))
         self.refresh_bindings()
 
     def show_project(self, project: str) -> None:
@@ -1997,6 +2050,7 @@ class MemoApp(App[None]):
         self.project = project
         self.tag = None
         self.everything = False
+        self.archived = False
         self.sub_title = self._subtitle()
         self._list_memos(services.memo_rows(self.repo, project=project, sort=self.sort))
         self.refresh_bindings()
@@ -2008,9 +2062,13 @@ class MemoApp(App[None]):
         and leaving that unsaid makes the sidebar read as a lie.
 
         What was being read before the search is left standing, whole library or
-        one project, because escape comes back to it."""
+        one project, because escape comes back to it. Not the archive drawer,
+        though: a search answers out of the live memos, so a subtitle still
+        claiming the drawer would be describing a listing nothing in it is
+        in."""
         self._list_memos(services.memo_rows(self.repo, tag=tag, sort=self.sort))
         self.tag = tag
+        self.archived = False
         self.sub_title = self._subtitle()
         self.refresh_bindings()
 
@@ -2575,6 +2633,37 @@ class MemoApp(App[None]):
         self._relist()
         self.notify(f"deleted {filename}")
 
+    def action_toggle_archive(self) -> None:
+        """Puts the pointed-at memo away, or takes it back out when it is
+        already away: one key, because a memo is in exactly one of the two
+        states and the key always means the other one. Nothing is asked first,
+        unlike the delete beside it — every byte of the memo stays where it is,
+        and the way back is the same keypress.
+
+        Which way it goes is read off the memo rather than off the listing that
+        is on screen, so this never holds a second opinion about where the memo
+        already is — a stale flag would archive a memo that is already archived
+        and leave the drawer looking broken.
+
+        Either way the memo leaves the listing it was in, so everything it left
+        on the screen goes with it, exactly as a delete's does: the panes below
+        the list when it was the memo being read, the count beside its project
+        and the count beside the archive, and its row. What moved is said by
+        name, since the row that named it is gone."""
+        memo_id = self._target_memo()
+        if memo_id is None:
+            return
+        if services.memo_info(self.repo, memo_id).archived:
+            moved = f"took {services.unarchive_memo(self.repo, memo_id)} out of the archive"
+        else:
+            moved = f"archived {services.archive_memo(self.repo, memo_id)}"
+        if self.memo_id == memo_id:
+            self.clear_memo()
+            self.query_one("#memos", DataTable).focus()
+        self.load_projects()
+        self._relist()
+        self.notify(moved)
+
     def action_rename_speaker(self) -> None:
         """Offers to name a voice in the memo being pointed at, if any memo is."""
         memo_id = self._target_memo()
@@ -2599,15 +2688,18 @@ class MemoApp(App[None]):
         the cursor is no longer what the person is pointing at: the project keys
         read the sidebar, so they stay out of the way while the memos have focus.
 
-        Nothing either on the row standing for the whole library, which is not a
-        project: it is every project at once, so renaming or emptying it names
-        nothing. That answer is what keeps those keys hidden there, and what
-        makes them harmless if one is reached some other way."""
+        Nothing either on either of the two rows that are not projects. The
+        whole library is every project at once, so renaming or emptying it names
+        nothing; the archive is a drawer memos are put in, and the name behind
+        that row is a sentinel no project can carry — emptying it would take
+        that sentinel for a real project and refile every memo filed under it.
+        That answer is what keeps those keys hidden on both rows, and what makes
+        them harmless if one is reached some other way."""
         sidebar = self.query_one("#projects", ListView)
         if self.focused is not sidebar:
             return None
         chosen = sidebar.highlighted_child
-        if chosen is None or chosen.name == EVERYTHING:
+        if chosen is None or chosen.name in (EVERYTHING, ARCHIVED):
             return None
         return chosen.name
 
@@ -2651,13 +2743,16 @@ class MemoApp(App[None]):
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """A project fills the memo list, and hands the cursor to it. The row
-        above them all fills it with every memo there is, narrowed by nothing —
-        it carries the one name a project cannot have, so no project can be
-        mistaken for it."""
+        above them all fills it with every memo there is, narrowed by nothing;
+        the row below them fills it with the memos that have been put away, and
+        with nothing else. Each of those two carries a name a project cannot
+        have, so no project can be mistaken for either."""
         if event.list_view.id == "projects":
             chosen = event.item.name or EVERYTHING
             if chosen == EVERYTHING:
                 self.show_everything()
+            elif chosen == ARCHIVED:
+                self.show_archived()
             else:
                 self.show_project(chosen)
             self.query_one("#memos", DataTable).focus()

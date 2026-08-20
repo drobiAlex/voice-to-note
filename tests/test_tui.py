@@ -127,6 +127,7 @@ async def test_the_app_opens_on_the_projects_that_exist(repo):
             "All (2)",
             "personal (1)",
             "work (1)",
+            "Archived (0)",
         ]
 
 
@@ -636,6 +637,7 @@ async def test_typing_a_new_project_refiles_the_memo_and_moves_the_count(repo):
             "All (2)",
             "personal (1)",
             "side (1)",
+            "Archived (0)",
         ]
 
 
@@ -875,6 +877,7 @@ async def test_delete_asks_by_name_before_throwing_the_pointed_at_memo_away(repo
         assert labels(pilot.app.query_one("#projects", ListView)) == [
             "All (1)",
             "personal (1)",
+            "Archived (0)",
         ]
         assert "deleted standup.m4a" in [
             str(n.message) for n in pilot.app._notifications
@@ -966,6 +969,161 @@ async def test_a_memo_name_of_nothing_is_refused_without_losing_the_modal(repo):
         assert showing(pilot.app, "#memo-rename")
         assert [str(n.message) for n in pilot.app._notifications] == ["a memo needs a name"]
         assert [m.filename for m in services.memos(repo) if m.id == work] == ["standup.m4a"]
+
+
+# --- putting a memo away rather than throwing it away ----------------------
+
+
+async def open_archive(pilot) -> None:
+    """Opens the archive the way a person does: down the sidebar to the row
+    under every project, and Enter. It is the last row, wherever the projects
+    above it happen to end."""
+    sidebar = pilot.app.query_one("#projects", ListView)
+    sidebar.focus()
+    sidebar.index = len(sidebar.children) - 1
+    await pilot.pause()
+    await pilot.press("enter")
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_pressing_h_takes_the_pointed_at_memo_out_of_the_live_list(repo):
+    # a memo put away that is still sitting in the list it was put away from
+    # has not been put anywhere
+    work, home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await point_at_memo(pilot, "work")
+        await pilot.press("h")
+        await pilot.pause()
+
+        assert memo_names(pilot.app) == []
+        assert [m.id for m in services.memos(repo)] == [home]
+        # the row that named it is gone, so the screen has to name it itself
+        assert "archived standup.m4a" in said(pilot)
+        assert services.memo_info(repo, work).archived is True
+
+
+@pytest.mark.asyncio
+async def test_the_sidebar_offers_the_archive_and_counts_what_is_in_it(repo):
+    # offered from the first draw, empty or not: the archive is where the key
+    # sends a memo, and a row that only turns up after the first archiving is a
+    # row nobody discovers beforehand
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        assert labels(pilot.app.query_one("#projects", ListView)) == [
+            "All (2)",
+            "personal (1)",
+            "work (1)",
+            "Archived (0)",
+        ]
+
+        await point_at_memo(pilot, "work")
+        await pilot.press("h")
+        await pilot.pause()
+
+        # the memo left the project's count on its way into the archive's, and
+        # work held nothing else, so the project itself is gone from the list
+        assert labels(pilot.app.query_one("#projects", ListView)) == [
+            "All (1)",
+            "personal (1)",
+            "Archived (1)",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_the_archive_row_lists_what_has_been_put_away_and_nothing_else(repo):
+    # the drawer is opened in place of a live listing rather than merged into
+    # one: a list showing both would leave archiving no visible effect at all
+    work, _home = seed(repo)
+    services.archive_memo(repo, work)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_archive(pilot)
+
+        assert memo_names(pilot.app) == ["standup.m4a"]
+
+
+@pytest.mark.asyncio
+async def test_pressing_h_inside_the_archive_puts_the_memo_back_in_the_live_list(repo):
+    # one key both ways, since a memo is in exactly one of the two states and
+    # the key always means the other one
+    work, _home = seed(repo)
+    services.archive_memo(repo, work)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_archive(pilot)
+        await pilot.press("h")
+        await pilot.pause()
+
+        assert memo_names(pilot.app) == []
+        assert "took standup.m4a out of the archive" in said(pilot)
+        assert services.memo_info(repo, work).archived is False
+
+        pilot.app.show_project("work")
+        await pilot.pause()
+        assert memo_names(pilot.app) == ["standup.m4a"]
+
+
+@pytest.mark.asyncio
+async def test_archiving_the_memo_being_read_takes_its_panes_down_with_it(repo):
+    # its row has left the listing on screen, so panes still showing its notes
+    # are describing something the screen says is not there
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await open_memo(pilot, work)
+        await pilot.press("h")
+        await pilot.pause()
+
+        assert pilot.app.memo_id is None
+        assert "no memo shown" in notes_pane(pilot).document.source
+        assert "we ship on friday" not in transcript(pilot)
+        assert memo_names(pilot.app) == []
+
+
+@pytest.mark.asyncio
+async def test_the_header_says_when_the_archive_is_what_is_on_screen(repo):
+    # no sidebar project accounts for this listing, and left unsaid it reads as
+    # a project that has emptied itself
+    work, _home = seed(repo)
+    services.archive_memo(repo, work)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_archive(pilot)
+        assert pilot.app.sub_title == "archived"
+
+        pilot.app.show_project("work")
+        await pilot.pause()
+        assert pilot.app.sub_title == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["rename_project", "remove_project"])
+async def test_the_project_keys_stay_harmless_on_the_archive_row(repo, action):
+    # the archive is no project: the name behind its row is a sentinel, and
+    # emptying it would take that sentinel for a real name and refile whatever
+    # was filed under it. Hiding the keys is only half of it — anything that
+    # reaches the action another way still has to find nothing to act on
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        sidebar = pilot.app.query_one("#projects", ListView)
+        sidebar.focus()
+        sidebar.index = len(sidebar.children) - 1
+        await pilot.pause()
+
+        assert pilot.app._pointed_project() is None
+        assert pilot.app.check_action(action, ()) is False
+
+        getattr(pilot.app, f"action_{action}")()
+        await pilot.pause()
+
+        assert len(pilot.app.screen_stack) == 1
+        assert said(pilot) == []
+        assert sorted(m.project for m in services.memos(repo)) == ["personal", "work"]
 
 
 # --- reading the transcript raw -------------------------------------------
@@ -1142,6 +1300,7 @@ async def test_renaming_a_project_renames_it_in_the_sidebar(repo):
             "All (2)",
             "home (1)",
             "work (1)",
+            "Archived (0)",
         ]
 
 
@@ -1200,6 +1359,7 @@ async def test_a_renamed_project_is_found_again_under_its_tidied_name(repo):
             "All (2)",
             "client (1)",
             "personal (1)",
+            "Archived (0)",
         ]
         assert memo_names(pilot.app) == ["standup.m4a"]
 
@@ -1223,6 +1383,7 @@ async def test_emptying_the_other_project_is_refused_without_taking_the_app_down
         assert labels(pilot.app.query_one("#projects", ListView)) == [
             "All (1)",
             "other (1)",
+            "Archived (0)",
         ]
         assert [str(n.message) for n in pilot.app._notifications] == [
             "other is where emptied projects go"
@@ -1244,6 +1405,7 @@ async def test_shift_x_asks_before_emptying_a_project(repo):
             "All (2)",
             "personal (1)",
             "work (1)",
+            "Archived (0)",
         ]
 
 
@@ -1263,6 +1425,7 @@ async def test_agreeing_to_empty_a_project_files_its_memos_under_other(repo):
             "All (2)",
             "other (1)",
             "work (1)",
+            "Archived (0)",
         ]
 
 
@@ -1284,6 +1447,7 @@ async def test_declining_to_empty_a_project_leaves_every_memo_where_it_was(repo)
             "All (2)",
             "personal (1)",
             "work (1)",
+            "Archived (0)",
         ]
 
 
@@ -2292,6 +2456,7 @@ async def test_a_processed_recording_joins_the_project_on_screen(repo, tmp_path,
             "All (3)",
             "personal (1)",
             "work (2)",
+            "Archived (0)",
         ]
 
 
@@ -3157,8 +3322,8 @@ async def offered(pilot, keys: list[str]) -> list[str]:
 
 MEMO_ACTIONS = [
     "action_menu", "edit_notes", "memo_info", "move_memo", "title_memo",
-    "delete_memo", "rename_speaker", "toggle_raw", "extract", "repair",
-    "diarize", "ask",
+    "delete_memo", "toggle_archive", "rename_speaker", "toggle_raw", "extract",
+    "repair", "diarize", "ask",
 ]
 
 
@@ -4192,6 +4357,7 @@ async def test_a_memo_another_process_stored_turns_up_without_a_keypress(repo, m
             "All (3)",
             "personal (1)",
             "work (2)",
+            "Archived (0)",
         ]
 
 
