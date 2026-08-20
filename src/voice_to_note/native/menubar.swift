@@ -54,6 +54,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     )
     private lazy var logURL = vtnHome().appendingPathComponent("menubar.log")
 
+    /// The one menu, kept rather than rebuilt, because a recording takes it
+    /// away from the status item for its whole length and has to be able to
+    /// give the same one back. Its contents are still made fresh on every
+    /// opening — that is what `menuNeedsUpdate` is for.
+    private let menu = NSMenu()
+
     /// The pulse belongs to one state and must not outlive it: a timer left
     /// running would go on redrawing a button that has moved on to saying
     /// something else entirely. Hanging it off the state itself is what makes
@@ -65,12 +71,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } else {
                 stopPulsing()
             }
-            // the meters belong to one recording for the same reason, and
-            // emptying them on every state that is not recording is also what
-            // makes each recording start from silence rather than from
-            // whatever the last one ended on
-            if state != .recording {
+            // a rolling tape is the one state the status item answers a click
+            // with a window instead of a menu, and the meters belong to it for
+            // the same reason the pulse does. Emptying them on every state that
+            // is not recording is also what makes each recording start from
+            // silence rather than from whatever the last one ended on
+            if state == .recording {
+                openToThePanel()
+            } else {
                 forgetMeters()
+                openToTheMenu()
             }
         }
     }
@@ -93,7 +103,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// meeting's voices would be describing a tape that stopped.
     private let systemLevels = LevelHistory()
     private let microphoneLevels = LevelHistory()
-    private var meterView: MeterMenuView?
+
+    /// The floating panel a recording is watched in, and the view inside it.
+    /// The two live and die together: the view copies whatever it draws out of
+    /// the histories every time it is told to, so there is nothing in it worth
+    /// keeping once it is off screen, and building a fresh one on every opening
+    /// is also what asks about Reduce Motion again rather than once at launch.
+    private var panel: NSPanel?
+    private var panelView: RecordingPanelView?
+
+    /// The two ways a click somewhere else reaches this app while the panel is
+    /// open. A borderless panel that never takes focus is never told it lost
+    /// any, so nothing else would ever close it.
+    private var clicksElsewhere: Any?
+    private var clicksHere: Any?
 
     /// The composite handed to the button last, and when. Only Reduce Motion
     /// looks at them: it asks for the strips to be redrawn twice a second
@@ -107,13 +130,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var spoken = ""
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let menu = NSMenu()
         menu.delegate = self
         // this menu says for itself what can be chosen — its own state decides
         // that. Left to AppKit, a picker whose list has not arrived yet would be
         // greyed out and unopenable, which tells the person nothing at all
         menu.autoenablesItems = false
-        statusItem.menu = menu
+        openToTheMenu()
         show()
         askToNotify()
         refresh()
@@ -185,7 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func metered(_ system: Double, _ microphone: Double) {
         systemLevels.push(system)
         microphoneLevels.push(microphone)
-        meterView?.show(system: systemLevels, microphone: microphoneLevels)
+        panelView?.show(system: systemLevels, microphone: microphoneLevels)
         statusItem.button?.image = meters()
     }
 
@@ -199,16 +221,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             + Meters.spoken("system audio", systemLevels, now: now) + ", "
             + Meters.spoken("microphone", microphoneLevels, now: now)
         statusItem.button?.toolTip = spoken
-        meterView?.showFooter(system: systemLevels, microphone: microphoneLevels, now: now)
+        panelView?.showElapsed(elapsed())
+        panelView?.showFooter(system: systemLevels, microphone: microphoneLevels, now: now)
     }
 
-    /// Everything the meters were made of, dropped. The menu's view goes with
-    /// the readings: it was built around the devices this recording used, and
-    /// the next recording may be listening to something else entirely.
+    /// Everything the meters were made of, dropped. The panel goes with the
+    /// readings rather than being left standing empty: it was built around the
+    /// devices this recording used and around a tape that is no longer rolling,
+    /// and a floating window still saying "Recording" over a meeting that has
+    /// stopped is worse than no window at all.
     private func forgetMeters() {
         systemLevels.reset()
         microphoneLevels.reset()
-        meterView = nil
+        closePanel()
         drawnMeters = nil
         spoken = ""
         statusItem.button?.toolTip = nil
@@ -297,10 +322,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             )))
             refresh()
         case .starting, .recording:
-            if state == .recording {
-                menu.addItem(meterItem())
-                menu.addItem(.separator())
-            }
+            // a rolling tape hardly ever gets here: the status item owns no menu
+            // then and opens the panel instead. It can still happen in the
+            // moment between "Starting …" being opened and the recorder saying
+            // both streams are live, and a menu already on screen has to say
+            // something true rather than the state it was opened in
             menu.addItem(action("Stop Recording", #selector(stopRecording)))
             menu.addItem(note(state == .recording ? "Recording \(elapsed())" : "Starting …"))
         case .processing:
@@ -308,26 +334,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
         menu.addItem(action("Quit", #selector(quit)))
-    }
-
-    /// The meters, at the top of the menu because checking them is what the
-    /// menu is opened for mid-meeting. The view is built once per recording and
-    /// handed to every opening after that: rebuilding it here would throw away
-    /// the readings arriving while somebody watches it. Like everything else in
-    /// this menu it runs no subprocess — a menu is drawn on the main thread,
-    /// and a menu that waits on `vtn` is a menu that does not open.
-    private func meterItem() -> NSMenuItem {
-        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-        item.isEnabled = false
-        let view = meterView ?? MeterMenuView(
-            system: chosenOutput?.name ?? "system mix",
-            microphone: chosenInput?.name ?? "default microphone"
-        )
-        meterView = view
-        view.show(system: systemLevels, microphone: microphoneLevels)
-        view.showFooter(system: systemLevels, microphone: microphoneLevels)
-        item.view = view
-        return item
     }
 
     private func action(_ title: String, _ selector: Selector) -> NSMenuItem {
@@ -341,6 +347,145 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
         return item
+    }
+
+    // --- the panel a recording is watched in ----------------------------------
+
+    /// A rolling tape is the one state with no menu. A menu is a list of things
+    /// to choose, and mid-meeting there is exactly one — stop — with everything
+    /// else on offer being the meters, which a menu can only ever show while it
+    /// is held open. So the status item stops owning a menu and becomes a plain
+    /// button that opens the panel.
+    ///
+    /// The tracking is cancelled first because the tape starts while somebody is
+    /// very likely looking at "Starting …": a menu whose status item has let go
+    /// of it stays on screen belonging to nothing.
+    private func openToThePanel() {
+        menu.cancelTracking()
+        statusItem.menu = nil
+        statusItem.button?.target = self
+        statusItem.button?.action = #selector(togglePanel)
+    }
+
+    /// The menu handed back. Setting it is what takes the click away from the
+    /// button again — a status item with a menu opens it itself — and clearing
+    /// the action first is what keeps a stale selector off a button that is no
+    /// longer meant to answer one.
+    private func openToTheMenu() {
+        statusItem.button?.target = nil
+        statusItem.button?.action = nil
+        statusItem.menu = menu
+    }
+
+    /// The panel opens on a click and closes on the next one, the way the menu
+    /// it replaced did. Nothing opens it by itself: a window appearing over a
+    /// meeting that nobody asked for is the thing this has to not be.
+    @objc private func togglePanel() {
+        if panel != nil {
+            closePanel()
+        } else {
+            openPanel()
+        }
+    }
+
+    /// The panel put on screen with what the recording looks like right now,
+    /// rather than left to fill in on the next reading — a tenth of a second of
+    /// empty meters is a tenth of a second of looking broken.
+    ///
+    /// It must never take focus: this opens over a meeting, and an app that
+    /// activates in front of one has taken the keyboard away from whoever was
+    /// muting themselves with it. A non-activating borderless panel at the
+    /// status bar's own level is the whole of how that is arranged, and joining
+    /// every space is what puts it over a call that has gone full screen.
+    private func openPanel() {
+        guard state == .recording else { return }
+        let view = RecordingPanelView(
+            system: chosenOutput?.name ?? "system mix",
+            microphone: chosenInput?.name ?? "default microphone",
+            reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        )
+        view.onStop(self, #selector(stopRecording))
+        view.show(system: systemLevels, microphone: microphoneLevels)
+        view.showElapsed(elapsed())
+        view.showFooter(system: systemLevels, microphone: microphoneLevels)
+        let panel = NSPanel(
+            contentRect: view.frame, styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered, defer: false
+        )
+        panel.contentView = view
+        panel.level = .statusBar
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.isReleasedWhenClosed = false
+        panel.hidesOnDeactivate = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        self.panel = panel
+        self.panelView = view
+        place(panel)
+        panel.orderFrontRegardless()
+        // the button stays lit for as long as the panel is up, which is the only
+        // thing tying the window under the menu bar to the item it came out of
+        statusItem.button?.highlight(true)
+        watchForClicks()
+    }
+
+    /// Everything the panel was, undone in the order that leaves nothing
+    /// behind: the monitors first, since a click arriving after the window is
+    /// gone would try to close it again, then the light on the button, then the
+    /// window. Safe to call on a panel that is not open, which is what lets
+    /// every way out of a recording go through it.
+    private func closePanel() {
+        if let clicksElsewhere {
+            NSEvent.removeMonitor(clicksElsewhere)
+        }
+        if let clicksHere {
+            NSEvent.removeMonitor(clicksHere)
+        }
+        clicksElsewhere = nil
+        clicksHere = nil
+        statusItem.button?.highlight(false)
+        panel?.orderOut(nil)
+        panel = nil
+        panelView = nil
+    }
+
+    /// Flush under the menu bar and centred on the button it belongs to, so the
+    /// panel reads as the status item having grown downwards rather than as a
+    /// window that happens to be near it. That is what the flat top edge is for,
+    /// and it only works if the top edge is exactly the menu bar's bottom.
+    ///
+    /// Clamped to the screen, because a status item close to the right-hand end
+    /// of the menu bar would otherwise centre a 300 point panel half off it.
+    private func place(_ panel: NSPanel) {
+        guard let anchor = statusItem.button?.window?.frame else { return }
+        guard let screen = statusItem.button?.window?.screen ?? NSScreen.main else { return }
+        let margin: CGFloat = 8
+        let size = panel.frame.size
+        let leftmost = screen.visibleFrame.minX + margin
+        let rightmost = screen.visibleFrame.maxX - margin - size.width
+        let x = min(max(anchor.midX - size.width / 2, leftmost), max(leftmost, rightmost))
+        panel.setFrameOrigin(NSPoint(x: x.rounded(), y: (anchor.minY - size.height).rounded()))
+    }
+
+    /// What closes the panel: a click anywhere that is not the panel itself.
+    /// The global monitor sees the clicks that go to other apps, the local one
+    /// sees the clicks that come here — and the local one has to let the status
+    /// item's own window through, or clicking the button a second time would
+    /// close the panel a moment before the button's action reopened it.
+    private func watchForClicks() {
+        let elsewhere: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        clicksElsewhere = NSEvent.addGlobalMonitorForEvents(matching: elsewhere) { [weak self] _ in
+            self?.closePanel()
+        }
+        clicksHere = NSEvent.addLocalMonitorForEvents(matching: elsewhere) { [weak self] event in
+            guard let self else { return event }
+            let ours = [self.panel, self.statusItem.button?.window]
+            if !ours.contains(where: { $0 === event.window }) {
+                self.closePanel()
+            }
+            return event
+        }
     }
 
     // --- the pickers ----------------------------------------------------------
@@ -903,7 +1048,12 @@ final class LevelHistory {
     /// genuinely is no sound, and drawing that as silence is honest; a row
     /// that grew in from the right would instead be claiming the meeting is
     /// younger than it is every time this is emptied.
-    init(columns: Int = Meters.columns) {
+    ///
+    /// The ring is as long as the widest thing drawn from it, which is the
+    /// panel's waveform. The strip beside the mark wants a fraction of that
+    /// and takes the newest end of it — one history for both is what keeps the
+    /// two from ever disagreeing about what the last second sounded like.
+    init(columns: Int = Waveform.columns) {
         ring = Array(repeating: LevelHistory.floor, count: max(columns, 1))
     }
 
@@ -1012,11 +1162,17 @@ enum Meters {
     /// The two histories are read out here and the closure keeps the copies,
     /// not the histories, because the closure runs when the button draws —
     /// which is after the next reading has already arrived.
+    ///
+    /// Only the newest end of each history is taken. The ring behind it is as
+    /// long as the panel's waveform needs, and a strip 36 points wide asked to
+    /// draw all of it would either shrink every column below a point or throw
+    /// away every other reading — either way a menu bar that changed its look
+    /// the day a panel was added to the app.
     static func composite(
         mark: NSImage, system: LevelHistory, microphone: LevelHistory, reduceMotion: Bool
     ) -> NSImage {
-        let top = system.trace
-        let bottom = microphone.trace
+        let top = Array(system.trace.suffix(columns))
+        let bottom = Array(microphone.trace.suffix(columns))
         let image = NSImage(size: size, flipped: false) { _ in
             mark.draw(in: NSRect(x: 0, y: 0, width: side, height: side))
             row(top, from: side + gap, midline: rowHeight + rowGap + rowHeight / 2,
@@ -1177,153 +1333,573 @@ enum Meters {
     }
 }
 
-/// The meters as the menu shows them: the control System Settings puts under
-/// a microphone, one per side, each named with the device it is listening to.
-/// The menu is where somebody goes to find out which of the two is dead, and
-/// the reading alone cannot say that — "Microphone · AirPods Pro" is what
-/// turns a flat meter into something that can be fixed.
+/// How a column of the panel's waveform is shaped, and how loud a reading has
+/// to be to make one. It lives apart from the view that draws it because the
+/// number of columns is the one thing outside the drawing that depends on the
+/// panel's width: it is how many readings a history has to keep.
 ///
-/// Built once per recording and kept. A menu item's view is measured rather
-/// than laid out, so the frames in here are set by hand and must not depend
-/// on the text in them: a silence coming on while the menu is open cannot
-/// resize the window the menu is already in, which is why the footer under
-/// the meters is a line that is always there and always says something.
-final class MeterMenuView: NSView {
-    /// A menu item's own text starts 14 points in, and matching that is what
-    /// keeps this from reading as a panel that fell into a menu.
-    private static let inset: CGFloat = 14
-    private static let spacing: CGFloat = 6
+/// The strip beside the mark has its own numbers and keeps them. Eight points
+/// of menu bar and 248 points of panel are not the same problem, and a single
+/// set of constants stretched over both would be wrong at one end or the other.
+enum Waveform {
+    /// A point of bar, a point of air, and a rounded cap on each end. At this
+    /// pitch a talking voice reads as syllables rather than as a fence, and it
+    /// is the narrowest a bar can be and still look drawn on purpose.
+    static let barWidth: CGFloat = 2
+    static let gap: CGFloat = 2
+    static let pitch: CGFloat = barWidth + gap
+    static let cap: CGFloat = 1
 
-    /// The meters are as wide as the two captions need and no wider. Narrower
-    /// than this a level indicator is a smear rather than a reading; wider than
-    /// this and a menu has stopped being a menu. Between the two the device
-    /// name wins, because a name cut off at "MacBook Pr…" gives back the very
-    /// thing the caption is here for.
-    private static let narrowest: CGFloat = 160
-    private static let widest: CGFloat = 260
+    /// The tray the bars sit in: rounded, barely lighter than the panel behind
+    /// it, and padded at both ends so the oldest and the newest column are not
+    /// pressed against its edges.
+    static let height: CGFloat = 36
+    static let corner: CGFloat = 10
+    static let padding: CGFloat = 10
 
-    /// A caption belongs to the meter under it, so it sits nearer to that
-    /// than the rows sit to each other.
-    private static let tight: CGFloat = 2
-    private static let captionHeight: CGFloat = 14
-    private static let indicatorHeight: CGFloat = 12
+    /// The tallest a bar may be and the shortest it may be while still being a
+    /// bar. The air above and below the tallest is what keeps a loud passage
+    /// from looking clipped by the tray rather than loud.
+    static let breathing: CGFloat = 4
+    static let tallest: CGFloat = height - breathing * 2
+    static let shortest: CGFloat = 2
 
-    /// Fixed, unlike the width: three lines of caption and two meters, the
-    /// third caption being the footer, which is standing there whatever the
-    /// two sides are doing.
-    private static let height =
-        spacing * 4 + tight * 2 + captionHeight * 3 + indicatorHeight * 2
+    /// The track the newest reading fills under Reduce Motion, on the same
+    /// scale and at the same height as the one the strip falls back to.
+    static let trackHeight: CGFloat = 4
 
-    private let size: NSSize
-    private let systemCaption: NSTextField
-    private let systemLevel: NSLevelIndicator
-    private let microphoneCaption: NSTextField
-    private let microphoneLevel: NSLevelIndicator
-    private let footer: NSTextField
+    /// How wide the bars have to fit, and so how many of them there are. At ten
+    /// readings a second the panel holds a little over six seconds of meeting —
+    /// long enough to see a sentence in, short enough that what is on screen is
+    /// still what is happening.
+    static var span: CGFloat { RecordingPanelView.contentWidth - padding * 2 }
+    static let columns = Int(span / pitch)
 
-    /// The devices are taken at the start of a recording and never asked for
-    /// again: they are what this recording was started with, and a device
-    /// picked in the menu afterwards changes nothing about the tape running.
-    init(system: String, microphone: String) {
-        systemCaption = MeterMenuView.caption("System audio · \(system)")
-        systemLevel = MeterMenuView.indicator()
-        microphoneCaption = MeterMenuView.caption("Microphone · \(microphone)")
-        microphoneLevel = MeterMenuView.indicator()
-        footer = MeterMenuView.caption("")
-        let wanted = max(systemCaption.fittingSize.width, microphoneCaption.fittingSize.width)
-        size = NSSize(
-            width: MeterMenuView.inset * 2
-                + min(max(wanted, MeterMenuView.narrowest), MeterMenuView.widest),
-            height: MeterMenuView.height
-        )
-        super.init(frame: NSRect(origin: .zero, size: size))
-        var top = size.height - MeterMenuView.spacing
-        for (caption, level) in [
-            (systemCaption, systemLevel), (microphoneCaption, microphoneLevel),
-        ] {
-            caption.frame = place(top, MeterMenuView.captionHeight)
-            top -= MeterMenuView.captionHeight + MeterMenuView.tight
-            level.frame = place(top, MeterMenuView.indicatorHeight)
-            top -= MeterMenuView.indicatorHeight + MeterMenuView.spacing
-            addSubview(caption)
-            addSubview(level)
-        }
-        footer.frame = place(top, MeterMenuView.captionHeight)
-        addSubview(footer)
+    /// Which whole even height a reading lands on, over the same −50 dBFS to 0
+    /// the strip uses, everything below being silence with a shape of its own.
+    ///
+    /// Even for the same reason the mark's bars are even: a bar is mirrored
+    /// around the middle of the tray, so an odd height puts both of its ends on
+    /// a half point, and a half-point edge is a grey smear rather than a line
+    /// on a display that is not retina.
+    static func barHeight(for level: Double) -> CGFloat {
+        let range = LevelHistory.ceiling - LevelHistory.silence
+        let loud = (min(level, LevelHistory.ceiling) - LevelHistory.silence) / range
+        let raw = shortest + (tallest - shortest) * CGFloat(loud)
+        return min(max((raw / 2).rounded() * 2, shortest), tallest)
+    }
+}
+
+/// One side of a recording drawn as the waveform a tape machine shows: oldest
+/// column at the left, the newest against the right edge, every bar mirrored
+/// around the middle of the tray. It is the thing the panel is opened for, and
+/// the reason it is a waveform rather than a level meter is that a meter says
+/// how loud this instant is and a waveform says whether a voice has been
+/// arriving — which is the question somebody mid-meeting is actually asking.
+///
+/// The tray and the bars are drawn rather than layered so that this renders the
+/// same offscreen as it does on screen, which is the only way the look of a
+/// recording can be judged without taping one first.
+final class WaveformView: NSView {
+    /// The oldest column is a ghost and the newest is nearly solid, so which
+    /// end of the tray is now needs no explaining.
+    private static let oldest: CGFloat = 0.25
+    private static let newest: CGFloat = 0.95
+
+    /// How much of the tray's own light stands out from the panel, and how
+    /// bright the Reduce Motion track and its fill are.
+    private static let trayInk: CGFloat = 0.08
+    private static let trackInk: CGFloat = 0.1
+    private static let fillInk: CGFloat = 0.9
+
+    /// Twice a second is as often as a track that only changes length is worth
+    /// redrawing, and it is what Reduce Motion is asking for.
+    private static let slowly: TimeInterval = 0.5
+
+    private let reduceMotion: Bool
+    private var trace: [Double] = []
+    private var drawnAt = Date.distantPast
+
+    /// Reduce Motion is settled when the view is built and not looked at again.
+    /// A panel lives for as long as somebody keeps it open, and a waveform that
+    /// changed shape halfway through being watched would be a stranger thing
+    /// than either of the two shapes it changed between.
+    init(reduceMotion: Bool) {
+        self.reduceMotion = reduceMotion
+        super.init(frame: NSRect(
+            x: 0, y: 0, width: RecordingPanelView.contentWidth, height: Waveform.height
+        ))
+        // there is nothing here for a screen reader to read: the caption above
+        // says which side this is and the footer below says in words whether it
+        // is being heard, which is the whole of what the shape carries
+        setAccessibilityElement(false)
     }
 
     /// This view is only ever built in code; there is no nib in this app for
     /// one to be loaded from.
     required init?(coder: NSCoder) {
-        fatalError("MeterMenuView is built in code, not loaded from a nib")
+        fatalError("WaveformView is built in code, not loaded from a nib")
     }
 
-    /// A row of the given height hanging from `top`, inset the way a menu
-    /// insets its own text.
-    private func place(_ top: CGFloat, _ height: CGFloat) -> NSRect {
+    /// The readings copied out, and a redraw asked for. Copied rather than the
+    /// history kept, for the reason the history itself gives: drawing happens
+    /// later than this does, and by then the next reading has landed.
+    ///
+    /// Under Reduce Motion the copy still happens and only the redraw is held
+    /// back, so the track shows the level as it is at the moment it is drawn
+    /// rather than as it was half a second ago.
+    func show(_ history: LevelHistory, now: Date = Date()) {
+        trace = history.trace
+        if reduceMotion, now.timeIntervalSince(drawnAt) < WaveformView.slowly {
+            return
+        }
+        drawnAt = now
+        needsDisplay = true
+    }
+
+    /// The tray first and then whatever is in it, in one pass rather than as a
+    /// tray view with a waveform view inside it: the two are always drawn at
+    /// the same moment and the tray is three lines of drawing, where a second
+    /// view would be a second frame to keep in step with this one.
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.white.withAlphaComponent(WaveformView.trayInk).setFill()
+        NSBezierPath(
+            roundedRect: bounds, xRadius: Waveform.corner, yRadius: Waveform.corner
+        ).fill()
+        guard let newest = trace.last else { return }
+        // whole point, and the tray is an even number of points tall, so every
+        // mirrored bar has both of its ends on a whole point too
+        let midline = (bounds.height / 2).rounded()
+        if reduceMotion {
+            fill(newest, midline: midline)
+            return
+        }
+        let shown = trace.suffix(Waveform.columns)
+        let last = CGFloat(max(shown.count - 1, 1))
+        for (column, level) in shown.enumerated() {
+            let age = CGFloat(column) / last
+            bar(
+                level, at: Waveform.padding + CGFloat(column) * Waveform.pitch, midline: midline,
+                ink: WaveformView.oldest + (WaveformView.newest - WaveformView.oldest) * age
+            )
+        }
+    }
+
+    /// One reading, mirrored around the middle of the tray. Silence is not the
+    /// shortest bar but a flat line: a difference in shape, which somebody
+    /// reads at a glance and still reads with the colour taken away, where a
+    /// two-point bar beside a four-point one is a guess.
+    ///
+    /// The line is drawn the full width of its column rather than the width of
+    /// a bar, so neighbouring silent readings meet and make one line — a row of
+    /// dots at the spacing of the bars is a texture, and the shape somebody has
+    /// to recognise here is a flatline. It keeps its column's own ink rather
+    /// than being dimmed the way the strip's is: the tray is already a lighter
+    /// ground than the menu bar, and a dimmer line disappears into it.
+    private func bar(_ level: Double, at left: CGFloat, midline: CGFloat, ink: CGFloat) {
+        NSColor.labelColor.withAlphaComponent(ink).setFill()
+        guard level >= LevelHistory.silence else {
+            // a whole point under the midline rather than astride it, since a
+            // one-point line centred there lands half in each of two rows of
+            // pixels and comes out grey
+            NSRect(x: left, y: midline - 1, width: Waveform.pitch, height: 1).fill()
+            return
+        }
+        let height = Waveform.barHeight(for: level)
+        let rect = NSRect(
+            x: left, y: midline - height / 2, width: Waveform.barWidth, height: height
+        )
+        NSBezierPath(roundedRect: rect, xRadius: Waveform.cap, yRadius: Waveform.cap).fill()
+    }
+
+    /// The newest reading as a track filling from the left, which is what
+    /// Reduce Motion leaves room for: nothing scrolls past, no column changes
+    /// ten times a second, and the one thing a meter exists to show — how loud
+    /// this side is — is still there to be read. The scale is the whole of it,
+    /// floor to ceiling, because a fill has no shape to say anything with and
+    /// its length is all there is.
+    ///
+    /// Silence empties the track rather than shortening it, and the track is
+    /// drawn either way: an empty container says nothing is arriving, where a
+    /// missing one would only look like a meter that failed to draw.
+    private func fill(_ level: Double, midline: CGFloat) {
+        let cap = Waveform.trackHeight / 2
+        let track = NSRect(
+            x: Waveform.padding, y: midline - cap, width: Waveform.span,
+            height: Waveform.trackHeight
+        )
+        NSColor.labelColor.withAlphaComponent(WaveformView.trackInk).setFill()
+        NSBezierPath(roundedRect: track, xRadius: cap, yRadius: cap).fill()
+        guard level >= LevelHistory.silence else { return }
+        let range = LevelHistory.ceiling - LevelHistory.floor
+        let loud = (min(level, LevelHistory.ceiling) - LevelHistory.floor) / range
+        NSColor.labelColor.withAlphaComponent(WaveformView.fillInk).setFill()
+        // rounded to a whole point, for the same reason every other edge here
+        // is, and never shorter than its own cap, or a quiet reading draws a
+        // rounded rectangle narrower than its corners and comes out a smudge
+        let width = max((CGFloat(loud) * track.width).rounded(), Waveform.trackHeight)
+        NSBezierPath(
+            roundedRect: NSRect(
+                x: track.minX, y: track.minY, width: width, height: track.height
+            ), xRadius: cap, yRadius: cap
+        ).fill()
+    }
+}
+
+/// The red dot at the head of the panel, with a halo breathing slowly behind
+/// it. Red alone already says a capture is live — it is the colour macOS uses
+/// for one — and the halo is there for the glance that catches the panel out of
+/// the corner of an eye: a thing that moves is a thing that is happening now,
+/// where a still dot could as easily be a picture of one.
+///
+/// Slow on purpose. A beat over a second is breathing; anything quicker is an
+/// alarm, and nothing here is going wrong.
+final class RecordingDotView: NSView {
+    static let side: CGFloat = 8
+
+    /// How far the halo swells, how bright it is at each end of its breath, and
+    /// how long half a breath takes — the animation reverses, so the cycle is
+    /// twice this.
+    private static let swell: CGFloat = 2.2
+    private static let brightest: Float = 0.45
+    private static let faintest: Float = 0.12
+    private static let halfBeat: CFTimeInterval = 0.6
+
+    private let pulsing: Bool
+    private let halo = CALayer()
+
+    /// Reduce Motion settles at the moment the panel is built rather than at
+    /// launch, because somebody can turn it on between one meeting and the next
+    /// and the recording after that is the one it should apply to.
+    init(pulsing: Bool) {
+        self.pulsing = pulsing
+        super.init(frame: NSRect(
+            x: 0, y: 0, width: RecordingDotView.side, height: RecordingDotView.side
+        ))
+        wantsLayer = true
+        halo.frame = bounds
+        halo.cornerRadius = RecordingDotView.side / 2
+        halo.backgroundColor = NSColor.systemRed.cgColor
+        halo.opacity = 0
+        // the halo composites over the dot rather than under it, which a
+        // sublayer has no choice about, and it makes no difference: both are the
+        // same red and the dot beneath is opaque, so a tint of itself laid over
+        // it is still the dot. What swells past its edge is the whole effect
+        layer?.addSublayer(halo)
+        setAccessibilityElement(false)
+    }
+
+    /// This view is only ever built in code; there is no nib in this app for
+    /// one to be loaded from.
+    required init?(coder: NSCoder) {
+        fatalError("RecordingDotView is built in code, not loaded from a nib")
+    }
+
+    /// The dot itself is drawn rather than layered, so that it is there in
+    /// every rendering of the panel including the ones made offscreen, where a
+    /// layer's contents never arrive. Only the halo needs to be a layer, and
+    /// only because a still picture is not what it is for.
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.systemRed.setFill()
+        NSBezierPath(ovalIn: bounds).fill()
+    }
+
+    /// The breath is tied to being on screen rather than started once, because
+    /// a panel is closed and opened again all through a meeting and Core
+    /// Animation is under no obligation to keep an animation on a layer that
+    /// has been out of a window in between.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        halo.removeAllAnimations()
+        guard pulsing, window != nil else {
+            halo.opacity = 0
+            return
+        }
+        halo.opacity = RecordingDotView.faintest
+        halo.add(breathe(#keyPath(CALayer.opacity),
+            from: RecordingDotView.brightest, to: RecordingDotView.faintest), forKey: "glow")
+        halo.add(breathe("transform.scale",
+            from: 1, to: Float(RecordingDotView.swell)), forKey: "swell")
+    }
+
+    /// Out and back on an eased curve rather than a linear one, so the halo
+    /// slows at both ends of its breath instead of snapping around at them.
+    private func breathe(_ path: String, from: Float, to: Float) -> CABasicAnimation {
+        let animation = CABasicAnimation(keyPath: path)
+        animation.fromValue = from
+        animation.toValue = to
+        animation.duration = RecordingDotView.halfBeat
+        animation.autoreverses = true
+        animation.repeatCount = .infinity
+        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        return animation
+    }
+}
+
+/// The one thing in the panel that does anything, drawn as a filled capsule
+/// rather than left to AppKit. A bordered mac button on a forced-dark panel is
+/// a grey slab in the system's own materials — it reads as disabled, which is
+/// the opposite of what the only action on screen should read as.
+///
+/// So the capsule is drawn here and the button is left to draw its title, which
+/// is also what keeps its accessibility title being its title.
+final class HUDStopButton: NSButton {
+    /// How far the fill drops while it is held down. Enough to feel pressed,
+    /// not so much that it looks like a different colour.
+    private static let pressed: CGFloat = 0.7
+
+    /// The title is set as attributed text because that is the only way to say
+    /// what colour it is: a plain title on a borderless button is drawn in the
+    /// control colour of the appearance, which over a red capsule is the one
+    /// colour it must not be.
+    init(title: String) {
+        super.init(frame: .zero)
+        isBordered = false
+        setButtonType(.momentaryChange)
+        let centred = NSMutableParagraphStyle()
+        centred.alignment = .center
+        attributedTitle = NSAttributedString(string: title, attributes: [
+            .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            .foregroundColor: NSColor.white,
+            .paragraphStyle: centred,
+        ])
+    }
+
+    /// This view is only ever built in code; there is no nib in this app for
+    /// one to be loaded from.
+    required init?(coder: NSCoder) {
+        fatalError("HUDStopButton is built in code, not loaded from a nib")
+    }
+
+    /// The capsule under the title. Super is called after it rather than
+    /// instead of it, so the button goes on drawing its own title and its own
+    /// pressed state and this adds only the shape it is sitting on.
+    override func draw(_ dirtyRect: NSRect) {
+        let cap = bounds.height / 2
+        NSColor.systemRed.withAlphaComponent(isHighlighted ? HUDStopButton.pressed : 1).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: cap, yRadius: cap).fill()
+        super.draw(dirtyRect)
+    }
+}
+
+/// The recording as a window of its own: a small dark island hanging from the
+/// menu bar, with both sides of the tape drawn in it and one button. It exists
+/// because a menu cannot be watched — it closes on the first click anywhere,
+/// including the click that was meant to unmute somebody — and watching is the
+/// entire reason to look at a meter mid-meeting.
+///
+/// Always dark, whatever the Mac is set to. This floats over a meeting rather
+/// than sitting in a document, and every app that puts a control layer over a
+/// call draws it dark: matching the desktop instead would make it a window that
+/// had wandered in from another task.
+///
+/// The frames are set by hand rather than constrained. Nothing in here may
+/// change size while somebody is watching it — a silence coming on, a device
+/// with a longer name, a timer crossing an hour — because a panel that resizes
+/// under the pointer is the one kind of movement there is no reading through.
+/// That is also why the footer is a line that is always there and always says
+/// something.
+final class RecordingPanelView: NSVisualEffectView {
+    /// Wide enough for a device name to survive beside its caption, narrow
+    /// enough to hang off a status item without covering the menu bar's own
+    /// items either side of it.
+    static let width: CGFloat = 300
+    static let inset: CGFloat = 16
+    static var contentWidth: CGFloat { width - inset * 2 }
+
+    /// Rounded at the bottom only. The top edge is flush against the menu bar,
+    /// and a corner radius there would open a gap of desktop between the two
+    /// that makes the panel a floating window rather than the status item
+    /// having grown downwards.
+    static let corner: CGFloat = 16
+
+    /// A row deep enough for 13 point type, and the air under it, which is
+    /// wider than the air between the meters because the header is a different
+    /// kind of thing from what is under it.
+    private static let headerHeight: CGFloat = 18
+    private static let headerGap: CGFloat = 14
+
+    /// A caption belongs to the meter under it, so it sits nearer to that than
+    /// the rows sit to each other.
+    private static let captionHeight: CGFloat = 14
+    private static let tight: CGFloat = 2
+    private static let spacing: CGFloat = 12
+
+    /// A touch under the 32 points a full-width button gets in a sheet: this is
+    /// a HUD hanging in the air, and the same button at the same size would
+    /// weigh the whole island down.
+    private static let buttonHeight: CGFloat = 30
+
+    /// The air after the dot, and the room kept for the timer. The timer's
+    /// width is fixed rather than fitted so that crossing an hour moves
+    /// nothing: it is monospaced digits in a right-aligned field, and the field
+    /// is as wide as the longest thing that can land in it.
+    private static let dotGap: CGFloat = 8
+    private static let timerWidth: CGFloat = 90
+
+    /// Fixed, like the width: a header, two captioned meters, the footer and
+    /// the button, with the insets top and bottom.
+    static var height: CGFloat {
+        inset * 2 + headerHeight + headerGap
+            + (captionHeight + tight + Waveform.height + spacing) * 2
+            + captionHeight + spacing + buttonHeight
+    }
+
+    private let dot: RecordingDotView
+    private let title = RecordingPanelView.heading("Recording")
+    private let timer = RecordingPanelView.digits()
+    private let systemCaption: NSTextField
+    private let systemWave: WaveformView
+    private let microphoneCaption: NSTextField
+    private let microphoneWave: WaveformView
+    private let footer = RecordingPanelView.caption("")
+    private let stop = HUDStopButton(title: "Stop Recording")
+
+    /// The devices are taken at the start of a recording and never asked for
+    /// again: they are what this recording was started with, and a device
+    /// picked afterwards changes nothing about the tape running.
+    init(system: String, microphone: String, reduceMotion: Bool) {
+        dot = RecordingDotView(pulsing: !reduceMotion)
+        systemCaption = RecordingPanelView.caption("System audio · \(system)")
+        systemWave = WaveformView(reduceMotion: reduceMotion)
+        microphoneCaption = RecordingPanelView.caption("Microphone · \(microphone)")
+        microphoneWave = WaveformView(reduceMotion: reduceMotion)
+        super.init(frame: NSRect(
+            x: 0, y: 0, width: RecordingPanelView.width, height: RecordingPanelView.height
+        ))
+        material = .hudWindow
+        state = .active
+        blendingMode = .behindWindow
+        appearance = NSAppearance(named: .darkAqua)
+        wantsLayer = true
+        layer?.cornerRadius = RecordingPanelView.corner
+        // minY is the bottom in this coordinate space, so these two are the
+        // bottom corners and the top edge stays square against the menu bar
+        layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        layer?.masksToBounds = true
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("Recording")
+        layOut()
+    }
+
+    /// This view is only ever built in code; there is no nib in this app for
+    /// one to be loaded from.
+    required init?(coder: NSCoder) {
+        fatalError("RecordingPanelView is built in code, not loaded from a nib")
+    }
+
+    /// Everything placed from the top down, which is the order it is read in
+    /// and the only order these measurements make sense in.
+    private func layOut() {
+        var top = RecordingPanelView.height - RecordingPanelView.inset
+        dot.frame = NSRect(
+            x: RecordingPanelView.inset,
+            y: top - RecordingPanelView.headerHeight / 2 - RecordingDotView.side / 2,
+            width: RecordingDotView.side, height: RecordingDotView.side
+        )
+        let afterDot = RecordingDotView.side + RecordingPanelView.dotGap
+        title.frame = NSRect(
+            x: RecordingPanelView.inset + afterDot, y: top - RecordingPanelView.headerHeight,
+            width: RecordingPanelView.contentWidth - afterDot - RecordingPanelView.timerWidth
+                - RecordingPanelView.dotGap,
+            height: RecordingPanelView.headerHeight
+        )
+        timer.frame = NSRect(
+            x: RecordingPanelView.inset + RecordingPanelView.contentWidth
+                - RecordingPanelView.timerWidth,
+            y: top - RecordingPanelView.headerHeight,
+            width: RecordingPanelView.timerWidth, height: RecordingPanelView.headerHeight
+        )
+        top -= RecordingPanelView.headerHeight + RecordingPanelView.headerGap
+        for (caption, wave) in [
+            (systemCaption, systemWave), (microphoneCaption, microphoneWave),
+        ] {
+            caption.frame = row(top, RecordingPanelView.captionHeight)
+            top -= RecordingPanelView.captionHeight + RecordingPanelView.tight
+            wave.frame = row(top, Waveform.height)
+            top -= Waveform.height + RecordingPanelView.spacing
+            addSubview(caption)
+            addSubview(wave)
+        }
+        footer.frame = row(top, RecordingPanelView.captionHeight)
+        top -= RecordingPanelView.captionHeight + RecordingPanelView.spacing
+        stop.frame = row(top, RecordingPanelView.buttonHeight)
+        for view in [dot, title, timer, footer, stop] as [NSView] {
+            addSubview(view)
+        }
+    }
+
+    /// A full-width row of the given height hanging from `top`.
+    private func row(_ top: CGFloat, _ height: CGFloat) -> NSRect {
         NSRect(
-            x: MeterMenuView.inset, y: top - height,
-            width: size.width - MeterMenuView.inset * 2, height: height
+            x: RecordingPanelView.inset, y: top - height,
+            width: RecordingPanelView.contentWidth, height: height
         )
     }
 
-    /// What a menu asks a view for when it is deciding how wide to be. It is
-    /// the size the frame was built at, because both are the same fixed
-    /// layout and a menu that measured one and drew the other would clip.
-    override var intrinsicContentSize: NSSize {
-        size
+    /// Both sides, as often as readings arrive. This is the whole point of the
+    /// panel being a window rather than a menu: it goes on moving while
+    /// somebody watches it, and nothing they do elsewhere interrupts it.
+    func show(system: LevelHistory, microphone: LevelHistory, now: Date = Date()) {
+        systemWave.show(system, now: now)
+        microphoneWave.show(microphone, now: now)
     }
 
-    /// The newest reading on each side. Setting this on a level indicator
-    /// inside a menu that is already open is exactly the point: the readings
-    /// arrive on the main queue as the recorder prints them, ten a second, so
-    /// the meters move under the pointer of whoever is watching them.
-    func show(system: LevelHistory, microphone: LevelHistory) {
-        systemLevel.doubleValue = MeterMenuView.shown(system.latest)
-        microphoneLevel.doubleValue = MeterMenuView.shown(microphone.latest)
+    /// How far into the recording it is, once a second, which is as often as
+    /// anything in it can change. It is also what the panel says to a screen
+    /// reader: the loudness of each side is already spoken on the status item,
+    /// and what this window adds is that a recording is running and how long it
+    /// has been.
+    func showElapsed(_ text: String) {
+        timer.stringValue = text
+        setAccessibilityLabel("Recording, \(text)")
     }
 
-    /// The line under the meters, refreshed once a second rather than with
+    /// The line under the meters, refreshed with the timer rather than with
     /// every reading: it counts in whole seconds, and nothing in it can change
     /// ten times between two of them.
     func showFooter(system: LevelHistory, microphone: LevelHistory, now: Date = Date()) {
         footer.stringValue = Meters.footer(system: system, microphone: microphone, now: now)
     }
 
-    /// Small, secondary and one line: the type a menu uses for what it is
+    /// What the button does, wired from outside. This view knows that stopping
+    /// is a thing somebody can ask for and nothing whatever about what stopping
+    /// means, which is what lets the whole look of it be rendered offscreen
+    /// with no recorder anywhere near.
+    func onStop(_ target: AnyObject, _ action: Selector) {
+        stop.target = target
+        stop.action = action
+    }
+
+    /// What the panel calls itself, in the weight a title takes.
+    private static func heading(_ text: String) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        field.textColor = .labelColor
+        return field
+    }
+
+    /// The clock. Monospaced digits, or every tick would shuffle the numbers
+    /// left and right under a pointer resting on them.
+    private static func digits() -> NSTextField {
+        let field = NSTextField(labelWithString: "")
+        field.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+        field.textColor = .secondaryLabelColor
+        field.alignment = .right
+        return field
+    }
+
+    /// Small, secondary and one line: the type used for what the panel is
     /// saying rather than offering. Truncated at the tail because a device is
     /// recognised from the start of its name — "MacBook Pro Micro…" is still
     /// the built-in microphone.
     private static func caption(_ text: String) -> NSTextField {
         let field = NSTextField(labelWithString: text)
-        field.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        field.font = NSFont.systemFont(ofSize: 11)
         field.textColor = .secondaryLabelColor
         field.maximumNumberOfLines = 1
         field.lineBreakMode = .byTruncatingTail
         return field
-    }
-
-    /// The same control, on the same scale, that System Settings shows under
-    /// a microphone — which is the whole reason for it: nobody has to learn
-    /// what this one means. Not editable, because it reports rather than sets.
-    private static func indicator() -> NSLevelIndicator {
-        let level = NSLevelIndicator()
-        level.levelIndicatorStyle = .continuousCapacity
-        level.minValue = LevelHistory.floor
-        level.maxValue = LevelHistory.ceiling
-        // where a recording stops having headroom and where it starts losing
-        // the loud parts of a voice altogether
-        level.warningValue = -12
-        level.criticalValue = -3
-        level.isEditable = false
-        level.doubleValue = LevelHistory.floor
-        return level
-    }
-
-    /// Clamped to the scale the indicator was given, so a reading off either
-    /// end of it is drawn as that end rather than as nothing at all.
-    private static func shown(_ level: Double) -> Double {
-        min(max(level, LevelHistory.floor), LevelHistory.ceiling)
     }
 }
 
