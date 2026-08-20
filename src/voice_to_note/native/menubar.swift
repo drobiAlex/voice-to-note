@@ -60,22 +60,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// opening — that is what `menuNeedsUpdate` is for.
     private let menu = NSMenu()
 
-    /// The pulse belongs to one state and must not outlive it: a timer left
+    /// The shimmer belongs to one state and must not outlive it: a timer left
     /// running would go on redrawing a button that has moved on to saying
     /// something else entirely. Hanging it off the state itself is what makes
     /// every way out of processing — finished, failed, quit — stop it too.
     private var state = RecorderState.idle {
         didSet {
             if state == .processing {
-                startPulsing()
+                startShimmering()
             } else {
-                stopPulsing()
+                stopShimmering()
             }
             // a rolling tape is the one state the status item answers a click
             // with a window instead of a menu, and the meters belong to it for
-            // the same reason the pulse does. Emptying them on every state that
-            // is not recording is also what makes each recording start from
-            // silence rather than from whatever the last one ended on
+            // the same reason the shimmer does. Emptying them on every state
+            // that is not recording is also what makes each recording start
+            // from silence rather than from whatever the last one ended on
             if state == .recording {
                 openToThePanel()
                 showBriefly()
@@ -90,8 +90,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var unread = ""
     private var startedAt: Date?
     private var ticker: Timer?
-    private var pulse: Timer?
-    private var pulseFrame = 0
+    private var shimmer: Timer?
+
+    /// The frames the mark is being inked through and which of them is on the
+    /// button. Which set it is gets settled when a spell of processing starts,
+    /// because Reduce Motion has one of its own — so the count the frame wraps
+    /// at is always the count of the set actually being shown.
+    private var shimmerFrames = Mark.working
+    private var shimmerFrame = 0
     private var mayNotify = false
     private var logFile: FileHandle?
     private var projects: [(name: String, count: Int)]?
@@ -100,8 +106,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// How loud each side has been, kept for the length of one recording. The
     /// two of them are the model behind everything the meters draw, and the
-    /// state's own didSet is what empties them — a strip still showing the last
-    /// meeting's voices would be describing a tape that stopped.
+    /// state's own didSet is what empties them — a waveform still showing the
+    /// last meeting's voices would be describing a tape that stopped.
     private let systemLevels = LevelHistory()
     private let microphoneLevels = LevelHistory()
 
@@ -119,6 +125,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// rolling, not a window somebody has been handed to get rid of.
     private static let glance: TimeInterval = 4
 
+    /// How far under the menu bar the panel hangs. The same few points a menu
+    /// leaves, and enough for the panel's own shadow to read as a shadow rather
+    /// than as a dark seam trapped between two edges.
+    private static let hanging: CGFloat = 6
+
     /// The clock on a panel nobody asked for, which exists only for as long as
     /// such a panel does. Every way the panel closes goes through `closePanel`
     /// and every one of them stops this, which is what keeps a glance that was
@@ -131,13 +142,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// any, so nothing else would ever close it.
     private var clicksElsewhere: Any?
     private var clicksHere: Any?
-
-    /// The composite handed to the button last, and when. Only Reduce Motion
-    /// looks at them: it asks for the strips to be redrawn twice a second
-    /// instead of ten times, and the way to honour that is to hand back what
-    /// was drawn before rather than to stop the readings arriving.
-    private var drawnMeters: NSImage?
-    private var drawnAt = Date.distantPast
 
     /// What the button says to a screen reader and to a pointer resting on it,
     /// composed once a second because that is as often as any of it changes.
@@ -160,7 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// no reason to hold a quit. Stopping the tape first is what makes the
     /// meeting up to this point a memo instead of two half-written files.
     func applicationWillTerminate(_ notification: Notification) {
-        stopPulsing()
+        stopShimmering()
         if let recorder, recorder.isRunning, state == .starting || state == .recording {
             recorder.interrupt()
         }
@@ -171,6 +175,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Draws the state the recording is actually in. The elapsed time rides on
     /// the button rather than only in the menu, since the whole point of the
     /// thing is being able to see at a glance that a meeting is being taped.
+    ///
+    /// A red mark and a clock is the whole of what a rolling tape puts up
+    /// there. The meters are in the panel: a menu bar is a row of things
+    /// glanced at and a meter is a thing watched, and a strip of bars moving in
+    /// the corner of the screen buys a reading nobody was looking for at the
+    /// price of a menu bar nobody can stop noticing for the length of a
+    /// meeting.
     private func show() {
         guard let button = statusItem.button else { return }
         switch state {
@@ -182,59 +193,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             button.attributedTitle = label("…")
         case .recording:
             speak()
-            button.image = meters()
+            button.image = Mark.recording
             button.attributedTitle = label(elapsed())
         case .processing:
-            button.image = Mark.working[pulseFrame]
+            button.image = shimmerFrames[shimmerFrame]
             button.attributedTitle = NSAttributedString(string: "")
         }
     }
 
-    /// The mark with both strips beside it, as the two sides stand right now.
-    /// Under Reduce Motion the last one is handed back until half a second has
-    /// gone by: that setting asks for no scrolling history, and columns
-    /// redrawn ten times a second are the very movement at the edge of the eye
-    /// it exists to spare somebody.
-    private func meters() -> NSImage {
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let now = Date()
-        if reduceMotion, let drawn = drawnMeters, now.timeIntervalSince(drawnAt) < 0.5 {
-            return drawn
-        }
-        let image = Meters.composite(
-            mark: Mark.recording, system: systemLevels, microphone: microphoneLevels,
-            reduceMotion: reduceMotion
-        )
-        // the sentence is composed once a second, but every composite has to
-        // carry it: the image is replaced ten times a second and a screen
-        // reader describes whichever one it finds on the button
-        image.accessibilityDescription = spoken
-        drawnMeters = image
-        drawnAt = now
-        return image
-    }
-
-    /// A fresh reading from each side. These are the only clock the strips
+    /// A fresh reading from each side. These are the only clock the waveforms
     /// have — they arrive ten a second for as long as the tape rolls — which
     /// is why nothing here starts a timer, and why the elapsed time, the
-    /// spoken sentence and the menu's footer are left to the one that exists.
+    /// spoken sentence and the panel's footer are left to the one that exists.
+    ///
+    /// Nothing here touches the button: the mark it is wearing says a meeting
+    /// is being taped and says the same thing at every loudness, so there is
+    /// nothing for ten readings a second to change about it.
     private func metered(_ system: Double, _ microphone: Double) {
         systemLevels.push(system)
         microphoneLevels.push(microphone)
         panelView?.show(system: systemLevels, microphone: microphoneLevels)
-        statusItem.button?.image = meters()
     }
 
     /// The recording put into a sentence, for a screen reader and for the
     /// pointer resting on the button: how far in it is and what each side is
     /// doing. Once a second, from the ticker, because formatting this ten
     /// times a second would buy nothing that can be read in a tenth of one.
+    ///
+    /// It is set on the button rather than on the mark the button is wearing.
+    /// That mark is one image shared by every drawing of it, and a sentence
+    /// written onto it a second at a time would be a sentence about this
+    /// recording riding on the picture the next one is drawn from.
     private func speak() {
         let now = Date()
         spoken = "Recording \(elapsed()) — "
             + Meters.spoken("system audio", systemLevels, now: now) + ", "
             + Meters.spoken("microphone", microphoneLevels, now: now)
         statusItem.button?.toolTip = spoken
+        statusItem.button?.setAccessibilityLabel(spoken)
         panelView?.showElapsed(elapsed())
         panelView?.showFooter(system: systemLevels, microphone: microphoneLevels, now: now)
     }
@@ -248,9 +244,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         systemLevels.reset()
         microphoneLevels.reset()
         closePanel()
-        drawnMeters = nil
         spoken = ""
         statusItem.button?.toolTip = nil
+        // back to nothing rather than to some other sentence, which is what
+        // hands the describing of the button to the mark it is wearing again
+        statusItem.button?.setAccessibilityLabel(nil)
     }
 
     /// Monospaced digits: proportional ones would shuffle the whole menu bar
@@ -284,31 +282,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ticker = nil
     }
 
-    /// The two frames of the mark, swapped slowly. Transcribing a meeting takes
-    /// minutes with nothing else on screen to show for it, and this is the only
-    /// thing saying the work is still going rather than quietly dead. Slow on
-    /// purpose: a beat under a second is movement caught out of the corner of
-    /// an eye, and anything quicker is a thing demanding to be looked at.
-    private func startPulsing() {
-        stopPulsing()
-        let pulse = Timer(timeInterval: 0.9, repeats: true) { [weak self] _ in
+    /// The mark stepped through its frames while notes are being made.
+    /// Transcribing a meeting takes minutes with nothing else on screen to show
+    /// for it, and this is the only thing saying the work is still going rather
+    /// than quietly dead.
+    ///
+    /// Reduce Motion is asked once, here, rather than on every frame, so a
+    /// spell of processing animates one way from beginning to end. Somebody who
+    /// changes the setting mid-transcription gets the new answer on the next
+    /// memo, which is the one it can apply to.
+    private func startShimmering() {
+        stopShimmering()
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        shimmerFrames = reduceMotion ? Mark.workingSlowly : Mark.working
+        let tick = reduceMotion ? Mark.breathTick : Mark.shimmerTick
+        let shimmer = Timer(timeInterval: tick, repeats: true) { [weak self] _ in
             guard let self else { return }
-            self.pulseFrame = (self.pulseFrame + 1) % Mark.working.count
+            self.shimmerFrame = (self.shimmerFrame + 1) % self.shimmerFrames.count
             self.show()
         }
         // the common modes, for the same reason the clock is added to them: a
         // menu held open must not be the thing that freezes the animation
-        RunLoop.main.add(pulse, forMode: .common)
-        self.pulse = pulse
+        RunLoop.main.add(shimmer, forMode: .common)
+        self.shimmer = shimmer
     }
 
-    /// Back to the first frame as well as stopped, so the next spell of
-    /// processing starts from the mark at rest instead of wherever the last one
-    /// happened to be interrupted.
-    private func stopPulsing() {
-        pulse?.invalidate()
-        pulse = nil
-        pulseFrame = 0
+    /// Back to the head of the wave as well as stopped, so the next spell of
+    /// processing starts where every other one started instead of wherever the
+    /// last one happened to be interrupted.
+    private func stopShimmering() {
+        shimmer?.invalidate()
+        shimmer = nil
+        shimmerFrame = 0
     }
 
     // --- the menu ------------------------------------------------------------
@@ -555,8 +560,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let glance = Timer(timeInterval: AppDelegate.glance, repeats: false) { [weak self] _ in
             self?.closePanel()
         }
-        // the common modes, for the same reason the clock and the pulse are put
-        // in them: a menu held open somewhere else must not be the thing that
+        // the common modes, for the same reason the clock and the shimmer are
+        // put in them: a menu held open elsewhere must not be the thing that
         // leaves this window standing over a meeting
         RunLoop.main.add(glance, forMode: .common)
         glanceOver = glance
@@ -572,10 +577,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         glanceOver = nil
     }
 
-    /// Flush under the menu bar and centred on the button it belongs to, so the
-    /// panel reads as the status item having grown downwards rather than as a
-    /// window that happens to be near it. That is what the flat top edge is for,
-    /// and it only works if the top edge is exactly the menu bar's bottom.
+    /// A detached popover: centred on the button it belongs to and hanging a
+    /// few points clear of the menu bar, the way a menu does. What ties it to
+    /// the status item is where it is and the way it grows out of its own top
+    /// edge, not a shared border — an opaque island pressed against the bar
+    /// meets it at a bare square corner, which is a join that shows.
     ///
     /// Clamped to the screen, because a status item close to the right-hand end
     /// of the menu bar would otherwise centre a 300 point panel half off it.
@@ -587,7 +593,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let leftmost = screen.visibleFrame.minX + margin
         let rightmost = screen.visibleFrame.maxX - margin - size.width
         let x = min(max(anchor.midX - size.width / 2, leftmost), max(leftmost, rightmost))
-        panel.setFrameOrigin(NSPoint(x: x.rounded(), y: (anchor.minY - size.height).rounded()))
+        panel.setFrameOrigin(NSPoint(
+            x: x.rounded(), y: (anchor.minY - AppDelegate.hanging - size.height).rounded()
+        ))
     }
 
     /// What closes the panel: a click anywhere that is not the panel itself.
@@ -858,7 +866,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     ///
     /// `--levels` is the one flag nobody would type: the recorder draws its own
     /// bars for a terminal, sees a pipe here and would draw nothing at all, and
-    /// the numbers it prints instead are what the strips in the menu bar are.
+    /// the numbers it prints instead are what the panel's waveforms are made of.
     private func recordArguments() -> [String] {
         var arguments = ["record", "--project", chosenProject, "--levels"]
         if let output = chosenOutput {
@@ -887,7 +895,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// Everything the recorder says on its way through a meeting: the meter's
-    /// readings, which feed the strips and go no further, and every other line,
+    /// readings, which feed the panel and go no further, and every other line,
     /// which is kept whole in the log and read for the one that matters here —
     /// printed only once both audio streams are live, so it is what the red dot
     /// waits for.
@@ -1056,13 +1064,14 @@ import AppKit
 /// a dozen other audio apps, and the one job this glyph has is being picked
 /// out of a crowded menu bar without being read. So it is five bars of
 /// deliberately uneven height, and the shape never changes between states —
-/// only its colour, and a slow shuffle while notes are being made. What is
-/// in the corner of the screen stays the same thing all the way through a
-/// meeting; what it is doing is told by how it is inked.
+/// only its colour, and a wave of brightness travelling across it while notes
+/// are being made. What is in the corner of the screen stays the same thing all
+/// the way through a meeting; what it is doing is told by how it is inked.
 ///
 /// Each image is built once and kept. A status item redraws its button on
-/// every appearance change and once a second while a recording is running,
-/// and none of that should cost a fresh bitmap.
+/// every appearance change, once a second while a recording is running and
+/// fifteen times a second while notes are being made, and none of that should
+/// cost a fresh bitmap.
 enum Mark {
     /// A status item scales its image to the height of the menu bar, and
     /// 18pt square is the size that arrives there unscaled — anything else
@@ -1077,14 +1086,6 @@ enum Mark {
     /// bar on a half point, and a half-point edge is a grey smear rather
     /// than a line on a display that is not retina.
     private static let resting: [CGFloat] = [4, 8, 14, 10, 6]
-
-    /// The same five bars with the flanks traded and the tall one held
-    /// where it is. Two frames of this is the whole processing animation:
-    /// the mark leans rather than spins or blinks, because something
-    /// flashing in the menu bar reads as a thing gone wrong rather than a
-    /// thing under way. Pinning the tall bar is what keeps the two frames
-    /// one mark swaying instead of two different marks alternating.
-    private static let leaning: [CGFloat] = [6, 10, 14, 8, 4]
 
     static let idle = draw(resting, .black, template: true, "Not recording")
 
@@ -1102,23 +1103,104 @@ enum Mark {
     /// needs no learning.
     static let recording = draw(resting, .systemRed, template: false, "Recording")
 
-    static let working = [
-        draw(resting, .black, template: true, "Making notes from the meeting"),
-        draw(leaning, .black, template: true, "Making notes from the meeting"),
-    ]
+    // --- the mark while notes are being made ---------------------------------
 
-    /// One frame of the mark: bars of the given heights, rounded at both
-    /// ends, laid out from a left edge that centres the whole run inside
-    /// the square, so every frame sits in exactly the same place and the
-    /// animation is the bars moving rather than the mark shifting sideways.
+    /// How faint a bar goes and how solid it comes back. Neither end is
+    /// off: the mark has to stay the same five bars through the whole
+    /// cycle, and one that faded out would make it a four-bar mark for
+    /// part of every pass. Neither end is full either — a run to solid and
+    /// back is a strobe in the corner of a screen somebody is working in.
+    private static let dimmest: CGFloat = 0.4
+    private static let brightest: CGFloat = 0.9
+
+    /// How many frames one pass of the wave is cut into and how long the
+    /// pass takes. Twenty-four over 1.6 seconds is a frame every 67 ms —
+    /// fifteen a second, which is where a fading edge stops stepping and
+    /// starts sliding. The pass itself is slow on purpose: movement caught
+    /// at the edge of an eye says work is under way, and anything quicker
+    /// is a thing demanding to be looked at.
+    private static let frames = 24
+    private static let pass: TimeInterval = 1.6
+
+    /// The same brightening under Reduce Motion, over a longer breath and
+    /// at a fraction of the frames — nothing travels across it, so there
+    /// is no edge to keep smooth and no reason to redraw fifteen times a
+    /// second for a mark that changes as one thing.
+    private static let slowFrames = 4
+    private static let breath: TimeInterval = 2
+
+    /// How often the button wants the next frame. The timer belongs with
+    /// the app's state and these numbers belong here, so what crosses
+    /// between the two is an interval and nothing else.
+    static let shimmerTick = pass / Double(frames)
+    static let breathTick = breath / Double(slowFrames)
+
+    /// What the mark says while notes are being made, on every frame of
+    /// it: the image on the button is replaced fifteen times a second and
+    /// a screen reader describes whichever one it happens to find there.
+    private static let makingNotes = "Making notes from the meeting"
+
+    /// A wave of brightness travelling across the five bars, one frame at
+    /// a time. Only the ink moves. A height has to land on a whole point
+    /// or its ends smear, which caps a shape animation at a handful of
+    /// visibly different drawings and makes stepping between them a
+    /// glitchy toggle; an alpha has no such rule and can be anything
+    /// between the two ends of a sine, so this is smooth where a mark
+    /// changing shape cannot be.
+    static let working: [NSImage] = (0..<frames).map { travelling($0) }
+
+    /// Reduce Motion gets the brightening and none of the travel: every
+    /// bar on the same point of the wave, so the mark swells and settles
+    /// as one thing and nothing crosses it. A mark held still was the
+    /// other way, and it answers the one question this state exists to
+    /// answer — whether the work is still going — with nothing at all,
+    /// where a slow change of ink is the cross-fade that setting asks
+    /// movement to be replaced by.
+    static let workingSlowly: [NSImage] = (0..<slowFrames).map { breathing($0) }
+
+    /// One frame of the travelling wave: every bar at its own point on the
+    /// same sine, each lagging the one to its left by a fifth of a turn, so
+    /// a crest runs from the left of the mark to the right and comes round
+    /// again.
+    private static func travelling(_ frame: Int) -> NSImage {
+        let reached = 2 * Double.pi * Double(frame) / Double(frames)
+        let inks = resting.indices.map { bar in
+            faded(sin(reached - 2 * Double.pi * Double(bar) / Double(resting.count)))
+        }
+        return draw(resting, inks, template: true, makingNotes)
+    }
+
+    /// One frame of the Reduce Motion breath: the whole mark on one point
+    /// of the sine, so it brightens and dims as a single thing.
+    private static func breathing(_ frame: Int) -> NSImage {
+        let together = faded(sin(2 * Double.pi * Double(frame) / Double(slowFrames)))
+        return draw(
+            resting, Array(repeating: together, count: resting.count),
+            template: true, makingNotes
+        )
+    }
+
+    /// A point on the sine turned into ink. A template image is tinted
+    /// through its own alpha, so drawing a bar faint is the whole of how
+    /// the menu bar is asked to show it faint, in either appearance.
+    private static func faded(_ wave: Double) -> NSColor {
+        let swing = (brightest - dimmest) / 2
+        return NSColor.black.withAlphaComponent(dimmest + swing + swing * CGFloat(wave))
+    }
+
+    /// One frame of the mark: bars of the given heights, each in its own
+    /// ink, rounded at both ends, laid out from a left edge that centres
+    /// the whole run inside the square, so every frame sits in exactly the
+    /// same place and what animates is how the bars are inked rather than
+    /// the mark shifting sideways.
     private static func draw(
-        _ heights: [CGFloat], _ ink: NSColor, template: Bool, _ description: String
+        _ heights: [CGFloat], _ inks: [NSColor], template: Bool, _ description: String
     ) -> NSImage {
         let run = CGFloat(heights.count) * barWidth + CGFloat(heights.count - 1) * gap
         let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
-            ink.set()
             var x = (side - run) / 2
-            for height in heights {
+            for (index, height) in heights.enumerated() {
+                inks[index].set()
                 let bar = NSRect(x: x, y: (side - height) / 2, width: barWidth, height: height)
                 let cap = barWidth / 2
                 NSBezierPath(roundedRect: bar, xRadius: cap, yRadius: cap).fill()
@@ -1130,14 +1212,24 @@ enum Mark {
         image.accessibilityDescription = description
         return image
     }
+
+    /// The whole mark in one ink, which is every state but the shimmer.
+    private static func draw(
+        _ heights: [CGFloat], _ ink: NSColor, template: Bool, _ description: String
+    ) -> NSImage {
+        draw(
+            heights, Array(repeating: ink, count: heights.count),
+            template: template, description
+        )
+    }
 }
 
 /// How loud one side of a recording has been over the last couple of seconds.
 /// Two of these — the system tap and the microphone — are the whole model both
-/// meters are drawn from: the strip in the menu bar draws the ring, the level
-/// indicator in the menu draws `latest`, and the silence clock is what lets
-/// either of them say a microphone has been dead for twelve seconds rather
-/// than only that it happens to be quiet at this instant.
+/// meters are drawn from: the panel's waveform draws the ring, the track it
+/// falls back to under Reduce Motion draws `latest`, and the silence clock is
+/// what lets either of them say a microphone has been dead for twelve seconds
+/// rather than only that it happens to be quiet at this instant.
 ///
 /// The time is passed in rather than read in here, so a reading times its own
 /// silence — and so a scripted meeting can be walked through without waiting
@@ -1152,7 +1244,7 @@ final class LevelHistory {
     static let ceiling: Double = 0
 
     /// The newest reading, which is what a level indicator wants; the ring
-    /// behind it is what a scrolling strip wants.
+    /// behind it is what a scrolling waveform wants.
     private(set) var latest = LevelHistory.floor
 
     /// When this side went quiet, or nothing while it is not. Kept as the
@@ -1165,16 +1257,14 @@ final class LevelHistory {
     /// The slot the next reading overwrites, which is also the oldest one.
     private var next = 0
 
-    /// Filled with the floor rather than left short, so a strip has a whole
-    /// row to draw from its first frame. Before any reading has arrived there
-    /// genuinely is no sound, and drawing that as silence is honest; a row
-    /// that grew in from the right would instead be claiming the meeting is
+    /// Filled with the floor rather than left short, so the waveform has a
+    /// whole tray to draw from its first frame. Before any reading has arrived
+    /// there genuinely is no sound, and drawing that as silence is honest; a
+    /// row that grew in from the right would instead be claiming the meeting is
     /// younger than it is every time this is emptied.
     ///
-    /// The ring is as long as the widest thing drawn from it, which is the
-    /// panel's waveform. The strip beside the mark wants a fraction of that
-    /// and takes the newest end of it — one history for both is what keeps the
-    /// two from ever disagreeing about what the last second sounded like.
+    /// The ring is exactly as wide as the waveform, because the waveform is the
+    /// only thing drawn from it.
     init(columns: Int = Waveform.columns) {
         ring = Array(repeating: LevelHistory.floor, count: max(columns, 1))
     }
@@ -1210,7 +1300,7 @@ final class LevelHistory {
     /// The readings oldest first. Copied out rather than handed over, because
     /// whatever draws them runs later — an image's drawing handler runs when
     /// the button is drawn, by which time more readings have landed in the
-    /// ring — and a strip has to be one moment rather than a smear of two.
+    /// ring — and a waveform has to be one moment rather than a smear of two.
     var trace: [Double] {
         var ordered = [Double]()
         ordered.reserveCapacity(ring.count)
@@ -1227,180 +1317,20 @@ final class LevelHistory {
     }
 }
 
-/// The strips that ride beside the mark while the tape rolls, and the words
-/// both meters are described in. Drawing and phrasing only: handed the two
-/// histories it gives back an image, which is what lets the whole look of the
-/// thing be rendered to a file and judged without a meeting being recorded.
+/// The words both meters are described in: spoken to a screen reader, rested
+/// under a pointer, and written along the bottom of the panel. Phrasing only,
+/// and no pixels — what a recording looks like is the panel's own drawing, and
+/// what it sounds like has to be sayable without any of that being seen.
 enum Meters {
-    /// One column per reading and a reading every 100 ms, so eighteen columns
-    /// is 1.8 seconds of history — about as much as is taken in at a glance,
-    /// and as much as 36 points holds at a width where a bar is still a bar.
-    static let columns = 18
-
     /// Silence is worth mentioning after ten seconds and not before. Pauses
     /// are ordinary in a meeting — somebody reading a slide, a question being
     /// thought about — and a warning that fires on all of them is a warning
     /// that gets ignored on the one that means a muted microphone.
     static let silenceAfter: TimeInterval = 10
 
-    /// The mark's square, the gap that keeps the strips from reading as part
-    /// of it, and the block they are drawn in.
-    private static let side: CGFloat = 18
-    private static let gap: CGFloat = 6
-    private static let stripWidth: CGFloat = 36
-
-    /// Two rows of eight points with two between them fills the same 18pt the
-    /// mark is tall, which is what keeps the whole thing one status item high.
-    private static let rowHeight: CGFloat = 8
-    private static let rowGap: CGFloat = 2
-
-    /// A point of bar and a point of air. Any wider and 1.8 seconds does not
-    /// fit; any narrower and there is no bar left to see.
-    private static let columnWidth: CGFloat = 2
-    private static let barWidth: CGFloat = 1
-
-    /// The height of the track a level fills under Reduce Motion. Half the
-    /// row, so an empty one is plainly a container waiting to be filled rather
-    /// than a line that might be a flat signal.
-    private static let trackHeight: CGFloat = 4
-
-    /// Even numbers only, and the same reason the mark's are: a bar is
-    /// mirrored around the middle of its row, so an odd height puts both of
-    /// its ends on a half point, and a half-point edge is a grey smear rather
-    /// than a line on a display that is not retina.
-    private static let heights: [CGFloat] = [2, 4, 6, 8]
-
-    /// Fixed, whatever the levels do. Everything to the right of a menu bar
-    /// extra shifts when it changes width, so a status item that grew and
-    /// shrank with the loudness of the room would keep the entire menu bar
-    /// twitching for the length of a meeting.
-    static var size: NSSize {
-        NSSize(width: side + gap + stripWidth, height: side)
-    }
-
-    /// The red mark with both sides of the recording beside it: system audio
-    /// on top, microphone below, the way they are named everywhere else.
-    ///
-    /// The two histories are read out here and the closure keeps the copies,
-    /// not the histories, because the closure runs when the button draws —
-    /// which is after the next reading has already arrived.
-    ///
-    /// Only the newest end of each history is taken. The ring behind it is as
-    /// long as the panel's waveform needs, and a strip 36 points wide asked to
-    /// draw all of it would either shrink every column below a point or throw
-    /// away every other reading — either way a menu bar that changed its look
-    /// the day a panel was added to the app.
-    static func composite(
-        mark: NSImage, system: LevelHistory, microphone: LevelHistory, reduceMotion: Bool
-    ) -> NSImage {
-        let top = Array(system.trace.suffix(columns))
-        let bottom = Array(microphone.trace.suffix(columns))
-        let image = NSImage(size: size, flipped: false) { _ in
-            mark.draw(in: NSRect(x: 0, y: 0, width: side, height: side))
-            row(top, from: side + gap, midline: rowHeight + rowGap + rowHeight / 2,
-                reduceMotion: reduceMotion)
-            row(bottom, from: side + gap, midline: rowHeight / 2, reduceMotion: reduceMotion)
-            return true
-        }
-        // not a template image: the mark's red is the one colour in this app
-        // that means something, and a template is flattened to the menu bar's
-        // own tint. The strips ask for a label colour instead, which comes to
-        // the same thing for the half that should follow the menu bar
-        image.isTemplate = false
-        return image
-    }
-
-    /// One side's history, oldest at the left and the newest reading against
-    /// the right edge — the direction a waveform has been read since tape.
-    private static func row(
-        _ trace: [Double], from left: CGFloat, midline: CGFloat, reduceMotion: Bool
-    ) {
-        guard let newest = trace.last else { return }
-        if reduceMotion {
-            fill(newest, from: left, midline: midline)
-            return
-        }
-        for (column, level) in trace.enumerated() {
-            // the newest column is nearly solid and the oldest is a ghost, so
-            // which end of the strip is now needs no explaining
-            let age = CGFloat(column) / CGFloat(max(trace.count - 1, 1))
-            bar(level, from: left + CGFloat(column) * columnWidth, width: barWidth,
-                flat: columnWidth, midline: midline, ink: 0.3 + 0.6 * age)
-        }
-    }
-
-    /// The newest reading as a track filling from the left, which is what
-    /// Reduce Motion leaves room for: nothing scrolls past, no column flickers
-    /// ten times a second, and the one thing the strip exists to show — how
-    /// loud this side is — is still there to be read. The scale is the whole
-    /// of it, floor to ceiling, because a fill has no shape to say anything
-    /// with and the length is all there is.
-    ///
-    /// Silence empties the track rather than shortening it, and the track is
-    /// drawn either way: an empty container is what says nothing is arriving,
-    /// where a missing one would only look like a strip that failed to draw.
-    private static func fill(_ level: Double, from left: CGFloat, midline: CGFloat) {
-        let track = NSRect(
-            x: left, y: midline - trackHeight / 2, width: stripWidth, height: trackHeight
-        )
-        NSColor.labelColor.withAlphaComponent(0.2).setFill()
-        track.fill()
-        guard level >= LevelHistory.silence else { return }
-        let span = LevelHistory.ceiling - LevelHistory.floor
-        let loud = (min(level, LevelHistory.ceiling) - LevelHistory.floor) / span
-        NSColor.labelColor.withAlphaComponent(0.9).setFill()
-        // rounded to a whole point, for the same reason every other edge here
-        // is: a fill ending on a half point frays instead of stopping
-        NSRect(
-            x: track.minX, y: track.minY, width: (CGFloat(loud) * stripWidth).rounded(),
-            height: trackHeight
-        ).fill()
-    }
-
-    /// One reading, mirrored around the middle of its row the way a waveform
-    /// is. Silence is not the shortest bar but a flat line: a difference in
-    /// shape, which somebody reads at a glance and still reads with the colour
-    /// taken away, where a two-point bar beside a four-point one is a guess.
-    ///
-    /// A flat line is drawn the full width of its column rather than the
-    /// width of a bar, so that neighbouring silent readings meet and make one
-    /// line: a row of dots at the spacing of the bars is a texture, and the
-    /// shape somebody has to recognise here is a flatline.
-    ///
-    /// The ink is resolved in here, inside the drawing handler, instead of
-    /// being passed in: this runs when the button draws, and only then is the
-    /// appearance the menu bar is actually wearing — light, dark, or vibrancy
-    /// over a desktop picture — the current one.
-    private static func bar(
-        _ level: Double, from left: CGFloat, width: CGFloat, flat: CGFloat, midline: CGFloat,
-        ink: CGFloat
-    ) {
-        guard level >= LevelHistory.silence else {
-            // dimmer again than a quiet bar, and sitting a whole point under
-            // the midline rather than astride it, since a one-point line
-            // centred there would land half in each of two rows of pixels
-            NSColor.labelColor.withAlphaComponent(ink * 0.6).setFill()
-            NSRect(x: left, y: midline - 1, width: flat, height: 1).fill()
-            return
-        }
-        let height = barHeight(for: level)
-        NSColor.labelColor.withAlphaComponent(ink).setFill()
-        NSRect(x: left, y: midline - height / 2, width: width, height: height).fill()
-    }
-
-    /// Which of the four heights a reading lands on. The scale runs −50 dBFS
-    /// to 0, everything below being silence with a shape of its own, and four
-    /// steps is as much as eight points of row can tell apart — a fifth would
-    /// be a difference nobody could see the meaning of.
-    private static func barHeight(for level: Double) -> CGFloat {
-        let span = LevelHistory.ceiling - LevelHistory.silence
-        let loud = (min(level, LevelHistory.ceiling) - LevelHistory.silence) / span
-        return heights[min(heights.count - 1, Int(loud * Double(heights.count)))]
-    }
-
     /// How one side is said out loud: how loud it is, or how long it has been
-    /// silent. A screen reader gets no strip at all, so the sentence has to
-    /// carry the thing the shape of the strip carries — that this side is not
+    /// silent. A screen reader gets no waveform at all, so the sentence has to
+    /// carry the thing the shape of a flatline carries — that this side is not
     /// merely quiet, it has been quiet for long enough to be broken.
     static func spoken(_ side: String, _ history: LevelHistory, now: Date = Date()) -> String {
         if let quiet = history.silentFor(now: now) {
@@ -1410,12 +1340,12 @@ enum Meters {
         return level >= 0 ? "\(side) 0 dB" : "\(side) −\(-level) dB"
     }
 
-    /// The line under the meters in the menu, which always has something to
+    /// The line under the meters in the panel, which always has something to
     /// say: how long a side has been silent, or else that both of them are
-    /// being heard. Never blank, because the menu cannot change height while
-    /// it is open and so the line is standing there either way — and a line
-    /// standing there with nothing on it reads as something broken rather than
-    /// as nothing to report.
+    /// being heard. Never blank, because the panel cannot change height while
+    /// somebody is watching it and so the line is standing there either way —
+    /// and a line standing there with nothing on it reads as something broken
+    /// rather than as nothing to report.
     ///
     /// It is also the whole of what this app says about silence. There is no
     /// notification: a pause is not an event, and being interrupted in the
@@ -1459,18 +1389,19 @@ enum Meters {
 /// to be to make one. It lives apart from the view that draws it because the
 /// number of columns is the one thing outside the drawing that depends on the
 /// panel's width: it is how many readings a history has to keep.
-///
-/// The strip beside the mark has its own numbers and keeps them. Eight points
-/// of menu bar and 248 points of panel are not the same problem, and a single
-/// set of constants stretched over both would be wrong at one end or the other.
 enum Waveform {
-    /// A point of bar, a point of air, and a rounded cap on each end. At this
-    /// pitch a talking voice reads as syllables rather than as a fence, and it
-    /// is the narrowest a bar can be and still look drawn on purpose.
-    static let barWidth: CGFloat = 2
-    static let gap: CGFloat = 2
+    /// Three points of bar, three of air, and a rounded cap on each end. The
+    /// pitch is what decides whether a talking voice reads as syllables or as a
+    /// fence, and at six points it is syllables: one reading is 100 ms of room,
+    /// and six points is wide enough that a single one of them is a bar
+    /// somebody can watch rise and fall. Narrower fits more of the meeting into
+    /// the tray and shows less of it — a room at ordinary loudness drawn at a
+    /// four point pitch is a comb of near-equal teeth, which says a level is
+    /// arriving and nothing whatever about what it is doing.
+    static let barWidth: CGFloat = 3
+    static let gap: CGFloat = 3
     static let pitch: CGFloat = barWidth + gap
-    static let cap: CGFloat = 1
+    static let cap: CGFloat = 1.5
 
     /// The tray the bars sit in: rounded, barely lighter than the panel behind
     /// it, and padded at both ends so the oldest and the newest column are not
@@ -1486,19 +1417,21 @@ enum Waveform {
     static let tallest: CGFloat = height - breathing * 2
     static let shortest: CGFloat = 2
 
-    /// The track the newest reading fills under Reduce Motion, on the same
-    /// scale and at the same height as the one the strip falls back to.
+    /// The track the newest reading fills under Reduce Motion, in place of the
+    /// bars. Thin enough that an empty one is plainly a container waiting to be
+    /// filled rather than a signal that has gone flat.
     static let trackHeight: CGFloat = 4
 
     /// How wide the bars have to fit, and so how many of them there are. At ten
-    /// readings a second the panel holds a little over six seconds of meeting —
-    /// long enough to see a sentence in, short enough that what is on screen is
-    /// still what is happening.
+    /// readings a second the panel holds a little over four seconds of meeting —
+    /// long enough to see a phrase in, short enough that what is on screen is
+    /// still what is happening. Widening a bar spends history to buy legibility,
+    /// and four seconds of a meeting somebody can read beats six they cannot.
     static var span: CGFloat { RecordingPanelView.contentWidth - padding * 2 }
     static let columns = Int(span / pitch)
 
-    /// Which whole even height a reading lands on, over the same −50 dBFS to 0
-    /// the strip uses, everything below being silence with a shape of its own.
+    /// Which whole even height a reading lands on, over −50 dBFS to 0, with
+    /// everything below that being silence and having a shape of its own.
     ///
     /// Even for the same reason the mark's bars are even: a bar is mirrored
     /// around the middle of the tray, so an odd height puts both of its ends on
@@ -1616,8 +1549,8 @@ final class WaveformView: NSView {
     /// a bar, so neighbouring silent readings meet and make one line — a row of
     /// dots at the spacing of the bars is a texture, and the shape somebody has
     /// to recognise here is a flatline. It keeps its column's own ink rather
-    /// than being dimmed the way the strip's is: the tray is already a lighter
-    /// ground than the menu bar, and a dimmer line disappears into it.
+    /// than being dimmed any further: the tray is already a lighter ground than
+    /// the panel around it, and a dimmer line disappears into it.
     private func bar(_ level: Double, at left: CGFloat, midline: CGFloat, ink: CGFloat) {
         NSColor.labelColor.withAlphaComponent(ink).setFill()
         guard level >= LevelHistory.silence else {
@@ -1815,13 +1748,20 @@ final class HUDStopButton: NSButton {
 /// call draws it dark: matching the desktop instead would make it a window that
 /// had wandered in from another task.
 ///
+/// Dark and solid, rather than dark and translucent. A vibrancy material takes
+/// its colour from whatever is behind it, and behind this is somebody's
+/// desktop picture: over a warm one the island turns muddy brown, which is a
+/// window looking broken rather than looking like itself. One painted colour is
+/// also what makes a rendering of this panel made offscreen the same pixels as
+/// the panel on screen, so its look can be judged without taping a meeting.
+///
 /// The frames are set by hand rather than constrained. Nothing in here may
 /// change size while somebody is watching it — a silence coming on, a device
 /// with a longer name, a timer crossing an hour — because a panel that resizes
 /// under the pointer is the one kind of movement there is no reading through.
 /// That is also why the footer is a line that is always there and always says
 /// something.
-final class RecordingPanelView: NSVisualEffectView {
+final class RecordingPanelView: NSView {
     /// Wide enough for a device name to survive beside its caption, narrow
     /// enough to hang off a status item without covering the menu bar's own
     /// items either side of it.
@@ -1829,11 +1769,19 @@ final class RecordingPanelView: NSVisualEffectView {
     static let inset: CGFloat = 16
     static var contentWidth: CGFloat { width - inset * 2 }
 
-    /// Rounded at the bottom only. The top edge is flush against the menu bar,
-    /// and a corner radius there would open a gap of desktop between the two
-    /// that makes the panel a floating window rather than the status item
-    /// having grown downwards.
+    /// Rounded on all four corners, the way a detached popover is. This hangs
+    /// clear of the menu bar rather than pressing against it: an opaque dark
+    /// island flush under a light translucent bar meets it at a square corner
+    /// with nothing to hide the join, and a square corner among rounded ones
+    /// reads as a thing that failed to draw rather than as a thing joined on.
     static let corner: CGFloat = 16
+
+    /// The one colour the island is painted. Warm rather than a neutral black,
+    /// which is what keeps it from reading as a hole cut in the desktop, and
+    /// dark enough that the white of the header is the brightest thing in it.
+    private static let ground = NSColor(
+        srgbRed: 30 / 255, green: 30 / 255, blue: 33 / 255, alpha: 1
+    )
 
     /// How long the window takes to fade up, how long the island inside it
     /// takes to grow into place, how long it all takes to go, and how small the
@@ -1937,15 +1885,14 @@ final class RecordingPanelView: NSVisualEffectView {
         super.init(frame: NSRect(
             x: 0, y: 0, width: RecordingPanelView.width, height: RecordingPanelView.height
         ))
-        material = .hudWindow
-        state = .active
-        blendingMode = .behindWindow
+        // forced dark rather than merely painted dark: every label colour in
+        // here resolves against the appearance the view is wearing, and one
+        // that followed the Mac would put black type on this ground the moment
+        // somebody switched their Mac to light
         appearance = NSAppearance(named: .darkAqua)
         wantsLayer = true
+        layer?.backgroundColor = RecordingPanelView.ground.cgColor
         layer?.cornerRadius = RecordingPanelView.corner
-        // minY is the bottom in this coordinate space, so these two are the
-        // bottom corners and the top edge stays square against the menu bar
-        layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         layer?.masksToBounds = true
         setAccessibilityRole(.group)
         setAccessibilityLabel("Recording")
