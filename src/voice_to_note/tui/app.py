@@ -1931,14 +1931,17 @@ class MemoApp(App[None]):
         a project while the whole library was on screen would narrow the list
         nobody asked to narrow, and there is no project to reach for anyway.
 
-        The archive is asked about first because it is exclusive with all three
-        of the others: the drawer is on screen with no project, no tag and no
-        whole library behind it, and every one of those would redraw it as a
-        listing of memos that are not in it."""
-        if self.archived:
-            self.show_archived()
-        elif self.tag is not None:
+        A tag search is asked about first because it is what is actually on
+        screen, whatever it was run from: the drawer it was run from is left
+        standing underneath it for escape to come back to, and redrawing that
+        instead would take the search down without anybody asking. The archive
+        comes next, ahead of the whole library and of any one project, since
+        the drawer is on screen with neither of those behind it and either
+        would redraw it as a listing of memos that are not in it."""
+        if self.tag is not None:
             self.show_tagged(self.tag)
+        elif self.archived:
+            self.show_archived()
         elif self.everything:
             self.show_everything()
         elif self.project is not None:
@@ -2001,9 +2004,14 @@ class MemoApp(App[None]):
         and an order other than the default, whichever of those apply, joined
         in that order. A plain project's own listing needs none of them — its
         name is already the highlighted row in the sidebar — so the ordinary
-        case is the empty string, not a bug in it."""
+        case is the empty string, not a bug in it.
+
+        A search run from the drawer names the tag alone. The drawer is still
+        standing underneath, waiting for escape, but the answers on screen came
+        out of the live memos, and a subtitle claiming the archive would be
+        describing a listing that none of them are in."""
         pieces = []
-        if self.archived:
+        if self.archived and self.tag is None:
             pieces.append("archived")
         if self.everything:
             pieces.append("all projects")
@@ -2061,14 +2069,13 @@ class MemoApp(App[None]):
         subtitle says so: the list no longer matches the highlighted project,
         and leaving that unsaid makes the sidebar read as a lie.
 
-        What was being read before the search is left standing, whole library or
-        one project, because escape comes back to it. Not the archive drawer,
-        though: a search answers out of the live memos, so a subtitle still
-        claiming the drawer would be describing a listing nothing in it is
-        in."""
+        What was being read before the search is left standing — the whole
+        library, one project, or the archive drawer — because escape comes back
+        to it. A search answers out of the live memos wherever it was run from,
+        so while one is showing the subtitle names the tag alone rather than
+        also claiming a drawer that none of the answers are in."""
         self._list_memos(services.memo_rows(self.repo, tag=tag, sort=self.sort))
         self.tag = tag
-        self.archived = False
         self.sub_title = self._subtitle()
         self.refresh_bindings()
 
@@ -2499,17 +2506,20 @@ class MemoApp(App[None]):
 
     def _clear_tag(self) -> None:
         """Puts whatever the search was run from back in the list once it has
-        been read — the project, or the whole library when the search reached
-        out of that. A search run before anything was ever browsed has nothing
-        behind it, and leaves the list empty rather than inventing one. With no
-        search showing there is nothing to come back from, so the escape ladder
-        never reaches this rung in that case."""
+        been read — the project, the whole library when the search reached out
+        of that, or the archive drawer when it was run from in there. A search
+        run before anything was ever browsed has nothing behind it, and leaves
+        the list empty rather than inventing one. With no search showing there
+        is nothing to come back from, so the escape ladder never reaches this
+        rung in that case."""
         if self.tag is None:
             return
         if self.project is not None:
             self.show_project(self.project)
         elif self.everything:
             self.show_everything()
+        elif self.archived:
+            self.show_archived()
         else:
             self.query_one("#memos", DataTable).clear()
             self.tag = None

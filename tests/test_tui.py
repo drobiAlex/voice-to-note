@@ -1046,6 +1046,41 @@ async def test_the_archive_row_lists_what_has_been_put_away_and_nothing_else(rep
 
 
 @pytest.mark.asyncio
+async def test_leaving_a_tag_search_started_in_the_archive_puts_the_drawer_back(repo):
+    # escape means "back to what I was reading", and the drawer is as much a
+    # listing to come back to as a project is: dropping to an empty table would
+    # read as an archive that had emptied itself while the search was open
+    _work, home = seed(repo)
+    services.archive_memo(repo, home)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_archive(pilot)
+        await search_tag(pilot, "release")
+        # the answers come out of the live memos wherever the search was run
+        assert memo_names(pilot.app) == ["standup.m4a"]
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert memo_names(pilot.app) == ["shopping.m4a"]
+        assert pilot.app.sub_title == "archived"
+
+
+@pytest.mark.asyncio
+async def test_a_search_run_from_the_archive_names_the_tag_alone(repo):
+    # the drawer is still standing underneath, waiting for escape, but none of
+    # the answers on screen are in it
+    _work, home = seed(repo)
+    services.archive_memo(repo, home)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_archive(pilot)
+        await search_tag(pilot, "release")
+
+        assert pilot.app.sub_title == "tag: release"
+
+
+@pytest.mark.asyncio
 async def test_pressing_h_inside_the_archive_puts_the_memo_back_in_the_live_list(repo):
     # one key both ways, since a memo is in exactly one of the two states and
     # the key always means the other one
