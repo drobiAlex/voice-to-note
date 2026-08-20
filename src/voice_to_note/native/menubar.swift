@@ -78,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // silence rather than from whatever the last one ended on
             if state == .recording {
                 openToThePanel()
+                showBriefly()
             } else {
                 forgetMeters()
                 openToTheMenu()
@@ -111,6 +112,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// is also what asks about Reduce Motion again rather than once at launch.
     private var panel: NSPanel?
     private var panelView: RecordingPanelView?
+
+    /// How long a panel that opened itself stays up: long enough to read the
+    /// header and watch both meters move, and over before it is in the way of
+    /// anything. What it is for is a moment's confirmation that the tape is
+    /// rolling, not a window somebody has been handed to get rid of.
+    private static let glance: TimeInterval = 4
+
+    /// The clock on a panel nobody asked for, which exists only for as long as
+    /// such a panel does. Every way the panel closes goes through `closePanel`
+    /// and every one of them stops this, which is what keeps a glance that was
+    /// cut short from going off later underneath a panel somebody has since
+    /// opened for themselves.
+    private var glanceOver: Timer?
 
     /// The two ways a click somewhere else reaches this app while the panel is
     /// open. A borderless panel that never takes focus is never told it lost
@@ -305,12 +319,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// being made until its process is gone. The pickers follow the same rule —
     /// they are only there when idle, since choosing a different microphone
     /// halfway through a meeting would change nothing about the tape running.
+    /// The header over them says that in two words: what is set there is what
+    /// the next recording will be made of, not this one.
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         switch state {
         case .idle:
-            menu.addItem(action("Start Recording", #selector(startRecording)))
+            menu.addItem(action("Start Recording", #selector(startRecording), key: "r"))
             menu.addItem(.separator())
+            menu.addItem(.sectionHeader(title: "Next Recording"))
             menu.addItem(picker("Project", projectItems()))
             menu.addItem(picker("Record from", deviceItems(
                 devices?.outputs, "System mix (everything)",
@@ -327,17 +344,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // moment between "Starting …" being opened and the recorder saying
             // both streams are live, and a menu already on screen has to say
             // something true rather than the state it was opened in
-            menu.addItem(action("Stop Recording", #selector(stopRecording)))
+            menu.addItem(action("Stop Recording", #selector(stopRecording), key: "r"))
             menu.addItem(note(state == .recording ? "Recording \(elapsed())" : "Starting …"))
         case .processing:
             menu.addItem(note("Processing memo …"))
         }
         menu.addItem(.separator())
-        menu.addItem(action("Quit", #selector(quit)))
+        menu.addItem(action("Quit", #selector(quit), key: "q"))
     }
 
-    private func action(_ title: String, _ selector: Selector) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: selector, keyEquivalent: "")
+    /// One thing the menu offers to do. A key equivalent is shown only where it
+    /// is true: this app has no window and no main menu, so ⌘R reaches nothing
+    /// at all until the menu is open — which is also the only moment the
+    /// shortcut is on screen making the promise.
+    ///
+    /// Starting and stopping share that key rather than splitting it between
+    /// them. They are never offered together — the menu says one or the other,
+    /// whichever the recording has left possible — so ⌘R means the tape, and
+    /// what says which way it goes is the state the tape is in.
+    private func action(_ title: String, _ selector: Selector, key: String = "") -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: selector, keyEquivalent: key)
         item.target = self
         return item
     }
@@ -399,12 +425,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// every space is what puts it over a call that has gone full screen.
     private func openPanel() {
         guard state == .recording else { return }
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let view = RecordingPanelView(
             system: chosenOutput?.name ?? "system mix",
             microphone: chosenInput?.name ?? "default microphone",
-            reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            reduceMotion: reduceMotion
         )
         view.onStop(self, #selector(stopRecording))
+        // a pointer arriving inside the panel is somebody having taken it up on
+        // what it is showing, and from that moment the window is theirs to
+        // close: one that vanished out from under a pointer resting on it would
+        // be this app deciding it had been looked at for long enough
+        view.onEngage = { [weak self] in self?.stopGlancing() }
         view.show(system: systemLevels, microphone: microphoneLevels)
         view.showElapsed(elapsed())
         view.showFooter(system: systemLevels, microphone: microphoneLevels)
@@ -423,19 +455,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.panel = panel
         self.panelView = view
         place(panel)
-        panel.orderFrontRegardless()
+        arrive(panel, view, reduceMotion: reduceMotion)
         // the button stays lit for as long as the panel is up, which is the only
         // thing tying the window under the menu bar to the item it came out of
         statusItem.button?.highlight(true)
         watchForClicks()
     }
 
+    /// The panel put on screen as the status item growing downwards rather than
+    /// as a window switched on: the whole thing fades up while the view inside
+    /// it grows the last few per cent into place, on one curve so the two read
+    /// as a single movement. The window's frame never moves — it sits at the
+    /// menu bar's own level, and a panel that slid down into place would be
+    /// drawn over the menu bar for as long as it took to arrive.
+    ///
+    /// Reduce Motion gets the panel and none of this. The opening itself still
+    /// happens either way: a window saying the tape is rolling is information,
+    /// and it is only the way it arrives that is decoration.
+    private func arrive(_ panel: NSPanel, _ view: RecordingPanelView, reduceMotion: Bool) {
+        guard !reduceMotion else {
+            panel.orderFrontRegardless()
+            return
+        }
+        panel.alphaValue = 0
+        panel.orderFrontRegardless()
+        view.appear()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = RecordingPanelView.appearing
+            context.timingFunction = RecordingPanelView.easing
+            panel.animator().alphaValue = 1
+        }
+    }
+
     /// Everything the panel was, undone in the order that leaves nothing
-    /// behind: the monitors first, since a click arriving after the window is
-    /// gone would try to close it again, then the light on the button, then the
-    /// window. Safe to call on a panel that is not open, which is what lets
-    /// every way out of a recording go through it.
+    /// behind: the clock on a panel that opened itself first, then the
+    /// monitors, since a click arriving after the window is gone would try to
+    /// close it again, then the light on the button, then the window. Safe to
+    /// call on a panel that is not open, which is what lets every way out of a
+    /// recording go through it.
+    ///
+    /// This app has let go of the window before it has finished going, so that
+    /// a panel opened again during the fade is a new one built from scratch
+    /// rather than a half-faded one caught and turned round.
     private func closePanel() {
+        stopGlancing()
         if let clicksElsewhere {
             NSEvent.removeMonitor(clicksElsewhere)
         }
@@ -445,9 +508,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         clicksElsewhere = nil
         clicksHere = nil
         statusItem.button?.highlight(false)
-        panel?.orderOut(nil)
+        let closing = panel
         panel = nil
         panelView = nil
+        vanish(closing)
+    }
+
+    /// The window taken off screen, faded first wherever anything is allowed to
+    /// move. It goes in half the time it came: arriving is the part somebody
+    /// watches, and a window that takes as long to leave is a window in the way
+    /// of whatever the click that dismissed it was meant for.
+    ///
+    /// The completion handler is the only thing holding the panel by then, and
+    /// that is deliberate: it keeps the window alive exactly as long as it
+    /// takes to finish going and not an instant past it.
+    private func vanish(_ panel: NSPanel?) {
+        guard let panel else { return }
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            panel.orderOut(nil)
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = RecordingPanelView.vanishing
+            context.timingFunction = RecordingPanelView.easing
+            panel.animator().alphaValue = 0
+        } completionHandler: {
+            panel.orderOut(nil)
+        }
+    }
+
+    /// The panel opened without being asked for, at the one moment there is
+    /// something new to say: the tape has started rolling. It closes itself
+    /// again a few seconds later, so what somebody gets is a glance at both
+    /// meters moving rather than a window standing over their meeting for the
+    /// length of it.
+    ///
+    /// Nothing is opened over a panel already up. There cannot be one — the
+    /// status item owned a menu until a line ago and a menu opens no panel —
+    /// and the guard is what keeps that true of any other way into this.
+    private func showBriefly() {
+        guard panel == nil else { return }
+        openPanel()
+        guard panel != nil else { return }
+        let glance = Timer(timeInterval: AppDelegate.glance, repeats: false) { [weak self] _ in
+            self?.closePanel()
+        }
+        // the common modes, for the same reason the clock and the pulse are put
+        // in them: a menu held open somewhere else must not be the thing that
+        // leaves this window standing over a meeting
+        RunLoop.main.add(glance, forMode: .common)
+        glanceOver = glance
+    }
+
+    /// The clock on an uninvited panel stopped, however the panel got there
+    /// first — closed, engaged with, or overtaken by the recording ending.
+    /// Killing the timer rather than asking it when it fires whether the panel
+    /// it was set for is still the one on screen is the whole of what makes a
+    /// panel somebody opened for themselves safe from it.
+    private func stopGlancing() {
+        glanceOver?.invalidate()
+        glanceOver = nil
     }
 
     /// Flush under the menu bar and centred on the button it belongs to, so the
@@ -1713,6 +1833,29 @@ final class RecordingPanelView: NSVisualEffectView {
     /// having grown downwards.
     static let corner: CGFloat = 16
 
+    /// How long the island takes to arrive, how long it takes to go, and how
+    /// small it starts. Arriving is given nearly twice what going gets: the
+    /// arrival is the part somebody watches, since it is what says this window
+    /// came out of the status item above it, and a window that takes as long to
+    /// leave is a window standing in the way of whatever dismissed it.
+    ///
+    /// Four per cent is a long way short of a zoom — twelve points across a
+    /// panel this wide — because the thing being shown is where the window came
+    /// from, not that it made an entrance.
+    static let appearing: TimeInterval = 0.22
+    static let vanishing: TimeInterval = 0.12
+    private static let arrivingFrom: CGFloat = 0.96
+
+    /// The curve both movements run on. Ease-out rather than something slow at
+    /// both ends: this island stands in for a menu, and a menu is on screen the
+    /// instant it is asked for. A curve that eased in as well would spend its
+    /// first fifty milliseconds invisible, which on a panel opened by a click
+    /// is not calm but slow. So the movement happens where it is looked at and
+    /// then settles.
+    static var easing: CAMediaTimingFunction {
+        CAMediaTimingFunction(name: .easeOut)
+    }
+
     /// A row deep enough for 13 point type, and the air under it, which is
     /// wider than the air between the meters because the header is a different
     /// kind of thing from what is under it.
@@ -1755,10 +1898,26 @@ final class RecordingPanelView: NSVisualEffectView {
     private let footer = RecordingPanelView.caption("")
     private let stop = HUDStopButton(title: "Stop Recording")
 
+    /// Settled when the panel is built and then kept, because everything that
+    /// moves in here — the halo, the two waveforms, the island's own arrival —
+    /// has to agree about it for the whole life of one panel.
+    private let reduceMotion: Bool
+
+    /// The pointer having arrived inside the island. It is set from outside and
+    /// this view neither knows nor cares what it is taken to mean: what it is
+    /// for is a window that opened itself becoming a window somebody is
+    /// reading, and that is a thing about recordings rather than about drawing.
+    var onEngage: (() -> Void)?
+
+    /// Where the pointer is watched for, kept so that the one before it can be
+    /// taken off whenever AppKit asks for these to be rebuilt.
+    private var pointer: NSTrackingArea?
+
     /// The devices are taken at the start of a recording and never asked for
     /// again: they are what this recording was started with, and a device
     /// picked afterwards changes nothing about the tape running.
     init(system: String, microphone: String, reduceMotion: Bool) {
+        self.reduceMotion = reduceMotion
         dot = RecordingDotView(pulsing: !reduceMotion)
         systemCaption = RecordingPanelView.caption("System audio · \(system)")
         systemWave = WaveformView(reduceMotion: reduceMotion)
@@ -1835,6 +1994,70 @@ final class RecordingPanelView: NSVisualEffectView {
             x: RecordingPanelView.inset, y: top - height,
             width: RecordingPanelView.contentWidth, height: height
         )
+    }
+
+    /// The island grown into place rather than switched on: it starts a shade
+    /// small and pinned by its top edge, so what the eye follows is the bottom
+    /// of it coming down out of the status item it hangs from.
+    ///
+    /// Nothing is left set on the layer. The small size rides on the animation
+    /// and goes when the animation is taken off, so what the panel rests at is
+    /// the identity every measurement in here is written against — and a second
+    /// arrival starts from the same place the first one did.
+    func appear() {
+        guard !reduceMotion, let layer else { return }
+        let growing = CABasicAnimation(keyPath: "transform")
+        growing.fromValue = NSValue(caTransform3D: RecordingPanelView.scaled(
+            RecordingPanelView.arrivingFrom, about: layer.bounds
+        ))
+        growing.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+        growing.duration = RecordingPanelView.appearing
+        growing.timingFunction = RecordingPanelView.easing
+        layer.add(growing, forKey: "appear")
+    }
+
+    /// A scale held at the top edge of a layer instead of at its middle,
+    /// written as a translation either side of the scale. Moving the layer's
+    /// own `anchorPoint` says the same thing and shifts the layer half its
+    /// height the instant it is set, which then has to be taken back out by
+    /// moving `position` to match — two corrections that have to agree, where
+    /// this is one expression that cannot disagree with itself.
+    ///
+    /// This view is unflipped, so the top edge is half the height above the
+    /// middle the transform turns about.
+    private static func scaled(_ scale: CGFloat, about bounds: CGRect) -> CATransform3D {
+        var transform = CATransform3DIdentity
+        transform = CATransform3DTranslate(transform, 0, bounds.height / 2, 0)
+        transform = CATransform3DScale(transform, scale, scale, 1)
+        transform = CATransform3DTranslate(transform, 0, -bounds.height / 2, 0)
+        return transform
+    }
+
+    /// The pointer coming inside the island is a different thing from the
+    /// window merely being on screen, and this is what tells the two apart. A
+    /// tracking area rather than mouse-moved events because this panel never
+    /// becomes key and never activates the app: `.activeAlways` is what gets a
+    /// crossing reported to a window nobody has clicked into.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let pointer {
+            removeTrackingArea(pointer)
+        }
+        let area = NSTrackingArea(
+            rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self, userInfo: nil
+        )
+        addTrackingArea(area)
+        pointer = area
+    }
+
+    /// Only the arrival is passed on. Leaving again is not the opposite of
+    /// having engaged with the window: somebody who has moved a pointer across
+    /// it has still read it, and a panel that started closing itself again on
+    /// the way out would be doing the very thing being told about the arrival
+    /// is meant to prevent.
+    override func mouseEntered(with event: NSEvent) {
+        onEngage?()
     }
 
     /// Both sides, as often as readings arrive. This is the whole point of the
