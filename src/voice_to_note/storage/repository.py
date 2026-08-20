@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS memos (
   project TEXT NOT NULL DEFAULT 'other',
   notes_md TEXT,
   updated_at TEXT,
-  recorded_at TEXT
+  recorded_at TEXT,
+  archived_at TEXT
 );
 CREATE TABLE IF NOT EXISTS segments (
   id INTEGER PRIMARY KEY,
@@ -72,7 +73,7 @@ CREATE TABLE IF NOT EXISTS todos (
 
 MEMO_COLUMNS = (
     "id, filename, wav_path, duration_s, language, status, created_at, project,"
-    " updated_at, recorded_at"
+    " updated_at, recorded_at, archived_at"
 )
 
 
@@ -115,8 +116,9 @@ class Repository:
         made before transcript repair, `project` for one made before memos were
         grouped, `notes_md` for one made before notes could be edited,
         `updated_at` for one made before memos recorded when they last changed,
-        and `recorded_at` for one made before an import could be recognised as a
-        recording already stored."""
+        `recorded_at` for one made before an import could be recognised as a
+        recording already stored, and `archived_at` for one made before a memo
+        could be put away without being deleted."""
         cols = {r["name"] for r in self.con.execute("PRAGMA table_info(speakers)")}
         if "embedding" not in cols:
             self.con.execute("ALTER TABLE speakers ADD COLUMN embedding BLOB")
@@ -134,6 +136,8 @@ class Repository:
             self.con.execute("ALTER TABLE memos ADD COLUMN updated_at TEXT")
         if "recorded_at" not in cols:
             self.con.execute("ALTER TABLE memos ADD COLUMN recorded_at TEXT")
+        if "archived_at" not in cols:
+            self.con.execute("ALTER TABLE memos ADD COLUMN archived_at TEXT")
 
     def close(self) -> None:
         """Closes the memo database."""
@@ -200,12 +204,20 @@ class Repository:
         return memo_id
 
     def _narrowed(
-        self, project: str | None, tag: str | None, order: str = "created"
+        self,
+        project: str | None,
+        tag: str | None,
+        order: str = "created",
+        archived: bool = False,
     ) -> tuple[str, tuple]:
         """How a listing is narrowed and ordered, as SQL and the values it
         reads: the plain list and the one carrying each memo's state are
         narrowed and ordered the same ways, and a filter or an order written
         twice is one that comes to differ.
+
+        Every listing is either the live one or the archive drawer, never the
+        two merged: a memo put away is meant to be gone from the list, and a
+        view showing both would leave the archiving no visible effect at all.
 
         A memo nobody has touched carries no updated_at at all, so ordering by
         it falls back to created_at through COALESCE — the same rule
@@ -219,7 +231,7 @@ class Repository:
         order is a name only this app's own code passes, never one a person
         types, so a value neither order recognises is a caller's bug and
         raises rather than silently falling back to one of the two it does."""
-        where = []
+        where = ["archived_at IS NOT NULL" if archived else "archived_at IS NULL"]
         params: list = []
         if project is not None:
             where.append("project=?")
@@ -233,7 +245,8 @@ class Repository:
                 " JOIN json_each(e.json, '$.tags') t WHERE lower(t.value)=lower(?))"
             )
             params.append(tag)
-        clause = " WHERE " + " AND ".join(where) if where else ""
+        # always at least the archived clause, so there is always a WHERE
+        clause = " WHERE " + " AND ".join(where)
         if order == "created":
             order_sql = "id DESC"
         elif order == "updated":
@@ -243,20 +256,31 @@ class Repository:
         return clause + " ORDER BY " + order_sql, tuple(params)
 
     def memos(
-        self, project: str | None = None, tag: str | None = None, order: str = "created"
+        self,
+        project: str | None = None,
+        tag: str | None = None,
+        order: str = "created",
+        *,
+        archived: bool = False,
     ) -> list[Memo]:
         """Every memo, newest first whichever order asked for, narrowed to a
         project, to a tag its notes carry, or to both at once. Tags are matched
         whole and whatever case they were written in; a memo nobody has
-        extracted has no tags to be found by."""
-        tail, params = self._narrowed(project, tag, order)
+        extracted has no tags to be found by. Archived memos answer only when
+        the archive is what was asked for."""
+        tail, params = self._narrowed(project, tag, order, archived)
         return [
             _memo(r)
             for r in self.con.execute(f"SELECT {MEMO_COLUMNS} FROM memos" + tail, params)
         ]
 
     def memo_listings(
-        self, project: str | None = None, tag: str | None = None, order: str = "created"
+        self,
+        project: str | None = None,
+        tag: str | None = None,
+        order: str = "created",
+        *,
+        archived: bool = False,
     ) -> list[MemoListing]:
         """Every memo a list shows, narrowed and ordered the same ways as
         `memos`, each one carrying how many voices are in it, how much of what
@@ -267,7 +291,7 @@ class Repository:
         list at once and redraws it after every job, so counting each row's
         speakers, to-dos and repairs on its own would cost a query per row on
         screen."""
-        tail, params = self._narrowed(project, tag, order)
+        tail, params = self._narrowed(project, tag, order, archived)
         rows = self.con.execute(
             f"SELECT {MEMO_COLUMNS},"
             " (SELECT count(*) FROM speakers s WHERE s.memo_id=memos.id) AS speakers,"
@@ -295,11 +319,15 @@ class Repository:
 
     def projects(self) -> list[tuple[str, int]]:
         """Every project that has memos in it and how many, for a sidebar to
-        show without a second query per project."""
+        show without a second query per project. Archived memos are counted in
+        no project: what the sidebar promises is what opening the project
+        shows, and a count including memos the listing hides would send someone
+        to a shorter list than the number beside its name."""
         return [
             (r["project"], r["n"])
             for r in self.con.execute(
-                "SELECT project, count(*) AS n FROM memos GROUP BY project ORDER BY project"
+                "SELECT project, count(*) AS n FROM memos WHERE archived_at IS NULL"
+                " GROUP BY project ORDER BY project"
             )
         ]
 
@@ -380,6 +408,36 @@ class Repository:
             (recorded_at,),
         ).fetchone()
         return _memo(row) if row else None
+
+    def set_archived(self, memo_id: int, archived: bool) -> bool:
+        """Puts a memo away or takes it back out, reporting whether that id was
+        there to move. When rather than whether: the stamp costs what a flag
+        would and says how long ago somebody decided they were done with this,
+        which reads beside `updated_at` and `recorded_at` as the same kind of
+        fact. Nothing under the memo is rewritten, so what comes back out is
+        exactly what went in."""
+        row = self.con.execute("SELECT 1 FROM memos WHERE id=?", (memo_id,)).fetchone()
+        if row is None:
+            return False
+        with self.con:
+            self.con.execute(
+                "UPDATE memos SET archived_at=CASE ? WHEN 1 THEN datetime('now') END"
+                " WHERE id=?",
+                (int(archived), memo_id),
+            )
+            # a list ordered by update has to show this move like any other
+            self._touch(memo_id)
+        return True
+
+    def archived_count(self) -> int:
+        """How many memos are in the archive. A sidebar shows the drawer with
+        its size beside it whether or not anybody opens it, and that is one
+        count rather than a listing nothing on screen would read."""
+        return int(
+            self.con.execute(
+                "SELECT count(*) FROM memos WHERE archived_at IS NOT NULL"
+            ).fetchone()[0]
+        )
 
     def delete_memo(self, memo_id: int) -> None:
         """Removes a memo and everything stored under it. One statement is the
@@ -637,7 +695,18 @@ class Repository:
         asks for the finished ones too, and narrowed to one project or to a
         single memo's own commitments when asked. Grouped by the memo they came
         out of and in the order they were found in it, which is the order they
-        were said in."""
+        were said in.
+
+        An archived memo's commitments leave the board, which is a listing and
+        hides archived work like every other. Asking for one memo's own to-dos
+        is direct access instead, like opening its notes: a memo somebody went
+        to on purpose showing an empty task list would read as a memo that
+        committed to nothing.
+
+        A to-do has no archived state of its own, deliberately: archiving never
+        rewrites whether a task is open or done, so a memo taken back out of the
+        archive brings its list back exactly as it stood, and the two tables
+        have nothing to drift apart about."""
         where = ["t.status='open'"] if not include_done else []
         params: list = []
         if project is not None:
@@ -646,6 +715,8 @@ class Repository:
         if memo_id is not None:
             where.append("t.memo_id=?")
             params.append(memo_id)
+        else:
+            where.append("m.archived_at IS NULL")
         clause = " WHERE " + " AND ".join(where) if where else ""
         return [
             Todo(
@@ -680,4 +751,5 @@ def _memo(row: sqlite3.Row) -> Memo:
         row["project"],
         row["updated_at"],
         row["recorded_at"],
+        row["archived_at"],
     )

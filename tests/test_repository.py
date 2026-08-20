@@ -81,6 +81,17 @@ CREATE TABLE extractions (
 """
 
 
+PRE_ARCHIVE_SCHEMA = """
+CREATE TABLE memos (
+  id INTEGER PRIMARY KEY, filename TEXT NOT NULL, wav_path TEXT NOT NULL,
+  duration_s REAL, language TEXT, status TEXT NOT NULL DEFAULT 'new',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  project TEXT NOT NULL DEFAULT 'other', notes_md TEXT, updated_at TEXT,
+  recorded_at TEXT
+);
+"""
+
+
 def make_memo(repo, *, segments=(), speakers=(), filename="memo.m4a", **kwargs):
     return repo.create_memo(
         filename=filename,
@@ -904,3 +915,146 @@ def test_an_order_the_app_does_not_recognise_is_refused(repo):
     # rather than guessing which of the two known orders was meant
     with pytest.raises(ValueError):
         repo.memos(order="bogus")
+
+
+# --- putting a memo away without throwing it away -------------------------
+
+
+def test_archiving_a_memo_takes_it_out_of_both_listings(repo):
+    put_away = make_memo(repo, filename="old.m4a")
+    kept = make_memo(repo, filename="current.m4a")
+
+    repo.set_archived(put_away, True)
+
+    assert [m.id for m in repo.memos()] == [kept]
+    assert [listing.memo.id for listing in repo.memo_listings()] == [kept]
+
+
+def test_the_drawer_holds_the_archived_memos_and_only_those(repo):
+    put_away = make_memo(repo, filename="old.m4a")
+    make_memo(repo, filename="current.m4a")
+
+    repo.set_archived(put_away, True)
+
+    assert [m.id for m in repo.memos(archived=True)] == [put_away]
+    assert [
+        listing.memo.id for listing in repo.memo_listings(archived=True)
+    ] == [put_away]
+
+
+def test_taking_a_memo_back_out_of_the_archive_puts_it_back_in_the_list(repo):
+    memo_id = make_memo(repo)
+    repo.set_archived(memo_id, True)
+
+    repo.set_archived(memo_id, False)
+
+    assert [m.id for m in repo.memos()] == [memo_id]
+    assert repo.memos(archived=True) == []
+    assert repo.memo(memo_id).archived_at is None
+
+
+def test_an_archived_memo_is_still_there_to_open_by_id(repo):
+    # hidden from the lists is the whole of it: nothing was deleted, and a
+    # link or a stored id still has to reach the memo
+    memo_id = make_memo(repo)
+
+    repo.set_archived(memo_id, True)
+
+    memo = repo.memo(memo_id)
+    assert memo.id == memo_id
+    assert memo.archived_at is not None
+
+
+def test_an_archived_memo_is_still_recognised_when_its_recording_comes_again(repo):
+    # this lookup is import dedup: were it to stop seeing archived memos, a
+    # recording somebody archived would be transcribed and stored a second time
+    memo_id = make_memo(repo, filename="standup.m4a", recorded_at="2026-08-17T06:01:22Z")
+    repo.set_archived(memo_id, True)
+
+    found = repo.memo_by_recorded_at("2026-08-17T06:01:22Z")
+
+    assert found.id == memo_id
+
+
+def test_the_project_counts_leave_out_what_has_been_archived(repo):
+    # the sidebar must not promise memos that clicking the project cannot show
+    make_memo(repo, filename="a.m4a", project="work")
+    put_away = make_memo(repo, filename="b.m4a", project="work")
+
+    repo.set_archived(put_away, True)
+
+    assert repo.projects() == [("work", 1)]
+
+
+def test_the_archive_can_be_counted_without_listing_what_is_in_it(repo):
+    make_memo(repo, filename="a.m4a")
+    put_away = make_memo(repo, filename="b.m4a")
+
+    assert repo.archived_count() == 0
+    repo.set_archived(put_away, True)
+    assert repo.archived_count() == 1
+
+
+def test_an_archived_memos_to_dos_leave_the_board_but_its_own_list_still_answers(repo):
+    # the board is a listing and hides archived work; asking one memo for its
+    # own commitments is direct access, and a memo opened on purpose showing an
+    # empty task list would read as a memo that committed to nothing
+    standup = make_memo(repo)
+    review = make_memo(repo, filename="review.m4a")
+    repo.sync_todos(standup, [action("Cut the release")])
+    repo.sync_todos(review, [action("Book the room")])
+
+    repo.set_archived(standup, True)
+
+    assert [t.memo_id for t in repo.todos()] == [review]
+    assert [t.text for t in repo.todos(memo_id=standup)] == ["Cut the release"]
+
+
+def test_taking_a_memo_out_of_the_archive_restores_its_to_dos_as_they_stood(repo):
+    # archiving never rewrites a to-do's own state, so there is nothing to put
+    # back wrongly: what was checked off is still checked off
+    memo_id = make_memo(repo)
+    repo.sync_todos(memo_id, [action("Cut the release"), action("Book the room")])
+    released, booking = repo.todos()
+    repo.set_todo_status(released.id, "done")
+
+    repo.set_archived(memo_id, True)
+    repo.set_archived(memo_id, False)
+
+    assert [(t.id, t.status) for t in repo.todos(include_done=True)] == [
+        (released.id, "done"),
+        (booking.id, "open"),
+    ]
+
+
+def test_archiving_a_memo_marks_when_it_changed(repo):
+    # a list ordered by update has to show the move the moment it happened
+    memo_id = make_memo(repo)
+
+    repo.set_archived(memo_id, True)
+
+    assert repo.memo(memo_id).updated_at is not None
+
+
+def test_archiving_reports_a_memo_that_was_never_there(repo):
+    assert repo.set_archived(999, True) is False
+
+
+def test_a_database_from_before_archiving_gains_the_column(tmp_path):
+    path = tmp_path / "legacy.db"
+    con = sqlite3.connect(path)
+    con.executescript(PRE_ARCHIVE_SCHEMA)
+    con.execute("INSERT INTO memos (filename, wav_path) VALUES ('old.m4a', '/tmp/old.wav')")
+    con.commit()
+    con.close()
+
+    repo = Repository(path)
+    # the memos that were already there were never put away, so every one of
+    # them belongs in the list as it opens
+    assert repo.memo(1).archived_at is None
+    assert [m.id for m in repo.memos()] == [1]
+
+    repo.set_archived(1, True)
+    assert repo.memos() == []
+    assert [m.id for m in repo.memos(archived=True)] == [1]
+    repo.close()

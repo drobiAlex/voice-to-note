@@ -97,6 +97,9 @@ class Memo:
     # offered a second time is recognised as one already here. Empty for a memo
     # stored before this was kept, and for a source that never said
     recorded_at: str | None = None
+    # when somebody put this memo away: hidden from the listings, still there to
+    # open. Empty is the live memo, and nothing here is ever a deletion
+    archived_at: str | None = None
 
 
 @dataclass(frozen=True)
