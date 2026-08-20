@@ -123,6 +123,29 @@ def test_listing_nothing_says_so_without_polluting_stdout(repo, monkeypatch, cap
     assert captured.err == "no memos yet\n"
 
 
+def test_listing_with_archived_shows_only_what_was_put_away(repo, monkeypatch, capsys):
+    add_memo(repo, filename="live.m4a")
+    put_away = add_memo(repo, filename="old.m4a")
+    services.archive_memo(repo, put_away)
+
+    run(monkeypatch, repo, "list", "--archived")
+
+    out = capsys.readouterr().out
+    assert "old.m4a" in out
+    assert "live.m4a" not in out
+
+
+def test_an_empty_archive_is_not_reported_as_an_empty_memo_list(repo, monkeypatch, capsys):
+    add_memo(repo)
+
+    run(monkeypatch, repo, "list", "--archived")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err != "no memos yet\n"
+    assert "archive" in captured.err.lower()
+
+
 def test_showing_a_memo_keeps_the_heading_off_stdout(repo, monkeypatch, capsys):
     # the heading is progress information; stdout stays pipeable
     memo_id = add_memo(
@@ -136,6 +159,20 @@ def test_showing_a_memo_keeps_the_heading_off_stdout(repo, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert captured.out == "00:00  Alice: Hello there.\n"
     assert captured.err == f"memo {memo_id} — standup.m4a (transcribed)\n\n"
+
+
+def test_showing_an_archived_memo_still_prints_its_transcript(repo, monkeypatch, capsys):
+    # archiving hides a memo from listings only; opening it by id still works
+    memo_id = add_memo(
+        repo,
+        segments=[Segment(0, 1500, "Hello there.", speaker="S1")],
+        speakers=[Speaker("S1", "Alice")],
+    )
+    services.archive_memo(repo, memo_id)
+
+    run(monkeypatch, repo, "show", str(memo_id))
+
+    assert capsys.readouterr().out == "00:00  Alice: Hello there.\n"
 
 
 def test_showing_a_memo_that_was_never_stored_prints_no_json(repo, monkeypatch, capsys):
@@ -155,7 +192,7 @@ def test_listing_prints_exactly_what_services_formatted(monkeypatch, capsys):
     monkeypatch.setattr(
         services,
         "memos_text",
-        lambda _repo, project=None, tag=None, sort="created": "  12  a listing line",
+        lambda _repo, project=None, tag=None, sort="created", archived=False: "  12  a listing line",
     )
 
     run(monkeypatch, StubRepo(), "list")
@@ -337,6 +374,30 @@ def test_the_notes_command_still_prints_the_extraction_by_default(monkeypatch, c
     run(monkeypatch, StubRepo(), "notes", "3")
 
     assert capsys.readouterr().out == "the notes\n"
+
+
+def test_the_notes_for_an_archived_memo_still_print(repo, monkeypatch, capsys):
+    # archiving hides a memo from listings only; its notes still read on
+    memo_id = add_memo(repo, segments=[Segment(0, 1000, "Ship it", speaker="S1")])
+    repo.save_extraction(
+        memo_id,
+        "claude",
+        {
+            "title": "Sprint sync",
+            "summary": "We discussed the release.",
+            "action_items": [],
+            "decisions": [],
+            "key_insights": [],
+            "open_questions": [],
+            "dates": [],
+            "tags": [],
+        },
+    )
+    services.archive_memo(repo, memo_id)
+
+    run(monkeypatch, repo, "notes", str(memo_id))
+
+    assert "Sprint sync" in capsys.readouterr().out
 
 
 # --- projects ------------------------------------------------------------
@@ -542,7 +603,7 @@ def test_a_recording_nothing_here_shares_a_moment_with_is_never_asked_about(
 def test_listing_can_be_narrowed_to_one_project(monkeypatch, capsys):
     seen: dict = {}
 
-    def memos_text(_repo, project=None, tag=None, sort="created"):
+    def memos_text(_repo, project=None, tag=None, sort="created", archived=False):
         seen["project"] = project
         return "   1  2026-01-01  1s  en  transcribed  work     a.m4a"
 
@@ -557,7 +618,7 @@ def test_listing_can_be_narrowed_to_one_project(monkeypatch, capsys):
 def test_listing_can_be_narrowed_to_one_tag(monkeypatch, capsys):
     seen: dict = {}
 
-    def memos_text(_repo, project=None, tag=None, sort="created"):
+    def memos_text(_repo, project=None, tag=None, sort="created", archived=False):
         seen["project"], seen["tag"] = project, tag
         return "   1  2026-01-01  1s  en  transcribed  work     a.m4a"
 
@@ -573,7 +634,7 @@ def test_a_tag_and_a_project_narrow_the_listing_together(monkeypatch, capsys):
     # both asked for means both applied, not whichever the code checked first
     seen: dict = {}
 
-    def memos_text(_repo, project=None, tag=None, sort="created"):
+    def memos_text(_repo, project=None, tag=None, sort="created", archived=False):
         seen["project"], seen["tag"] = project, tag
         return ""
 
@@ -587,7 +648,7 @@ def test_a_tag_and_a_project_narrow_the_listing_together(monkeypatch, capsys):
 def test_listing_defaults_to_newest_created_and_can_be_sorted_by_update(monkeypatch, capsys):
     seen: dict = {}
 
-    def memos_text(_repo, project=None, tag=None, sort="created"):
+    def memos_text(_repo, project=None, tag=None, sort="created", archived=False):
         seen["sort"] = sort
         return "   1  2026-01-01  1s  en  transcribed  work     a.m4a"
 
@@ -602,7 +663,7 @@ def test_listing_defaults_to_newest_created_and_can_be_sorted_by_update(monkeypa
 
 
 def test_a_tag_of_nothing_ends_the_listing_with_a_message(monkeypatch, capsys):
-    def memos_text(_repo, project=None, tag=None, sort="created"):
+    def memos_text(_repo, project=None, tag=None, sort="created", archived=False):
         raise services.InvalidInput("a tag needs some text")
 
     monkeypatch.setattr(services, "memos_text", memos_text)
@@ -660,6 +721,42 @@ def test_a_delete_answered_no_keeps_the_memo(monkeypatch, capsys):
     run(monkeypatch, StubRepo(), "delete", "3")
 
     assert capsys.readouterr().err == "delete memo 3 — standup.m4a? [y/N] kept\n"
+
+
+def test_archiving_a_memo_says_what_moved_without_asking_first(monkeypatch, capsys):
+    seen: dict = {}
+
+    def archive_memo(_repo, memo_id):
+        seen["memo_id"] = memo_id
+        return "standup.m4a"
+
+    monkeypatch.setattr(services, "archive_memo", archive_memo)
+    monkeypatch.setattr(
+        "builtins.input", lambda: pytest.fail("archiving deletes nothing and must not ask")
+    )
+
+    run(monkeypatch, StubRepo(), "archive", "3")
+
+    assert seen == {"memo_id": 3}
+    assert capsys.readouterr().err == "memo 3 archived — standup.m4a\n"
+
+
+def test_unarchiving_a_memo_says_what_came_back_without_asking_first(monkeypatch, capsys):
+    seen: dict = {}
+
+    def unarchive_memo(_repo, memo_id):
+        seen["memo_id"] = memo_id
+        return "standup.m4a"
+
+    monkeypatch.setattr(services, "unarchive_memo", unarchive_memo)
+    monkeypatch.setattr(
+        "builtins.input", lambda: pytest.fail("unarchiving deletes nothing and must not ask")
+    )
+
+    run(monkeypatch, StubRepo(), "unarchive", "3")
+
+    assert seen == {"memo_id": 3}
+    assert capsys.readouterr().err == "memo 3 unarchived — standup.m4a\n"
 
 
 def test_titling_a_memo_says_what_it_is_now_called(monkeypatch, capsys):

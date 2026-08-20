@@ -1034,6 +1034,129 @@ def test_deleting_a_memo_that_was_never_stored_is_refused(repo):
         services.delete_memo(repo, 999)
 
 
+# --- archiving -------------------------------------------------------------
+
+
+def test_the_memo_records_can_be_narrowed_to_the_archive_drawer(repo, wav):
+    live = add_project_memo(repo, wav, "work.m4a", "work")
+    put_away = add_project_memo(repo, wav, "old.m4a", "work")
+    services.archive_memo(repo, put_away)
+
+    assert [m.id for m in services.memos(repo)] == [live]
+    assert [m.id for m in services.memos(repo, archived=True)] == [put_away]
+
+
+def test_the_memo_table_can_be_narrowed_to_the_archive_drawer(repo, wav):
+    live = add_project_memo(repo, wav, "work.m4a", "work")
+    put_away = add_project_memo(repo, wav, "old.m4a", "work")
+    services.archive_memo(repo, put_away)
+
+    assert [r.id for r in services.memo_rows(repo)] == [live]
+    assert [r.id for r in services.memo_rows(repo, archived=True)] == [put_away]
+
+
+def test_the_printed_listing_can_be_narrowed_to_the_archive_drawer(repo, wav):
+    add_project_memo(repo, wav, "work.m4a", "work")
+    put_away = add_project_memo(repo, wav, "old.m4a", "work")
+    services.archive_memo(repo, put_away)
+
+    live_listing = services.memos_text(repo)
+    drawer = services.memos_text(repo, archived=True)
+
+    assert "old.m4a" not in live_listing
+    assert "old.m4a" in drawer
+    assert "work.m4a" not in drawer
+
+
+def test_the_json_listing_can_be_narrowed_to_the_archive_drawer(repo, wav):
+    add_project_memo(repo, wav, "work.m4a", "work")
+    put_away = add_project_memo(repo, wav, "old.m4a", "work")
+    services.archive_memo(repo, put_away)
+
+    listed = json.loads(services.memos_json(repo, archived=True))
+
+    assert [m["filename"] for m in listed] == ["old.m4a"]
+
+
+def test_archiving_a_memo_reports_its_filename_and_moves_it_out_of_the_live_list(repo, wav):
+    memo_id = add_memo(repo, wav, filename="standup.m4a")
+
+    assert services.archive_memo(repo, memo_id) == "standup.m4a"
+
+    assert [m.id for m in services.memos(repo)] == []
+    assert [m.id for m in services.memos(repo, archived=True)] == [memo_id]
+
+
+def test_unarchiving_a_memo_reports_its_filename_and_restores_it_to_the_live_list(repo, wav):
+    memo_id = add_memo(repo, wav, filename="standup.m4a")
+    services.archive_memo(repo, memo_id)
+
+    assert services.unarchive_memo(repo, memo_id) == "standup.m4a"
+
+    assert [m.id for m in services.memos(repo)] == [memo_id]
+    assert [m.id for m in services.memos(repo, archived=True)] == []
+
+
+def test_archiving_a_memo_that_was_never_stored_is_refused(repo):
+    with pytest.raises(services.NotFound):
+        services.archive_memo(repo, 999)
+
+
+def test_unarchiving_a_memo_that_was_never_stored_is_refused(repo):
+    with pytest.raises(services.NotFound):
+        services.unarchive_memo(repo, 999)
+
+
+def test_archiving_a_memo_already_in_the_archive_is_not_an_error(repo, wav):
+    # a repeated keypress is not a mistake to refuse: the request and the
+    # result already agree
+    memo_id = add_memo(repo, wav, filename="standup.m4a")
+    services.archive_memo(repo, memo_id)
+
+    assert services.archive_memo(repo, memo_id) == "standup.m4a"
+    assert [m.id for m in services.memos(repo, archived=True)] == [memo_id]
+
+
+def test_unarchiving_a_memo_already_out_of_the_archive_is_not_an_error(repo, wav):
+    memo_id = add_memo(repo, wav, filename="standup.m4a")
+
+    assert services.unarchive_memo(repo, memo_id) == "standup.m4a"
+    assert [m.id for m in services.memos(repo)] == [memo_id]
+
+
+def test_the_archive_count_is_available_to_a_screen(repo, wav):
+    add_memo(repo, wav)
+    put_away = add_memo(repo, wav)
+    services.archive_memo(repo, put_away)
+
+    assert services.archived_count(repo) == 1
+
+
+def test_archiving_a_memo_takes_its_to_dos_off_the_board(repo, wav):
+    # the board is a listing and hides archived work like any other memo;
+    # todos_text is what shows this, since it is unaware of any memo it lists
+    # having gone into the drawer
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Ship it", speaker="S1")])
+    repo.sync_todos(memo_id, [{"task": "Cut the release", "owner": None, "deadline": None}])
+    assert "Cut the release" in services.todos_text(repo)
+
+    services.archive_memo(repo, memo_id)
+
+    assert "Cut the release" not in services.todos_text(repo)
+
+
+def test_the_info_says_whether_a_memo_is_archived(repo, wav):
+    memo_id = add_memo(repo, wav, filename="standup.m4a")
+
+    assert services.memo_info(repo, memo_id).archived is False
+    assert "archived: no" in services.memo_info_text(repo, memo_id)
+
+    services.archive_memo(repo, memo_id)
+
+    assert services.memo_info(repo, memo_id).archived is True
+    assert "archived: yes" in services.memo_info_text(repo, memo_id)
+
+
 def test_a_project_name_is_tidied_before_it_is_stored(repo, wav):
     memo_id = add_project_memo(repo, wav, "work.m4a", "other")
 

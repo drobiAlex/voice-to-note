@@ -910,17 +910,18 @@ def meter_line(system_db: float, mic_db: float, width: int = 12) -> str:
 
 def memos_text(
     repo: Repository, project: str | None = None, tag: str | None = None,
-    sort: str = "created",
+    sort: str = "created", *, archived: bool = False,
 ) -> str:
     """The memo list as a person reads it, newest first — by creation or by
     last update — and column-aligned so the ids, dates and states line up down
     the screen. One project or one tag at a time when asked for, and both
     together when both are. Empty when nothing is stored, and equally empty
-    when nothing matches."""
+    when nothing matches. Shows the live list, or the archive drawer when
+    archived asks for it — the two never appear merged into one listing."""
     return "\n".join(
         f"{m.id:>4}  {m.created_at}  {_duration(m.duration_s):>10}  {m.language or '?':<3}"
         f"  {m.status:<12} {m.project:<8} {m.filename}"
-        for m in memos(repo, project, tag, sort)
+        for m in memos(repo, project, tag, sort, archived=archived)
     )
 
 
@@ -1234,12 +1235,14 @@ def data_version(repo: Repository) -> int:
 
 def memos(
     repo: Repository, project: str | None = None, tag: str | None = None,
-    sort: str = "created",
+    sort: str = "created", *, archived: bool = False,
 ) -> list[Memo]:
     """The stored memos as records, for a screen that lays out its own rows.
     Every listing goes through here, so a tag and a sort choice are each tidied
-    and refused in one place however either was asked for."""
-    return repo.memos(project, _tag(tag), order=_sort(sort))
+    and refused in one place however either was asked for. Shows the live
+    list, or the archive drawer when archived asks for it — the two never
+    appear merged into one listing."""
+    return repo.memos(project, _tag(tag), order=_sort(sort), archived=archived)
 
 
 # the two ways a memo listing can be ordered, both newest first: when a memo
@@ -1299,14 +1302,15 @@ def _status(status: str, refined: bool, edited: bool) -> str:
 
 def memo_rows(
     repo: Repository, project: str | None = None, tag: str | None = None,
-    sort: str = "created",
+    sort: str = "created", *, archived: bool = False,
 ) -> list[MemoRow]:
     """The memo list as a table lays it out, narrowed and ordered as the caller
     asked: a row per memo, saying the same about each one as its info would,
     and gathered in a single query so that a list of a hundred memos costs
     what a list of one does. A memo nobody has changed reads as updated when
     it was made, exactly as the info does, since a column has to say
-    something."""
+    something. Shows the live list, or the archive drawer when archived asks
+    for it — the two never appear merged into one listing."""
     return [
         MemoRow(
             id=listed.memo.id,
@@ -1319,18 +1323,20 @@ def memo_rows(
             updated=listed.memo.updated_at or listed.memo.created_at,
             project=listed.memo.project,
         )
-        for listed in repo.memo_listings(project, _tag(tag), order=_sort(sort))
+        for listed in repo.memo_listings(project, _tag(tag), order=_sort(sort), archived=archived)
     ]
 
 
 def memos_json(
     repo: Repository, project: str | None = None, tag: str | None = None,
-    sort: str = "created",
+    sort: str = "created", *, archived: bool = False,
 ) -> str:
     """The memo list as a script reads it, narrowed and ordered as the caller
-    asked."""
+    asked. Shows the live list, or the archive drawer when archived asks for
+    it — the two never appear merged into one listing."""
     return json.dumps(
-        [asdict(m) for m in memos(repo, project, tag, sort)], ensure_ascii=False
+        [asdict(m) for m in memos(repo, project, tag, sort, archived=archived)],
+        ensure_ascii=False,
     )
 
 
@@ -1403,6 +1409,37 @@ def delete_memo(repo: Repository, memo_id: int) -> str:
     return memo.filename
 
 
+def archive_memo(repo: Repository, memo_id: int) -> str:
+    """Puts a memo away, reporting what it was called so the caller can say
+    what moved. Every byte of it stays exactly where it was — the transcript,
+    the notes, the speakers, the to-dos — only the listings stop showing it;
+    where delete_memo throws a memo away for good, this only hides it.
+
+    Archiving a memo that is already in the archive is not an error: the
+    request and the result already agree, and refusing a repeated keypress
+    would turn tidying a list into a failure."""
+    memo = require_memo(repo, memo_id)
+    repo.set_archived(memo_id, True)
+    return memo.filename
+
+
+def unarchive_memo(repo: Repository, memo_id: int) -> str:
+    """Takes a memo back out of the archive and into the live list, reporting
+    what it was called. Nothing under it was rewritten while it sat there, so
+    what comes back is exactly what went in.
+
+    Taking a memo out of an archive it was never in is not an error either,
+    for the same reason: the request and the result already agree."""
+    memo = require_memo(repo, memo_id)
+    repo.set_archived(memo_id, False)
+    return memo.filename
+
+
+def archived_count(repo: Repository) -> int:
+    """How many memos are tucked away in the archive, for a sidebar to show."""
+    return repo.archived_count()
+
+
 @dataclass(frozen=True)
 class MemoInfo:
     """What state one memo is in, for a screen or a command line to lay out."""
@@ -1417,6 +1454,7 @@ class MemoInfo:
     speakers: int
     refined: bool
     edited: bool
+    archived: bool
 
 
 def memo_info(repo: Repository, memo_id: int) -> MemoInfo:
@@ -1437,6 +1475,7 @@ def memo_info(repo: Repository, memo_id: int) -> MemoInfo:
         speakers=len(repo.display_names(memo_id)),
         refined=any(s.refined_text is not None for s in repo.segments(memo_id)),
         edited=bool(repo.notes_md(memo_id)),
+        archived=bool(memo.archived_at),
     )
 
 
@@ -1461,6 +1500,7 @@ def memo_info_text(repo: Repository, memo_id: int) -> str:
         ("speakers", str(info.speakers)),
         ("repaired", _yes_no(info.refined)),
         ("edited", _yes_no(info.edited)),
+        ("archived", _yes_no(info.archived)),
     ]
     return "\n".join(f"{label + ':':<10}{value}" for label, value in rows)
 

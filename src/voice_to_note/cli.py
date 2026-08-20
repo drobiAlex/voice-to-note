@@ -262,20 +262,25 @@ def cmd_projects(args: argparse.Namespace) -> None:
 
 
 def cmd_list(args: argparse.Namespace) -> None:
-    """Shows what has been processed so far."""
+    """Shows what has been processed so far, or just the archive drawer when
+    asked for it — the two views never appear merged into one listing."""
     with Repository() as repo:
         if args.json:
             print(
                 services.memos_json(
-                    repo, project=args.project, tag=args.tag, sort=args.sort
+                    repo, project=args.project, tag=args.tag, sort=args.sort,
+                    archived=args.archived,
                 )
             )
             return
         listing = services.memos_text(
-            repo, project=args.project, tag=args.tag, sort=args.sort
+            repo, project=args.project, tag=args.tag, sort=args.sort,
+            archived=args.archived,
         )
         if listing:
             print(listing)
+        elif args.archived:
+            status("the archive is empty")
         else:
             status("no memos yet")
 
@@ -340,6 +345,23 @@ def cmd_delete(args: argparse.Namespace) -> None:
                 return
         filename = services.delete_memo(repo, args.id)
     status(f"deleted memo {args.id} — {filename}")
+
+
+def cmd_archive(args: argparse.Namespace) -> None:
+    """Puts a memo away without deleting anything, so nothing here asks first
+    — the same reasoning as emptying a project: cmd_delete is the one command
+    that throws something away for good, and that is the one that has to ask."""
+    with Repository() as repo:
+        filename = services.archive_memo(repo, args.id)
+    status(f"memo {args.id} archived — {filename}")
+
+
+def cmd_unarchive(args: argparse.Namespace) -> None:
+    """Takes a memo back out of the archive, undoing cmd_archive. Nothing was
+    thrown away going in, so nothing needs confirming on the way back out."""
+    with Repository() as repo:
+        filename = services.unarchive_memo(repo, args.id)
+    status(f"memo {args.id} unarchived — {filename}")
 
 
 def cmd_info(args: argparse.Namespace) -> None:
@@ -597,6 +619,11 @@ def main() -> None:
         default="created",
         help="newest first by creation (default) or by last update",
     )
+    sp.add_argument(
+        "--archived",
+        action="store_true",
+        help="show only the archive drawer, not the live list",
+    )
     sp.set_defaults(fn=cmd_list)
 
     sp = sub.add_parser("todos", help="list what the memos committed to")
@@ -632,6 +659,14 @@ def main() -> None:
     sp.add_argument("id", type=int)
     sp.add_argument("--yes", action="store_true", help="delete without asking first")
     sp.set_defaults(fn=cmd_delete)
+
+    sp = sub.add_parser("archive", help="put a memo away without deleting it: archive <id>")
+    sp.add_argument("id", type=int)
+    sp.set_defaults(fn=cmd_archive)
+
+    sp = sub.add_parser("unarchive", help="take a memo back out of the archive: unarchive <id>")
+    sp.add_argument("id", type=int)
+    sp.set_defaults(fn=cmd_unarchive)
 
     sp = sub.add_parser("info", help="show what state a memo is in")
     sp.add_argument("id", type=int)
