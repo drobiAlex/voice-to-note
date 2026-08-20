@@ -234,11 +234,21 @@ def cmd_menubar(args: argparse.Namespace) -> None:
     open for the length of a meeting. Handed to the Finder rather than run from
     here: opened as an app it outlives this process, and macOS attributes the
     microphone and system-audio permissions to the bundle rather than to
-    whatever launched it."""
+    whatever launched it.
+
+    A preview is the one thing started as a bare binary instead. `open` drops
+    the arguments it is given whenever the app is already running and merely
+    raises the copy that is there — which for a preview would mean silently
+    getting the real recorder, watching over somebody's meeting. Launched
+    directly it is its own process, records nothing, and needs none of the
+    permissions the bundle exists to be given."""
     if sys.platform != "darwin":
         sys.exit("the menu bar recorder is macOS-only")
     if not config.MENUBAR_BIN.exists():
         sys.exit("menu bar recorder not built — run: vtn setup")
+    if args.preview:
+        subprocess.Popen([str(config.MENUBAR_BIN), "--preview"])
+        return
     subprocess.run(["open", str(config.MENUBAR_APP)], check=False)
 
 
@@ -597,9 +607,13 @@ def main() -> None:
     )
     sp.set_defaults(fn=cmd_record)
 
-    sub.add_parser(
-        "menubar", help="open the menu bar recorder"
-    ).set_defaults(fn=cmd_menubar)
+    sp = sub.add_parser("menubar", help="open the menu bar recorder")
+    sp.add_argument(
+        "--preview",
+        action="store_true",
+        help="walk every state of the recorder on made-up sound, recording nothing",
+    )
+    sp.set_defaults(fn=cmd_menubar)
 
     sub.add_parser(
         "devices", help="list the audio devices a recording can be pointed at"

@@ -1033,6 +1033,21 @@ def test_the_menu_bar_recorder_is_handed_to_the_finder_to_open(monkeypatch, tmp_
     assert seen["cmd"] == ["open", str(app)]
 
 
+def test_previewing_the_menu_bar_recorder_runs_the_binary_itself_with_the_flag(
+    monkeypatch, tmp_path
+):
+    # `open` raises an app that is already running and drops the arguments it
+    # was handed, so asking for a preview that way would get the real recorder
+    monkeypatch.setattr(sys, "platform", "darwin")
+    built_menubar_app(monkeypatch, tmp_path)
+    seen: dict = {}
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda cmd, **_kwargs: seen.update(cmd=cmd))
+
+    run(monkeypatch, StubRepo(), "menubar", "--preview")
+
+    assert seen["cmd"] == [str(cli.config.MENUBAR_BIN), "--preview"]
+
+
 def test_opening_the_menu_bar_recorder_before_setup_says_how_to_build_it(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(cli.config, "MENUBAR_BIN", tmp_path / "never-built")

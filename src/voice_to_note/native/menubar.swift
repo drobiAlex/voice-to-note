@@ -60,6 +60,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// opening — that is what `menuNeedsUpdate` is for.
     private let menu = NSMenu()
 
+    /// Whether this launch is a preview rather than a recorder. Settled from
+    /// the command line once, because what it decides is not a mode somebody
+    /// switches into: a preview drives its own states, feeds its own meters and
+    /// starts no recording at all, and an app halfway into one would be an app
+    /// taping a meeting nobody asked it to.
+    private let previewing = CommandLine.arguments.contains("--preview")
+
+    /// Which state a preview is being held in. It is the one thing a preview
+    /// remembers; everything else on screen is the app's own, reached the same
+    /// way a recording reaches it.
+    private var previewScenario = Scenario.idle
+
     /// The shimmer belongs to one state and must not outlive it: a timer left
     /// running would go on redrawing a button that has moved on to saying
     /// something else entirely. Hanging it off the state itself is what makes
@@ -77,7 +89,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // that is not recording is also what makes each recording start
             // from silence rather than from whatever the last one ended on
             if state == .recording {
-                openToThePanel()
+                // a preview keeps its menu through every state, where a
+                // recording gives it up for the panel: that menu is the only
+                // way from one scenario to the next, and a status item
+                // answering a click with a window instead would strand whoever
+                // is looking at it in whichever state they had got to
+                if !previewing {
+                    openToThePanel()
+                }
                 showBriefly()
             } else {
                 forgetMeters()
@@ -91,6 +110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var startedAt: Date?
     private var ticker: Timer?
     private var shimmer: Timer?
+    private var rehearsal: Timer?
 
     /// The frames the mark is being inked through and which of them is on the
     /// button. Which set it is gets settled when a spell of processing starts,
@@ -155,8 +175,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.autoenablesItems = false
         openToTheMenu()
         show()
-        askToNotify()
-        refresh()
+        // a preview asks for nothing and runs nothing: no permission to post
+        // notifications about memos it will never make, and no subprocess to
+        // fill pickers its own menu does not offer
+        if !previewing {
+            askToNotify()
+            refresh()
+        }
     }
 
     /// A recording in progress is left running rather than waited on: it is its
@@ -328,6 +353,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// the next recording will be made of, not this one.
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        guard !previewing else {
+            previewMenu(menu)
+            return
+        }
         switch state {
         case .idle:
             menu.addItem(action("Start Recording", #selector(startRecording), key: "r"))
@@ -436,7 +465,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             microphone: chosenInput?.name ?? "default microphone",
             reduceMotion: reduceMotion
         )
-        view.onStop(self, #selector(stopRecording))
+        view.onStop(
+            self, previewing ? #selector(stopPreviewing) : #selector(stopRecording)
+        )
         // a pointer arriving inside the panel is somebody having taken it up on
         // what it is showing, and from that moment the window is theirs to
         // close: one that vanished out from under a pointer resting on it would
@@ -824,6 +855,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // --- driving the recorder ------------------------------------------------
 
     @objc private func startRecording() {
+        // nothing in a preview's menu offers this, and this guard is what keeps
+        // that from being the only thing standing between a preview and a real
+        // tape of whatever is being said in the room
+        guard !previewing else { return }
         guard state == .idle else { return }
         guard let vtn = vtnCommand() else {
             warn(
@@ -879,6 +914,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func stopRecording() {
+        // a preview's panel is wired to `stopPreviewing` instead; this is the
+        // second lock on the same door
+        guard !previewing else { return }
         guard state == .starting || state == .recording else { return }
         guard let recorder, recorder.isRunning else { return }
         // the same interrupt a Ctrl+C in a terminal sends: the recorder closes
@@ -995,6 +1033,177 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var environment = ProcessInfo.processInfo.environment
         environment["PATH"] = searchPath()
         return environment
+    }
+
+    // --- driving a preview ----------------------------------------------------
+
+    /// One state this app can be in, as a thing that can be picked off a menu.
+    /// A preview exists for the states nobody can reach on purpose — a
+    /// microphone that has died mid-meeting, ten seconds of quiet on both
+    /// sides, the minutes of processing after the tape stops — since the only
+    /// other way to look at one of those is to tape a real meeting and then
+    /// arrange for it to go wrong.
+    private enum Scenario: CaseIterable {
+        case idle
+        case starting
+        case voices
+        case microphoneDead
+        case bothSilent
+        case processing
+
+        var title: String {
+            switch self {
+            case .idle: return "Idle"
+            case .starting: return "Starting"
+            case .voices: return "Recording — voices"
+            case .microphoneDead: return "Recording — microphone dead"
+            case .bothSilent: return "Recording — both silent"
+            case .processing: return "Processing"
+            }
+        }
+
+        /// The state the app is genuinely put into. A scenario names a state
+        /// and nothing else: the mark, the shimmer, the panel showing itself,
+        /// the meters being emptied all follow from it as the app's own doing,
+        /// which is the whole of what makes a preview worth looking at rather
+        /// than a picture of one.
+        var state: RecorderState {
+            switch self {
+            case .idle: return .idle
+            case .starting: return .starting
+            case .voices, .microphoneDead, .bothSilent: return .recording
+            case .processing: return .processing
+            }
+        }
+
+        /// What each side of the tape is doing, or nothing where no tape is
+        /// rolling. The two sides never share a seed: two meters drawing the
+        /// same shape at the same moment is the one thing a meeting never looks
+        /// like, and it would be the first thing to disbelieve.
+        var sides: (system: Rehearsal.Side, microphone: Rehearsal.Side)? {
+            switch self {
+            case .voices: return (.talking(seed: 7), .talking(seed: 31))
+            case .microphoneDead: return (.talking(seed: 7), .quiet(seed: 5))
+            case .bothSilent: return (.quiet(seed: 11), .quiet(seed: 5))
+            case .idle, .starting, .processing: return nil
+            }
+        }
+    }
+
+    /// The menu a preview is driven from: every state, one to a line, with the
+    /// one on screen ticked. It replaces the ordinary menu rather than being
+    /// added to it — there is no recorder here to start, and no sense in
+    /// setting pickers for a recording that will never happen.
+    ///
+    /// The panel's two lines are offered only where there is a panel to open,
+    /// and greyed out rather than taken away in the other states, so the menu
+    /// is the same length in all six and picking down it does not move under
+    /// the pointer.
+    private func previewMenu(_ menu: NSMenu) {
+        menu.addItem(.sectionHeader(title: "Preview"))
+        for scenario in Scenario.allCases {
+            menu.addItem(choice(
+                scenario.title, scenario == previewScenario, #selector(choosePreview), scenario
+            ))
+        }
+        menu.addItem(.separator())
+        let rolling = previewScenario.state == .recording
+        for item in [
+            action("Show Panel", #selector(togglePanel)),
+            action("Replay Arrival", #selector(replayArrival)),
+        ] {
+            item.isEnabled = rolling
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        menu.addItem(action("Quit Preview", #selector(quit), key: "q"))
+    }
+
+    /// A scenario put on screen by the route the real thing takes: the state is
+    /// set, and its own didSet does everything after that. A recording is
+    /// reached the way a recording is reached, so the panel shows itself
+    /// unasked, the clock counts from this moment, and what somebody is looking
+    /// at is the app rather than an arrangement of it.
+    private func showPreview(_ scenario: Scenario) {
+        previewScenario = scenario
+        // whatever the last scenario left running is stopped first, and by the
+        // same two calls the end of a real recording makes: a second clock
+        // ticking for a tape that has been swapped out would count from the
+        // wrong moment and never stop
+        stopRehearsing()
+        stopTicking()
+        startedAt = nil
+        guard let sides = scenario.sides else {
+            state = scenario.state
+            show()
+            return
+        }
+        // through `.starting` on the way rather than straight to `.recording`,
+        // because that is the state a real recording passes through, and its
+        // didSet is what empties the meters and takes down the panel the
+        // scenario before this one left standing
+        state = .starting
+        startedAt = Date()
+        state = .recording
+        startTicking()
+        show()
+        startRehearsing(sides)
+    }
+
+    @objc private func choosePreview(_ sender: NSMenuItem) {
+        guard let scenario = sender.representedObject as? Scenario else { return }
+        showPreview(scenario)
+    }
+
+    /// The panel closed and opened again by the path that opens it unasked, so
+    /// that the one thing in this app which happens once and cannot be asked
+    /// for — the island arriving out of the status item — can be watched more
+    /// than once. Closing first is what makes it an arrival: `showBriefly`
+    /// opens nothing over a panel already up, and rightly so.
+    @objc private func replayArrival() {
+        closePanel()
+        showBriefly()
+    }
+
+    /// What the panel's Stop button does in a preview: pick the Idle scenario,
+    /// the same way the menu picks it. The real button goes to Processing
+    /// instead, but what this one is being watched for is the panel leaving and
+    /// the mark going out — and a button that moved a preview to a state its own
+    /// menu was not ticking would be two things disagreeing about which scenario
+    /// is on screen. Processing is a line in that menu for whoever wants it.
+    @objc private func stopPreviewing() {
+        showPreview(.idle)
+    }
+
+    /// The readings a preview is fed, at the rate the recorder prints them. Ten
+    /// a second is not decoration: the waveform's span is counted in readings
+    /// rather than in seconds and the silence clock counts real ones, so any
+    /// other rate would draw a meeting that is not the length it says it is.
+    ///
+    /// The step lives in the closure rather than on this object, so it is born
+    /// and dies with the timer and no scenario can start from wherever the last
+    /// one was stopped.
+    private func startRehearsing(
+        _ sides: (system: Rehearsal.Side, microphone: Rehearsal.Side)
+    ) {
+        stopRehearsing()
+        let system = Rehearsal(sides.system)
+        let microphone = Rehearsal(sides.microphone)
+        var step = 0
+        let rehearsal = Timer(timeInterval: Rehearsal.interval, repeats: true) { [weak self] _ in
+            self?.metered(system.level(at: step), microphone.level(at: step))
+            step += 1
+        }
+        // the common modes, for the same reason the clock is put in them: this
+        // menu is held open for as long as it takes to read six scenarios, and
+        // meters that froze underneath it would be the very thing being judged
+        RunLoop.main.add(rehearsal, forMode: .common)
+        self.rehearsal = rehearsal
+    }
+
+    private func stopRehearsing() {
+        rehearsal?.invalidate()
+        rehearsal = nil
     }
 
     // --- telling the person what happened ------------------------------------
@@ -1314,6 +1523,126 @@ final class LevelHistory {
     func silentFor(now: Date = Date()) -> TimeInterval? {
         guard let silentSince else { return nil }
         return now.timeIntervalSince(silentSince)
+    }
+}
+
+/// A meeting that never happened, in numbers: the readings a preview is fed in
+/// place of a tape. It lives here among the meters because it is the same kind
+/// of thing they are — a model of how loud a side has been — and because what
+/// it is for is judging the drawing, which is what everything in this section
+/// is for.
+///
+/// Stepped rather than timed, and seeded rather than random. The same step of
+/// the same side is the same number in every run, so a preview that looked
+/// wrong can be opened again and looked at, and a change to the drawing is the
+/// only thing that can have moved between two viewings.
+struct Rehearsal {
+    /// What one side of the tape is doing. Talking is phrases of syllables with
+    /// gaps between them that dip under the silence floor, which is what a room
+    /// with somebody in it does; quiet is a dead line well under that floor,
+    /// which is a muted microphone — and telling those two apart is the whole
+    /// job of the footer's silence clock.
+    enum Side {
+        case talking(seed: UInt64)
+        case quiet(seed: UInt64)
+    }
+
+    /// The rate the recorder prints readings at, and so the rate a preview has
+    /// to play them back at.
+    static let interval: TimeInterval = 0.1
+
+    /// How much of a meeting is written before the stream starts round again.
+    /// Two minutes is longer than anybody watches one meter, so the loop is
+    /// never the thing being judged.
+    private static let leastSteps = 1200
+
+    /// The shape of one syllable: a fast attack and a slower fall, as a
+    /// fraction of the way from the silence floor up to the phrase's own peak.
+    /// Five readings is half a second, which is about what a spoken syllable
+    /// takes and what makes a waveform read as speech rather than as a fence.
+    private static let syllable: [Double] = [0.34, 0.78, 1, 0.84, 0.46]
+
+    private let levels: [Double]
+
+    init(_ side: Side) {
+        switch side {
+        case let .talking(seed):
+            var rng = SplitMix64(seed)
+            levels = Rehearsal.talking(&rng)
+        case let .quiet(seed):
+            var rng = SplitMix64(seed)
+            levels = Rehearsal.quiet(&rng)
+        }
+    }
+
+    /// The reading for one step. The stream runs round rather than ending: a
+    /// preview is watched for as long as somebody keeps looking at it, and a
+    /// generator that ran out would leave both meters flat halfway through
+    /// being judged — which is a state this app has a scenario of its own for.
+    ///
+    /// Any step at all is a step, below zero included. This is an index into a
+    /// loop and a loop has no first reading, so there is nothing here for a
+    /// caller to get wrong — which is worth the one extra line in the one type
+    /// whose reason to exist is being driven from code written to try something.
+    func level(at step: Int) -> Double {
+        let slot = step % levels.count
+        return levels[slot < 0 ? slot + levels.count : slot]
+    }
+
+    /// A voice: phrases of a few syllables each, separated by gaps that fall
+    /// under the silence floor. The gaps are short — under a second — because
+    /// silence is only worth reporting after ten of them, and a preview of two
+    /// people talking must not keep tripping the clock that is there to say a
+    /// microphone has died.
+    ///
+    /// It is left however long the last phrase leaves it rather than cut to a
+    /// length, so the point it runs round at is always inside a gap and the
+    /// loop never joins one syllable onto the middle of another.
+    private static func talking(_ rng: inout SplitMix64) -> [Double] {
+        var levels = [Double]()
+        while levels.count < leastSteps {
+            for _ in 0..<(2 + Int(rng.next(4))) {
+                // −30 to −12 dBFS: a voice at conversational loudness, which is
+                // well clear of the floor and well short of clipping
+                let peak = -30 + Double(rng.next(1800)) / 100
+                for shape in syllable {
+                    levels.append(LevelHistory.silence + (peak - LevelHistory.silence) * shape)
+                }
+            }
+            for _ in 0..<(3 + Int(rng.next(5))) {
+                levels.append(-52 - Double(rng.next(600)) / 100)
+            }
+        }
+        return levels
+    }
+
+    /// A side that is not arriving at all: a hair either way of −57 dBFS, which
+    /// is well under the −50 taken for silence and still above the −60 the
+    /// recorder prints for nothing whatever — a microphone that is muted rather
+    /// than a device that has gone. Not flat, because a real dead channel is
+    /// not flat, and one perfect line would be a drawing rather than a reading.
+    private static func quiet(_ rng: inout SplitMix64) -> [Double] {
+        (0..<leastSteps).map { _ in -58 + Double(rng.next(200)) / 100 }
+    }
+}
+
+/// Reproducible noise, so a preview of one scenario is the same preview every
+/// time it is opened. Small on purpose: what is wanted is a stream that does
+/// not repeat while it is being watched, not one that would stand up to being
+/// counted.
+struct SplitMix64 {
+    private var seed: UInt64
+
+    init(_ seed: UInt64) {
+        self.seed = seed
+    }
+
+    mutating func next(_ bound: UInt64) -> UInt64 {
+        seed &+= 0x9e37_79b9_7f4a_7c15
+        var z = seed
+        z = (z ^ (z >> 30)) &* 0xbf58_476d_1ce4_e5b9
+        z = (z ^ (z >> 27)) &* 0x94d0_49bb_1331_11eb
+        return (z ^ (z >> 31)) % bound
     }
 }
 
