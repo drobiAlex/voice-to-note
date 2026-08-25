@@ -14,10 +14,12 @@ from voice_to_note.gateways import GatewayError, audio, capture
 # macOS for the microphone and the screen. Each speaks the same two words on
 # stdout the real one does, and answers a stop the same way.
 TAPES = """
-import signal, sys, time
+import os, signal, sys, time
 
 def stop(_sig, _frame):
-    print("stopped", flush=True)
+    # straight to the descriptor: a print here can land inside the one the main
+    # body is already making, which python refuses as a reentrant write
+    os.write(1, b"stopped\\n")
     sys.exit(0)
 
 signal.signal(signal.SIGINT, stop)
@@ -30,10 +32,12 @@ print("recording", flush=True)
 """
 
 REPORTS_LEVELS = """
-import signal, sys, time
+import os, signal, sys, time
 
 def stop(_sig, _frame):
-    print("stopped", flush=True)
+    # straight to the descriptor: a print here can land inside the one the main
+    # body is already making, which python refuses as a reentrant write
+    os.write(1, b"stopped\\n")
     sys.exit(0)
 
 signal.signal(signal.SIGINT, stop)
