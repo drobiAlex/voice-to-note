@@ -1984,8 +1984,16 @@ class MemoApp(App[None]):
         being brought in exist on this screen alone, so a rebuild from the
         database would take them away mid-import. What was written is not lost
         by waiting: the version is left unread, and each of those states redraws
-        as it ends anyway."""
+        as it ends anyway.
+
+        Nothing either once the sidebar has gone. A tick already on its way when
+        the app starts closing arrives to redraw widgets that are no longer
+        mounted, and an exception raised out of a timer takes the whole app down
+        on its way out — a crash on quit, and under a loaded machine a flaky
+        test, for a redraw nobody is left to read."""
         if len(self.screen_stack) > 1 or self.jobs or self.importing:
+            return
+        if not self.query("#projects"):
             return
         version = services.data_version(self.repo)
         if version == self.seen_version:

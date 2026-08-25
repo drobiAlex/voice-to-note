@@ -4440,3 +4440,23 @@ async def test_taking_in_an_outside_write_leaves_the_reader_where_they_were(repo
         assert memo_rows(pilot.app)[table.cursor_row][0] == "standup.m4a"
         assert sidebar.index == 2
         assert pilot.app.focused is table
+
+
+@pytest.mark.asyncio
+async def test_a_tick_landing_after_the_sidebar_has_gone_leaves_the_write_unread(repo):
+    # the tick is already on its way when the app starts closing, and it arrives
+    # to redraw widgets nothing is holding any more; an exception raised out of
+    # a timer takes the app down with a traceback in front of somebody who has
+    # already quit
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        unread = pilot.app.seen_version
+        stored_elsewhere(repo, "retro.m4a", "work")
+        await pilot.app.query_one("#projects", ListView).remove()
+
+        pilot.app._take_in_outside_writes()
+
+        assert pilot.app.seen_version == unread
