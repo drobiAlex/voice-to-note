@@ -46,6 +46,10 @@ dev = [
 pythonpath = ["src"]
 asyncio_mode = "strict"
 testpaths = ["tests"]
+# the 207 Textual Pilot tests each boot a whole app and dominate the wall clock;
+# spreading them over the cores turns a four-minute suite into a two-minute one,
+# and `-n0` still puts a single test back on one process for debugging
+addopts = "-n auto"
 markers = [
     "ui: TUI Pilot tests",
 ]
