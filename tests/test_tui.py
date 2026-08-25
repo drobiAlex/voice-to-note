@@ -3099,7 +3099,7 @@ async def test_a_recording_being_brought_in_is_listed_while_it_is_on_its_way(
             await process_file(pilot, recording(tmp_path, "retro.m4a"), "work")
             await pilot.pause()
 
-            assert "converting" in status_of(pilot.app, "retro.m4a")
+            assert "converting" in await reaching(pilot, "retro.m4a", "converting")
         finally:
             holding.set()
             await finish_jobs(pilot)
@@ -3282,7 +3282,7 @@ async def test_a_recording_on_its_way_in_survives_the_list_being_redrawn(
             pilot.app.show_project("work")
             await pilot.pause()
 
-            assert "converting" in status_of(pilot.app, "retro.m4a")
+            assert "converting" in await reaching(pilot, "retro.m4a", "converting")
         finally:
             holding.set()
             await finish_jobs(pilot)
