@@ -10,14 +10,21 @@ INSTALL_HINT = "install ffmpeg: brew install ffmpeg"
 
 
 def to_wav16k(src: Path, dst: Path) -> None:
-    """Normalizes any recording into the one audio format the models accept."""
+    """Normalizes any recording into the one audio format the models accept.
+
+    Format only, deliberately: loudness is left alone. Whisper's own front end
+    already floors its log-mel spectrogram against the loudest moment in the
+    clip, which absorbs whatever gain the recording arrived at, so an EBU R128
+    pass here buys nothing the model does not do for itself — and it is not
+    cheap. Measured on a 25-minute meeting it was 45.9s of work against 1.9s
+    for the conversion alone, all of it in front of a transcription that had
+    not started yet."""
     dst.parent.mkdir(parents=True, exist_ok=True)
     try:
         proc = subprocess.run(
             [
                 "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                 "-i", str(src),
-                "-af", "loudnorm",
                 "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
                 str(dst),
             ],
