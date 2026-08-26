@@ -203,6 +203,63 @@ class Repository:
             self._write_speakers(memo_id, speakers)
         return memo_id
 
+    def start_memo(self, *, filename: str, project: str) -> int:
+        """Opens a memo for a meeting that is being recorded right now, so the
+        words can be stored as they are transcribed rather than held in memory
+        until the meeting ends. What is not known yet is left empty and filled
+        in by finish_memo: how long the recording ran, what language it turned
+        out to be in, and where the archive of it ended up.
+
+        A laptop that dies halfway through a meeting therefore leaves the
+        transcript up to the last stretch that was read, which is the whole
+        point of writing as we go rather than at the end."""
+        with self.con:
+            cur = self.con.execute(
+                "INSERT INTO memos (filename, wav_path, duration_s, language, status,"
+                " project) VALUES (?,'',0,'','recording',?)",
+                (filename, project),
+            )
+            assert cur.lastrowid is not None
+            return cur.lastrowid
+
+    def append_segments(self, memo_id: int, segments: Sequence[Segment]) -> None:
+        """Adds what the last stretch of a meeting said to a memo still being
+        recorded. Appends rather than replaces: every earlier stretch of the
+        same meeting is already stored, and the timestamps say where this one
+        belongs among them."""
+        if not segments:
+            return
+        with self.con:
+            self.con.executemany(
+                "INSERT INTO segments (memo_id, t0_ms, t1_ms, text, speaker)"
+                " VALUES (?,?,?,?,?)",
+                [(memo_id, s.t0_ms, s.t1_ms, s.text, s.speaker) for s in segments],
+            )
+            self._touch(memo_id)
+
+    def finish_memo(
+        self,
+        memo_id: int,
+        *,
+        wav_path: str,
+        duration_s: float,
+        language: str,
+        recorded_at: str | None = None,
+    ) -> None:
+        """Closes a memo that was open for a recording: the archive exists now,
+        so everything that could only be known once the meeting ended is
+        written and the memo becomes an ordinary transcribed one.
+
+        When the recording was made is taken from the finished archive rather
+        than from the clock at the start, so that the same file imported again
+        later is still recognised as this meeting."""
+        with self.con:
+            self.con.execute(
+                "UPDATE memos SET wav_path=?, duration_s=?, language=?, recorded_at=?,"
+                " status='transcribed', updated_at=datetime('now') WHERE id=?",
+                (wav_path, duration_s, language, recorded_at, memo_id),
+            )
+
     def _narrowed(
         self,
         project: str | None,

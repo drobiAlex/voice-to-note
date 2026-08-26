@@ -52,6 +52,26 @@ class Segment:
 
 
 @dataclass(frozen=True)
+class TrackFormat:
+    """How one recorded track is laid out on disk. The recorder writes each
+    side in whatever its own device offered — nothing converts anything until
+    the two sides are mixed — so every reader of a track has to be told this
+    rather than assume it."""
+
+    rate: int
+    channels: int
+    bits: int
+    is_float: bool
+
+    @property
+    def frame_bytes(self) -> int:
+        """One sample across every channel, which is the smallest amount of a
+        track anybody may cut on: half a frame handed on shifts every channel
+        after it by a sample and turns speech into noise."""
+        return self.channels * self.bits // 8
+
+
+@dataclass(frozen=True)
 class Turn:
     """A stretch of audio one person speaks — what the diarizer produces."""
 

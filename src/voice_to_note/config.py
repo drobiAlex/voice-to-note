@@ -120,6 +120,19 @@ SETTINGS: dict[str, Setting] = {
         kind="int",
     ),
     "num_speakers": Setting(-1, int, "speaker count to assume; -1 auto-detects", kind="int"),
+    "live_transcribe": Setting(
+        "on",
+        str,
+        "transcribe a meeting in pieces while it records, instead of all at the end",
+        kind="choice",
+        choices=("off", "on"),
+    ),
+    "live_chunk_s": Setting(
+        90, int, "seconds of a meeting each live transcription pass reads", kind="int"
+    ),
+    "live_model": Setting(
+        "", str, "whisper model live passes use; empty uses whisper_model"
+    ),
     "overlap_stages": Setting(
         "off",
         str,
@@ -223,8 +236,16 @@ def _setting(key: str) -> Any:
     return resolve(key, setting.default, setting.cast, os.environ, _SETTINGS)
 
 
+def model_path(name: str) -> Path:
+    """Where a whisper model of a given name lives. Named once because two
+    settings now choose a model — the one a stored recording is transcribed
+    with and the one a meeting is transcribed with as it happens — and a
+    second spelling of this would let them disagree about where models are."""
+    return MODELS_DIR / f"ggml-{name}.bin"
+
+
 WHISPER_MODEL: str = _setting("whisper_model")
-WHISPER_MODEL_PATH = MODELS_DIR / f"ggml-{WHISPER_MODEL}.bin"
+WHISPER_MODEL_PATH = model_path(WHISPER_MODEL)
 WHISPER_THREADS: str = _setting("whisper_threads")
 WHISPER_BEAM_SIZE: int = _setting("whisper_beam_size")
 VAD_MODEL_PATH = MODELS_DIR / "ggml-silero-v5.1.2.bin"
@@ -234,6 +255,9 @@ EMB_MODEL: str = _setting("emb_model")
 EMB_MODEL_PATH = MODELS_DIR / EMB_MODEL
 
 NUM_SPEAKERS: int = _setting("num_speakers")
+LIVE_TRANSCRIBE: str = _setting("live_transcribe")
+LIVE_CHUNK_S: int = _setting("live_chunk_s")
+LIVE_MODEL: str = _setting("live_model")
 OVERLAP_STAGES: str = _setting("overlap_stages")
 DIAR_THRESHOLD: float = _setting("diar_threshold")
 
