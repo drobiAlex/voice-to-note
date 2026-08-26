@@ -113,6 +113,13 @@ SETTINGS: dict[str, Setting] = {
         "nemo_en_titanet_large.onnx", str, "model used to embed a voice for speaker matching"
     ),
     "num_speakers": Setting(-1, int, "speaker count to assume; -1 auto-detects", kind="int"),
+    "overlap_stages": Setting(
+        "auto",
+        str,
+        "run speaker detection alongside transcription rather than after it",
+        kind="choice",
+        choices=("auto", "on", "off"),
+    ),
     "diar_threshold": Setting(
         0.5,
         float,
@@ -218,6 +225,7 @@ EMB_MODEL: str = _setting("emb_model")
 EMB_MODEL_PATH = MODELS_DIR / EMB_MODEL
 
 NUM_SPEAKERS: int = _setting("num_speakers")
+OVERLAP_STAGES: str = _setting("overlap_stages")
 DIAR_THRESHOLD: float = _setting("diar_threshold")
 
 MATCH_THRESHOLD: float = _setting("match_threshold")

@@ -5,7 +5,8 @@ import sys
 import time
 import uuid
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
@@ -46,6 +47,11 @@ Log = Callable[[str], None]
 # drawn as a bar that fills
 Progress = Callable[[int, str], None]
 T = TypeVar("T")
+
+# below this, transcription and speaker detection are better off taking turns:
+# two models resident at once on a machine this small costs memory and gains no
+# wall clock, since neither stage has a core to itself either way
+OVERLAP_MIN_CORES = 4
 
 
 class NotFound(Exception):
@@ -751,7 +757,19 @@ def process_memo(
     duration = audio.duration_seconds(wav)
     progress(2, "transcribing")
     log(f"transcribing ({_duration(duration)} audio) …")
-    raw = whisper.transcribe(wav, duration)
+    turning: Future[list[Turn]] | None = None
+    with ExitStack() as running:
+        if _overlapping(diarize):
+            # asked before transcription starts rather than after it ends:
+            # nothing in speaker detection reads the transcript, both stages
+            # read the same wav, and whichever of the two finishes first
+            # costs nothing but the core it ran on. Whisper is checked first
+            # so that a missing model fails in a millisecond instead of after
+            # the minutes of diarization this would otherwise have started.
+            whisper.require()
+            side = running.enter_context(ThreadPoolExecutor(max_workers=1))
+            turning = side.submit(sherpa.diarize, wav, num_speakers)
+        raw = whisper.transcribe(wav, duration)
     segs = segments_from_whisper(raw)
     language = raw.get("result", {}).get("language", "")
     labels: list[str] = []
@@ -760,7 +778,7 @@ def process_memo(
     if diarize:
         progress(3, "diarizing")
         log("diarizing …")
-        turns = sherpa.diarize(wav, num_speakers)
+        turns = turning.result() if turning is not None else sherpa.diarize(wav, num_speakers)
         segs = assign_speakers(segs, turns)
         labels, speakers, matches = _identify(repo, wav, turns, keep_names={})
     else:
@@ -780,6 +798,22 @@ def process_memo(
     )
     _report_matches(log, matches, keep_names={})
     return ProcessResult(memo_id, len(segs), labels, language)
+
+
+def _overlapping(diarize: bool) -> bool:
+    """Whether speaker detection should run alongside transcription instead of
+    waiting for it. The two stages share nothing but the wav they both read, so
+    the only argument for keeping them apart is a machine that cannot run both
+    without each slowing the other: on two cores the pair costs the same either
+    way and pays for it in two models resident at once, while on a laptop with
+    cores to spare the shorter stage disappears from the wall clock entirely.
+    `auto` asks the machine how many cores it has; the setting exists for the
+    times that answer is wrong."""
+    if not diarize:
+        return False
+    if config.OVERLAP_STAGES != "auto":
+        return config.OVERLAP_STAGES == "on"
+    return (os.cpu_count() or 1) >= OVERLAP_MIN_CORES
 
 
 def find_duplicate(repo: Repository, src: Path) -> Memo | None:

@@ -48,6 +48,7 @@ def test_every_setting_resolves_to_its_known_default():
         "whisper_model": "large-v3-turbo",
         "emb_model": "nemo_en_titanet_large.onnx",
         "num_speakers": -1,
+        "overlap_stages": "auto",
         "diar_threshold": 0.5,
         "match_threshold": 0.5,
         "claude_model": "sonnet",

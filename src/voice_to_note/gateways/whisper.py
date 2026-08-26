@@ -19,12 +19,20 @@ def timeout_for(duration_s: float) -> float:
     return max(TIMEOUT_FLOOR_S, TIMEOUT_FACTOR * duration_s)
 
 
-def transcribe(wav: Path, duration_s: float) -> WhisperTranscription:
-    """Turns speech into timed text, locally."""
+def require() -> None:
+    """Raises unless everything transcription needs is on disk. Separate from
+    the call itself so that a caller which starts another stage first can find
+    out in a millisecond that this one was never going to run, rather than
+    after minutes of work it then has to throw away."""
     if not config.WHISPER_BIN.exists():
         raise GatewayError("whisper-cli not built — run ./run.sh first")
     if not config.WHISPER_MODEL_PATH.exists():
         raise GatewayError(f"model missing: {config.WHISPER_MODEL_PATH} — run ./run.sh first")
+
+
+def transcribe(wav: Path, duration_s: float) -> WhisperTranscription:
+    """Turns speech into timed text, locally."""
+    require()
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "out"
         cmd = [
