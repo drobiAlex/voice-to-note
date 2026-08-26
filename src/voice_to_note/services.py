@@ -48,11 +48,6 @@ Log = Callable[[str], None]
 Progress = Callable[[int, str], None]
 T = TypeVar("T")
 
-# below this, transcription and speaker detection are better off taking turns:
-# two models resident at once on a machine this small costs memory and gains no
-# wall clock, since neither stage has a core to itself either way
-OVERLAP_MIN_CORES = 4
-
 
 class NotFound(Exception):
     """A memo, speaker or extraction the caller asked for does not exist."""
@@ -802,18 +797,19 @@ def process_memo(
 
 def _overlapping(diarize: bool) -> bool:
     """Whether speaker detection should run alongside transcription instead of
-    waiting for it. The two stages share nothing but the wav they both read, so
-    the only argument for keeping them apart is a machine that cannot run both
-    without each slowing the other: on two cores the pair costs the same either
-    way and pays for it in two models resident at once, while on a laptop with
-    cores to spare the shorter stage disappears from the wall clock entirely.
-    `auto` asks the machine how many cores it has; the setting exists for the
-    times that answer is wrong."""
-    if not diarize:
-        return False
-    if config.OVERLAP_STAGES != "auto":
-        return config.OVERLAP_STAGES == "on"
-    return (os.cpu_count() or 1) >= OVERLAP_MIN_CORES
+    waiting for it. Off unless somebody turns it on, because measuring it says
+    so: the two stages share nothing but the wav, but each is already parallel
+    inside itself — whisper takes a thread per performance core and the
+    diarizer four more — so running them together puts twice the machine's
+    threads on the same cores. On a four-core box that made 8 minutes of audio
+    take 241s against 144s for taking turns, and more cores does not fix it,
+    it just raises both thread counts again.
+
+    Worth turning on where transcription is not competing for the same cores
+    at all — whisper on Metal beside a diarizer on the CPU — which is a claim
+    about a machine that only that machine can settle. bench/pipeline.py
+    prints both."""
+    return diarize and config.OVERLAP_STAGES == "on"
 
 
 def find_duplicate(repo: Repository, src: Path) -> Memo | None:

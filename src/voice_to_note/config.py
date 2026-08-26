@@ -121,11 +121,11 @@ SETTINGS: dict[str, Setting] = {
     ),
     "num_speakers": Setting(-1, int, "speaker count to assume; -1 auto-detects", kind="int"),
     "overlap_stages": Setting(
-        "auto",
+        "off",
         str,
-        "run speaker detection alongside transcription rather than after it",
+        "run speaker detection alongside transcription; slower unless the two use different cores",
         kind="choice",
-        choices=("auto", "on", "off"),
+        choices=("off", "on"),
     ),
     "diar_threshold": Setting(
         0.5,

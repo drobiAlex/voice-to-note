@@ -68,9 +68,6 @@ def repo(tmp_path):
 @pytest.fixture(autouse=True)
 def stages_take_turns(monkeypatch):
     """Pins speaker detection behind transcription for every test that does not
-    ask otherwise. Left on `auto` the pipeline reads the machine's core count
-    and runs the two stages at once above four cores, which would make the
-    suite take a different path on a developer's laptop than on CI — and stub a
-    different set of calls. A test that means to exercise the overlap sets the
-    setting itself."""
+    ask otherwise, whatever a machine's own vtn.toml says. A test that means to
+    exercise the overlap sets the setting itself."""
     monkeypatch.setattr(config, "OVERLAP_STAGES", "off")

@@ -50,7 +50,7 @@ def test_every_setting_resolves_to_its_known_default():
         "whisper_threads": "auto",
         "whisper_beam_size": 5,
         "num_speakers": -1,
-        "overlap_stages": "auto",
+        "overlap_stages": "off",
         "diar_threshold": 0.5,
         "match_threshold": 0.5,
         "claude_model": "sonnet",
