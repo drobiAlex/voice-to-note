@@ -47,6 +47,8 @@ def test_every_setting_resolves_to_its_known_default():
     assert {key: setting.default for key, setting in SETTINGS.items()} == {
         "whisper_model": "large-v3-turbo",
         "emb_model": "nemo_en_titanet_large.onnx",
+        "whisper_threads": "auto",
+        "whisper_beam_size": 5,
         "num_speakers": -1,
         "overlap_stages": "auto",
         "diar_threshold": 0.5,

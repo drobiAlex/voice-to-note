@@ -30,6 +30,25 @@ def require() -> None:
         raise GatewayError(f"model missing: {config.WHISPER_MODEL_PATH} — run ./run.sh first")
 
 
+def decoding() -> list[str]:
+    """The flags that decide how hard whisper works for its words.
+
+    Left to itself the binary searches five beams on four threads whatever
+    machine it is on. Four threads leaves most of a laptop idle, and the beam
+    width is the one setting that buys speed by changing the answer: greedy
+    decoding is measurably faster and reads a little differently — the same
+    words, punctuated and split into segments its own way. So the thread count
+    follows the machine by default and the beam width does not move unless
+    somebody has compared the two on their own recordings."""
+    threads = config.WHISPER_THREADS
+    count = int(threads) if threads.strip().isdigit() else qos.performance_cores()
+    flags = ["-t", str(max(1, count))]
+    beam = config.WHISPER_BEAM_SIZE
+    # -bo as well as -bs: a beam of one still samples several candidates and
+    # picks the best unless best-of is brought down with it
+    return flags + (["-bs", "1", "-bo", "1"] if beam <= 1 else ["-bs", str(beam)])
+
+
 def transcribe(wav: Path, duration_s: float) -> WhisperTranscription:
     """Turns speech into timed text, locally."""
     require()
@@ -43,6 +62,7 @@ def transcribe(wav: Path, duration_s: float) -> WhisperTranscription:
             "-ojf",
             "-of", str(out),
             "-np",
+            *decoding(),
         ]
         if config.VAD_MODEL_PATH.exists():
             cmd += ["--vad", "--vad-model", str(config.VAD_MODEL_PATH)]

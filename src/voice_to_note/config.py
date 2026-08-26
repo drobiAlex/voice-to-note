@@ -112,6 +112,13 @@ SETTINGS: dict[str, Setting] = {
     "emb_model": Setting(
         "nemo_en_titanet_large.onnx", str, "model used to embed a voice for speaker matching"
     ),
+    "whisper_threads": Setting(
+        "auto", str, "cpu threads whisper transcribes with; auto uses the performance cores"
+    ),
+    "whisper_beam_size": Setting(
+        5, int, "beams whisper searches; 1 decodes greedily — faster, worded a little differently",
+        kind="int",
+    ),
     "num_speakers": Setting(-1, int, "speaker count to assume; -1 auto-detects", kind="int"),
     "overlap_stages": Setting(
         "auto",
@@ -218,6 +225,8 @@ def _setting(key: str) -> Any:
 
 WHISPER_MODEL: str = _setting("whisper_model")
 WHISPER_MODEL_PATH = MODELS_DIR / f"ggml-{WHISPER_MODEL}.bin"
+WHISPER_THREADS: str = _setting("whisper_threads")
+WHISPER_BEAM_SIZE: int = _setting("whisper_beam_size")
 VAD_MODEL_PATH = MODELS_DIR / "ggml-silero-v5.1.2.bin"
 
 SEG_MODEL_PATH = MODELS_DIR / "sherpa-onnx-pyannote-segmentation-3-0" / "model.onnx"

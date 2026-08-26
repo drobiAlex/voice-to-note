@@ -10,7 +10,7 @@ import pytest
 
 from voice_to_note import config, services
 from voice_to_note.domain import Segment, Speaker, Turn
-from voice_to_note.gateways import llm, whisper
+from voice_to_note.gateways import GatewayError, llm, whisper
 from voice_to_note.transforms import refine
 
 ALICE_VOICE = np.array([1.0, 0.0, 0.0], dtype=np.float32)
@@ -166,6 +166,67 @@ def test_processing_gives_the_transcriber_the_audio_duration(repo, tmp_path, mon
     assert seen["wav"].name.startswith("standup-")
     assert repo.memo(result.memo_id).duration_s == 137.5
     assert [s.text for s in repo.segments(result.memo_id)] == ["Hello"]
+
+
+def test_speaker_detection_is_already_running_while_the_transcript_is_still_coming(
+    repo, tmp_path, monkeypatch
+):
+    # the two stages share nothing but the wav, so waiting for the first to end
+    # before starting the second spends the length of the shorter one twice
+    monkeypatch.setattr(services.config, "OVERLAP_STAGES", "on")
+    monkeypatch.setattr(services.config, "UPLOADS_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(services.audio, "to_wav16k", lambda _src, _dst: None)
+    monkeypatch.setattr(services.audio, "duration_seconds", lambda _path: 60.0)
+    monkeypatch.setattr(services.audio, "recorded_at", lambda _path: "2026-01-01T09:00:00Z")
+    monkeypatch.setattr(services.whisper, "require", lambda: None)
+    started = threading.Event()
+
+    def diarize(_wav, num_speakers=None):
+        started.set()
+        return [Turn(0, 1000, "S1")]
+
+    def transcribe(_wav, _duration):
+        # the assertion is the wait: a sequential pipeline never sets this
+        assert started.wait(timeout=5), "speaker detection had not started"
+        return {
+            "transcription": [{"text": " Hello ", "offsets": {"from": 0, "to": 1000}}],
+            "result": {"language": "en"},
+        }
+
+    monkeypatch.setattr(services.sherpa, "diarize", diarize)
+    monkeypatch.setattr(services.sherpa, "speaker_embeddings", lambda _wav, _turns: {})
+    monkeypatch.setattr(services.whisper, "transcribe", transcribe)
+
+    src = tmp_path / "standup.m4a"
+    src.write_bytes(b"fake audio")
+
+    assert services.process_memo(repo, src).segment_count == 1
+
+
+def test_a_transcriber_that_is_not_installed_is_found_before_a_voice_is_read(
+    repo, tmp_path, monkeypatch
+):
+    # the check costs a millisecond and the stage it stands in front of costs
+    # minutes: starting speaker detection first and finding out afterwards that
+    # nothing was ever going to transcribe throws all of them away
+    monkeypatch.setattr(services.config, "OVERLAP_STAGES", "on")
+    monkeypatch.setattr(services.config, "UPLOADS_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(services.audio, "to_wav16k", lambda _src, _dst: None)
+    monkeypatch.setattr(services.audio, "duration_seconds", lambda _path: 60.0)
+    diarized: list[str] = []
+    monkeypatch.setattr(services.sherpa, "diarize", lambda _w, num_speakers=None: diarized.append("ran"))
+
+    def missing() -> None:
+        raise GatewayError("whisper-cli not built")
+
+    monkeypatch.setattr(services.whisper, "require", missing)
+
+    src = tmp_path / "standup.m4a"
+    src.write_bytes(b"fake audio")
+
+    with pytest.raises(GatewayError):
+        services.process_memo(repo, src)
+    assert diarized == []
 
 
 def test_the_pipeline_says_which_stage_it_is_on_before_that_stage_runs(

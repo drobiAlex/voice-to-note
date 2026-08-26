@@ -1,5 +1,6 @@
 import pytest
 
+from voice_to_note import config
 from voice_to_note.domain import Segment
 from voice_to_note.storage.repository import Repository
 
@@ -62,3 +63,14 @@ def repo(tmp_path):
     r = Repository(tmp_path / "memos.db")
     yield r
     r.close()
+
+
+@pytest.fixture(autouse=True)
+def stages_take_turns(monkeypatch):
+    """Pins speaker detection behind transcription for every test that does not
+    ask otherwise. Left on `auto` the pipeline reads the machine's core count
+    and runs the two stages at once above four cores, which would make the
+    suite take a different path on a developer's laptop than on CI — and stub a
+    different set of calls. A test that means to exercise the overlap sets the
+    setting itself."""
+    monkeypatch.setattr(config, "OVERLAP_STAGES", "off")
