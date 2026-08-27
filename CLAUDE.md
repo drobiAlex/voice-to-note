@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```sh
-uv run pytest -q                  # 852 tests, spread over the cores by default
+uv run pytest -q                  # 882 tests, spread over the cores by default
 uv run pytest -m "not ui"         # skip the Textual Pilot tests (tests/test_tui.py)
 uv run pytest tests/test_services.py::test_name   # single test
 uv run mypy src
@@ -49,7 +49,8 @@ Four layers, strictly one-directional. `services.py` is the only module that com
   `whisper` (whisper-cli subprocess), `sherpa` (onnx diarization in a spawned process pool), `llm`
   (claude/codex/gemini CLIs, ollama HTTP), `bootstrap` (clone/build/download during setup),
   `capture` (native Swift recorder), `qos` (taskpolicy/nice wrapping).
-- **`transforms/`** — pure functions, no I/O: `segments`, `speakers`, `notes`, `refine`, `todos`.
+- **`transforms/`** — pure functions, no I/O: `segments`, `speakers`, `notes`, `refine`, `todos`,
+  `live` (where to cut a chunk of a meeting, and how its lines fit into the whole).
 - **`storage/repository.py`** — every SQL statement in the app. `domain.py` holds the frozen
   dataclasses and TypedDicts both sides speak in.
 
@@ -88,6 +89,17 @@ backfill from stored extractions.
 **To-dos reconcile by normalized text.** Re-extraction matches fresh action items to stored rows via
 `transforms.todos.normalize`; the `touched` flag keeps a row somebody has checked off or edited from
 being dropped when the model rewords it.
+
+**A meeting is transcribed while it records.** `vtn record` opens a memo at `status='recording'`
+and `services.LiveSession` appends segments to it a stretch at a time, reading the two wavs the
+helper is still writing — `capture.TrackReader` goes by the file's size on disk, never by the RIFF
+header, which AVAudioFile writes short until close. Where a stretch is cut is the whole ballgame:
+`transforms.live.cut_offset` puts the cut in a pause, and cutting blind instead costs 160% more
+decoding time (`bench/` measured it on 25 minutes of speech). The session runs on its own thread
+with its own connection (`open_repo`), never more than one transcription at a time, and takes
+longer stretches rather than starting a second pass when it falls behind. Nothing about it may
+fail a recording: an unreadable track, a missing model or `live_transcribe=off` all just leave
+`vtn record` transcribing the merged file the ordinary way.
 
 **Diarization spawns a process.** `sherpa._spawn_safe_stderr` exists because a full-screen TUI
 replaces `sys.stderr` with a capture object whose `fileno()` is -1, which `multiprocessing` refuses.

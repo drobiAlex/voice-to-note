@@ -2,9 +2,11 @@ import hashlib
 import json
 import os
 import sys
+import tempfile
+import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass
@@ -13,9 +15,19 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from . import config
-from .domain import Extraction, Memo, NotesPayload, Speaker, SpeakerMatch, Turn
-from .gateways import GatewayError, audio, bootstrap, llm, sherpa, whisper
+from .domain import (
+    Extraction,
+    Memo,
+    NotesPayload,
+    Segment,
+    Speaker,
+    SpeakerMatch,
+    TrackFormat,
+    Turn,
+)
+from .gateways import GatewayError, audio, bootstrap, capture, llm, sherpa, whisper
 from .storage.repository import Repository
+from .transforms.live import SEARCH_S, cut_offset, mono, prompt_tail, shifted
 from .transforms.notes import SCHEMA, parse_notes, render_notes, render_notes_markdown
 from .transforms.refine import (
     REFINE_SCHEMA,
@@ -810,6 +822,254 @@ def _overlapping(diarize: bool) -> bool:
     about a machine that only that machine can settle. bench/pipeline.py
     prints both."""
     return diarize and config.OVERLAP_STAGES == "on"
+
+
+# how often a meeting being recorded is looked at. Often enough that ending a
+# recording never waits on it, rarely enough that the look itself costs nothing
+LIVE_POLL_S = 1.0
+# the most audio one live pass will read, as a multiple of the configured chunk
+# length. A machine that cannot keep up with the room would otherwise fall
+# further behind with every pass; capped, it reads bigger stretches less often
+# and catches the rest up once the meeting is over
+LIVE_MAX_FACTOR = 4
+
+
+@dataclass
+class LiveResult:
+    """What transcribing a meeting as it happened left behind: how much of it
+    is already stored, what language it turned out to be in, and why the live
+    work stopped early if it did."""
+
+    segment_count: int
+    language: str
+    failure: str | None = None
+
+
+class LiveSession:
+    """A meeting being transcribed while it is still being recorded.
+
+    Reads the two tracks the helper is writing, takes a stretch at a time, cuts
+    each stretch where nobody is talking and stores what it says against a memo
+    opened when the recording started. One thread, and never more than one
+    transcription at a time: the machine is also running the meeting, and a
+    second model on it would be felt in the room. Falling behind is handled by
+    reading longer stretches rather than by starting more work.
+
+    Nothing here may take a recording down with it. A stretch that fails ends
+    the live work and is reported when the meeting is over; the tracks on disk
+    are untouched, and the caller transcribes the whole recording the ordinary
+    way instead."""
+
+    def __init__(
+        self,
+        repo: Repository,
+        memo_id: int,
+        readers: Sequence[capture.TrackReader],
+        log: Log = _silent,
+    ) -> None:
+        self.memo_id = memo_id
+        self._repo = repo
+        self._readers = list(readers)
+        self._log = log
+        self._model = live_model_path()
+        self._ending = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._stored = 0
+        self._language = ""
+        self._failure: str | None = None
+        self._tail = ""
+
+    def start(self) -> None:
+        """Begins reading the meeting."""
+        self._thread.start()
+
+    def stop(self) -> LiveResult:
+        """Ends the live work, transcribing whatever the meeting was in the
+        middle of before returning. Waiting for that here is the point: it is
+        the only stretch of the meeting nobody has read yet, and it is seconds
+        of work rather than the minutes the whole recording would have been."""
+        self._ending.set()
+        self._thread.join()
+        return LiveResult(self._stored, self._language, self._failure)
+
+    def _run(self) -> None:
+        """The live work itself, on its own thread and against its own
+        connection to the database: sqlite refuses a connection used from a
+        thread that did not open it, and the recording's own thread is busy
+        sitting through the meeting."""
+        with open_repo(self._repo) as repo:
+            while not self._ending.wait(LIVE_POLL_S):
+                if not self._ready() or not self._pass(repo, final=False):
+                    if self._failure is not None:
+                        return
+        while self._failure is None and self._pending_s() > 0:
+            with open_repo(self._repo) as repo:
+                if not self._pass(repo, final=True):
+                    return
+
+    def _ready(self) -> bool:
+        """Whether enough of the meeting has been recorded to read a stretch of
+        it — the length asked for, and the run-up a pause is looked for in."""
+        try:
+            return self._pending_s() >= float(config.LIVE_CHUNK_S) + SEARCH_S
+        except GatewayError as e:
+            self._fail(e)
+            return False
+
+    def _pending_s(self) -> float:
+        """How much of the meeting has been recorded that nobody has read. The
+        shorter of the two sides: they are written by separate devices with
+        clocks of their own, and a stretch only exists once both have it."""
+        return min(r.available() / r.format.rate for r in self._readers)
+
+    def _pass(self, repo: Repository, final: bool) -> bool:
+        """One stretch of the meeting: read, cut at a pause, mixed, transcribed
+        and stored. False means the live work is over — either it failed, or
+        there was nothing there to read."""
+        try:
+            return self._read(repo, final)
+        except GatewayError as e:
+            self._fail(e)
+            return False
+
+    def _read(self, repo: Repository, final: bool) -> bool:
+        span = self._pending_s()
+        wanted = float(config.LIVE_CHUNK_S)
+        limit = LIVE_MAX_FACTOR * wanted
+        if final:
+            target, search = min(span, limit), 0.0 if span <= limit else SEARCH_S
+        else:
+            # a pass that finds far more waiting than it asked for is behind the
+            # room; it takes a bigger bite rather than a second worker
+            target, search = min(max(wanted, span - SEARCH_S), limit), SEARCH_S
+        if target <= 0:
+            return False
+        peeked = [
+            (r, r.peek(int(min(span, target + search) * r.format.rate)))
+            for r in self._readers
+        ]
+        cut = target if not search else cut_offset(
+            [(mono(raw, r.format), r.format.rate) for r, raw in peeked], target, search
+        )
+        cut = min(cut, span)
+        if cut <= 0:
+            return False
+        kept = [(r, raw[: int(cut * r.format.rate) * r.format.frame_bytes]) for r, raw in peeked]
+        at_ms = int(self._readers[0].taken_s * 1000)
+        segments = self._transcribe([(raw, r.format) for r, raw in kept], cut)
+        repo.append_segments(self.memo_id, shifted(segments, at_ms))
+        for reader, raw in kept:
+            reader.advance(len(raw) // reader.format.frame_bytes)
+        self._stored += len(segments)
+        if segments:
+            self._tail = prompt_tail(segments)
+        self._log(f"  transcribed {fmt_ts(at_ms)}–{fmt_ts(at_ms + int(cut * 1000))}")
+        return True
+
+    def _transcribe(self, parts: Sequence[tuple[bytes, TrackFormat]], seconds: float) -> list[Segment]:
+        """One stretch of both tracks, as words. The mix is thrown away with the
+        stretch: the archive of the meeting is made from the tracks themselves
+        when it ends, and keeping a minute of wav per minute of meeting would
+        double what a recording costs on disk for nothing."""
+        with tempfile.TemporaryDirectory() as td:
+            chunk = Path(td) / "chunk.wav"
+            audio.mix_chunk(parts, chunk)
+            raw = whisper.transcribe(chunk, seconds, model=self._model, prompt=self._tail)
+        if not self._language:
+            self._language = raw.get("result", {}).get("language", "")
+        return segments_from_whisper(raw)
+
+    def _fail(self, e: Exception) -> None:
+        """Gives up on reading the meeting as it happens, saying so once. The
+        recording itself is untouched and carries on."""
+        self._failure = str(e)
+        self._log(f"  transcribing as it records stopped: {e}")
+
+
+def live_model_path() -> Path:
+    """The model a meeting is transcribed with while it is still going on.
+    Its own setting, because the two jobs are not the same one: a stored
+    recording is transcribed as well as the machine can manage, while a meeting
+    has to be kept up with on a machine that is also running the meeting."""
+    return config.model_path(config.LIVE_MODEL) if config.LIVE_MODEL else config.WHISPER_MODEL_PATH
+
+
+def start_live(
+    repo: Repository,
+    system: Path,
+    mic: Path,
+    filename: str,
+    project: str = "other",
+    log: Log = _silent,
+) -> LiveSession | None:
+    """Starts transcribing a meeting that is being recorded right now, or says
+    why it will not and leaves the recording alone.
+
+    Nothing about a recording may depend on this working: a missing model, a
+    track that cannot be read, a setting turned off — each of them costs the
+    live transcript and nothing else, because the whole recording is still
+    transcribed the ordinary way when the meeting ends."""
+    if config.LIVE_TRANSCRIBE != "on":
+        return None
+    project = _project_name(project)
+    try:
+        whisper.require(live_model_path())
+        readers = [capture.TrackReader(p) for p in (system, mic)]
+    except GatewayError as e:
+        log(f"transcribing as it records is off this time — {e}")
+        return None
+    session = LiveSession(repo, repo.start_memo(filename=filename, project=project), readers, log)
+    session.start()
+    return session
+
+
+def discard_live(repo: Repository, memo_id: int) -> None:
+    """Throws away a memo opened for a meeting that ended up transcribed the
+    ordinary way after all, so a recording never leaves two memos behind."""
+    repo.delete_memo(memo_id)
+
+
+def finish_live(
+    repo: Repository,
+    memo_id: int,
+    src: Path,
+    language: str = "",
+    log: Log = _silent,
+    progress: Progress = _uncounted,
+    num_speakers: int | None = None,
+    diarize: bool = True,
+) -> ProcessResult:
+    """Everything a meeting transcribed as it happened still needs once it is
+    over: the archive converted and stored against the memo, and speakers put
+    to words that already exist. Transcription is the stage that is already
+    done, which is the whole point — what is left here takes seconds where the
+    transcript itself took the length of the meeting to accumulate."""
+    num_speakers = _speaker_count(num_speakers)
+    wav = config.UPLOADS_DIR / f"{src.stem}-{uuid.uuid4().hex[:8]}.wav"
+    progress(1, "converting")
+    log(f"converting {src.name} …")
+    audio.to_wav16k(src, wav)
+    duration = audio.duration_seconds(wav)
+    repo.finish_memo(
+        memo_id,
+        wav_path=str(wav),
+        duration_s=duration,
+        language=language,
+        recorded_at=audio.recorded_at(src),
+    )
+    segs = repo.segments(memo_id)
+    labels: list[str] = []
+    if diarize:
+        progress(3, "diarizing")
+        log("diarizing …")
+        turns = sherpa.diarize(wav, num_speakers)
+        segs = assign_speakers(segs, turns)
+        labels, speakers, matches = _identify(repo, wav, turns, keep_names={})
+        repo.save_diarization(memo_id, segs, speakers)
+        _report_matches(log, matches, keep_names={})
+    else:
+        log("skipping speaker detection …")
+    return ProcessResult(memo_id, len(segs), labels, language)
 
 
 def find_duplicate(repo: Repository, src: Path) -> Memo | None:

@@ -1,8 +1,11 @@
 import json
 import subprocess
+import tempfile
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ..domain import TrackFormat
 from . import GatewayError
 
 TIMEOUT_S = 600
@@ -67,6 +70,58 @@ def merge_tracks(system: Path, mic: Path, dst: Path) -> None:
         raise GatewayError(
             f"ffmpeg failed merging {system} and {mic}:\n{proc.stderr[-2000:]}"
         )
+
+
+def raw_format(fmt: TrackFormat) -> str:
+    """What ffmpeg calls a track's samples when they arrive without a header.
+    A width nothing here can name is refused rather than guessed at: guessed
+    wrong, the mix is noise and the transcript is nonsense that took minutes
+    to produce."""
+    if fmt.is_float and fmt.bits in (32, 64):
+        return f"f{fmt.bits}le"
+    if not fmt.is_float and fmt.bits == 8:
+        return "u8"
+    if not fmt.is_float and fmt.bits in (16, 24, 32):
+        return f"s{fmt.bits}le"
+    raise GatewayError(f"a recording in {fmt.bits}-bit audio cannot be mixed")
+
+
+def mix_chunk(parts: Sequence[tuple[bytes, TrackFormat]], dst: Path) -> None:
+    """Folds one stretch of a meeting's tracks into the single 16 kHz recording
+    the transcriber reads, while the meeting is still going on.
+
+    The same mix as `merge_tracks` on purpose: what is transcribed minute by
+    minute during a meeting and what is transcribed from the archive afterwards
+    have to be the same audio, or a transcript would change when somebody
+    re-ran it. The stretches arrive as bare samples because they were read out
+    of files another process is still writing — a header there says how long
+    the recording was when it was opened, which is nothing at all."""
+    usable = [(raw, fmt) for raw, fmt in parts if raw]
+    if not usable:
+        raise GatewayError("no audio in this stretch of the recording")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as td:
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+        for i, (raw, fmt) in enumerate(usable):
+            side = Path(td) / f"side-{i}.raw"
+            side.write_bytes(raw)
+            cmd += [
+                "-f", raw_format(fmt),
+                "-ar", str(fmt.rate),
+                "-ac", str(fmt.channels),
+                "-i", str(side),
+            ]
+        if len(usable) > 1:
+            cmd += ["-filter_complex", f"amix=inputs={len(usable)}:duration=longest"]
+        cmd += ["-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(dst)]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT_S)
+        except FileNotFoundError as e:
+            raise GatewayError(f"ffmpeg not found — {INSTALL_HINT}") from e
+        except subprocess.TimeoutExpired as e:
+            raise GatewayError(f"ffmpeg timed out after {TIMEOUT_S}s mixing a chunk") from e
+    if proc.returncode != 0:
+        raise GatewayError(f"ffmpeg failed mixing a chunk:\n{proc.stderr[-2000:]}")
 
 
 def duration_seconds(path: Path) -> float:

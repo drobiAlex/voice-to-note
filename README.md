@@ -53,7 +53,7 @@ To upgrade, re-run the installer.
 | Command | What it does |
 |---|---|
 | `vtn setup` | install whisper.cpp and all models (idempotent) |
-| `vtn record` | record this Mac's meeting — system audio + mic — then process it; a live level meter per side shows a muted mic while it can still be fixed (`--levels` for the raw numbers); `--output-device`/`--input-device` pin devices |
+| `vtn record` | record this Mac's meeting — system audio + mic — transcribing it as it goes, then finish it; a live level meter per side shows a muted mic while it can still be fixed (`--levels` for the raw numbers); `--output-device`/`--input-device` pin devices |
 | `vtn menubar` | open the menu bar recorder: one click to record, pickers for project and devices; `--preview` clicks through every state it can be in on made-up sound, to judge the look without recording anything |
 | `vtn process <file>` | convert, transcribe, diarize, store, extract notes — shape the run with --speakers, --steps, --template |
 | `vtn list` | list stored memos — `--sort created\|updated`, `--archived` for the drawer |
@@ -89,6 +89,7 @@ Shipped:
 - [x] To-dos as first-class items — counted per memo, reconciled through re-extraction, checked off from the board (`T`), beside a note (`c`) or the command line
 - [x] Live level meters in the recorder — a waveform strip per side beside the timer in the menu bar, native level indicators and a silence hint in its menu, a live meter in the terminal for `vtn record`, and `--levels` for anything else that wants the numbers
 - [x] Every memo at once — an All row above the projects in the TUI sidebar, a project column in the table, and every listing sortable by creation or last update (`s` in the TUI, `vtn list --sort`)
+- [x] Transcribing a meeting while it is still being recorded — `vtn record` reads the two growing tracks a stretch at a time, cuts each stretch where nobody is talking, and stores the words as they are said; stopping the recording leaves the last stretch and the speaker pass instead of the whole meeting. Measured over 25 minutes of speech: the wait after the last word drops from 204 s to 15 s, and the work costs the same — chunks cut at a pause were within 13% of the whole file, and at two minutes each were 10% cheaper than it, while chunks cut blind on the minute cost 160% more. `live_transcribe`, `live_chunk_s` and `live_model` in `vtn config`; a live pass that cannot run costs nothing but itself
 - [x] Archiving instead of deleting — a memo you are done with goes in a drawer under the projects (`h` in the TUI, `vtn archive`/`unarchive`, `vtn list --archived`), taking its to-dos off the board with it; nothing is rewritten, so what comes back out is exactly what went in, and opening a memo by id still works while it is away
 
 Later:
@@ -96,6 +97,8 @@ Later:
 - [ ] Voice Memos watcher — a phone recording syncs itself to `~/Library/Group Containers/group.com.apple.VoiceMemos.shared/Recordings`; a launchd + fswatch watcher copies each new file out (the folder itself is iCloud's — writing into it desyncs) and feeds it to `vtn process`, titled from the CloudRecordings.db beside it
 - [ ] To-dos on the phone via Apple Reminders — two-way: a Reminders list per project (iCloud carries it to the iPhone), checking off in vtn completes the reminder and completing it on the phone marks the to-do done, last writer wins by modification time; goes through an EventKit helper beside `capture.swift`, not AppleScript — EventKit reads all 4088 reminders here in under a second, AppleScript takes 25 s to list eight lists. Apple Notes checklists are out: no scripting interface can read or write a checkbox
 - [ ] Insights on the phone via Apple Notes — publish each memo's notes (summary, insights, decisions, open questions, dates, tags) as one note in a `vtn` folder, republished whenever the note changes, with each to-do line linking to its reminder so a tap opens the box to tick; a note edited on the phone is never overwritten
+- [ ] Chunk rollover in the recorder — have `capture.swift` close and reopen its files on a cadence and announce each finished pair on the stdout protocol it already speaks, so live transcription reads whole files instead of tracking byte cursors through ones still being written
+- [ ] A two-speed transcript — a small model keeping up with the room while the meeting runs, then one pass with the full model over the archive afterwards that replaces the words; immediate text and best-effort quality from the same recording, which is what makes a heavy model usable live on a machine without a GPU
 - [ ] Background worker & job queue — durable processing that survives restarts, batch imports, and the shape a future always-on server needs; deliberately deferred until that server becomes real
 - [ ] Full-text search across transcripts and notes
 

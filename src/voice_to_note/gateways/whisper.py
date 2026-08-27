@@ -19,15 +19,21 @@ def timeout_for(duration_s: float) -> float:
     return max(TIMEOUT_FLOOR_S, TIMEOUT_FACTOR * duration_s)
 
 
-def require() -> None:
+def require(model: Path | None = None) -> None:
     """Raises unless everything transcription needs is on disk. Separate from
     the call itself so that a caller which starts another stage first can find
     out in a millisecond that this one was never going to run, rather than
-    after minutes of work it then has to throw away."""
+    after minutes of work it then has to throw away.
+
+    A caller may ask after a model other than the configured one, which is what
+    a meeting transcribed as it happens does: the model it wants is small
+    enough to keep up with the room, and finding out it was never downloaded
+    is worth knowing before the recording rather than after it."""
     if not config.WHISPER_BIN.exists():
         raise GatewayError("whisper-cli not built — run ./run.sh first")
-    if not config.WHISPER_MODEL_PATH.exists():
-        raise GatewayError(f"model missing: {config.WHISPER_MODEL_PATH} — run ./run.sh first")
+    wanted = model or config.WHISPER_MODEL_PATH
+    if not wanted.exists():
+        raise GatewayError(f"model missing: {wanted} — run ./run.sh first")
 
 
 def decoding() -> list[str]:
@@ -49,14 +55,22 @@ def decoding() -> list[str]:
     return flags + (["-bs", "1", "-bo", "1"] if beam <= 1 else ["-bs", str(beam)])
 
 
-def transcribe(wav: Path, duration_s: float) -> WhisperTranscription:
-    """Turns speech into timed text, locally."""
-    require()
+def transcribe(
+    wav: Path, duration_s: float, model: Path | None = None, prompt: str = ""
+) -> WhisperTranscription:
+    """Turns speech into timed text, locally.
+
+    A prompt is what the words before this recording were, for a caller holding
+    one stretch of something longer. Whisper primes each of its own 30-second
+    windows with the text ahead of it and has nothing to prime the first one
+    with, so a meeting handed over a chunk at a time loses that context at
+    every seam unless the previous chunk's tail is handed back here."""
+    require(model)
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "out"
         cmd = [
             str(config.WHISPER_BIN),
-            "-m", str(config.WHISPER_MODEL_PATH),
+            "-m", str(model or config.WHISPER_MODEL_PATH),
             "-f", str(wav),
             "-l", "auto",
             "-ojf",
@@ -64,6 +78,8 @@ def transcribe(wav: Path, duration_s: float) -> WhisperTranscription:
             "-np",
             *decoding(),
         ]
+        if prompt:
+            cmd += ["--prompt", prompt]
         if config.VAD_MODEL_PATH.exists():
             cmd += ["--vad", "--vad-model", str(config.VAD_MODEL_PATH)]
         cmd = qos.background(cmd)

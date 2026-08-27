@@ -5,6 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .. import config
+from ..domain import TrackFormat
 from . import GatewayError
 
 STOP_TIMEOUT_S = 10
@@ -188,3 +189,106 @@ def devices() -> str:
             result.stderr.strip() or f"vtn-capture exited with code {result.returncode}"
         )
     return result.stdout
+
+
+def _track_format(chunk: bytes) -> TrackFormat:
+    """What a wav's format chunk says its audio is. A stream written as
+    WAVE_FORMAT_EXTENSIBLE names its real format in the extension rather than
+    in the field everything else reads, which is how a 32-bit float recording
+    would otherwise read as integers and transcribe as noise."""
+    if len(chunk) < 16:
+        raise GatewayError("wav format chunk is too short to read")
+    kind = int.from_bytes(chunk[0:2], "little")
+    channels = int.from_bytes(chunk[2:4], "little")
+    rate = int.from_bytes(chunk[4:8], "little")
+    bits = int.from_bytes(chunk[14:16], "little")
+    if kind == 0xFFFE and len(chunk) >= 26:
+        kind = int.from_bytes(chunk[24:26], "little")
+    if not channels or not rate or not bits:
+        raise GatewayError(f"wav format chunk describes no audio: {chunk[:16]!r}")
+    return TrackFormat(rate=rate, channels=channels, bits=bits, is_float=kind == 3)
+
+
+def _wav_layout(path: Path) -> tuple[TrackFormat, int]:
+    """A track's format and where its audio starts, read once. Everything
+    after the header is raw frames, so this is all anybody needs to read a file
+    somebody else is still writing."""
+    try:
+        with path.open("rb") as f:
+            head = f.read(12)
+            if len(head) < 12 or head[:4] != b"RIFF" or head[8:12] != b"WAVE":
+                raise GatewayError(f"not a wav recording: {path}")
+            fmt: TrackFormat | None = None
+            while True:
+                marker = f.read(8)
+                if len(marker) < 8:
+                    raise GatewayError(f"wav header ends before its audio does: {path}")
+                name = marker[:4]
+                size = int.from_bytes(marker[4:8], "little")
+                if name == b"data":
+                    if fmt is None:
+                        raise GatewayError(f"wav says nothing about its format: {path}")
+                    return fmt, f.tell()
+                if name == b"fmt ":
+                    fmt = _track_format(f.read(size))
+                else:
+                    f.seek(size, 1)
+                # chunks are padded to an even length, and the pad byte belongs
+                # to nobody: reading it as the next chunk's name finds garbage
+                f.seek(size & 1, 1)
+    except OSError as e:
+        raise GatewayError(f"cannot read the recording at {path}: {e}") from e
+
+
+class TrackReader:
+    """One side of a meeting, read while the helper is still writing it.
+
+    The header's own length is never trusted. AVAudioFile writes it short and
+    corrects it only when the file is closed — capture.swift says so where the
+    file is opened — so how much audio exists is taken from the size of the
+    file on disk instead, which is true at every moment of a recording.
+
+    Reading is separated into looking and consuming on purpose: how much of a
+    stretch to keep is decided by measuring the audio in it, and a reader that
+    handed over what it read could not be told afterwards that only the first
+    forty seconds of it were wanted."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.format, self._audio_at = _wav_layout(path)
+        self._taken = 0
+
+    @property
+    def taken_s(self) -> float:
+        """How far into the recording this reader has already got, in seconds.
+        Counted in frames rather than accumulated from chunk lengths, so a
+        meeting's timestamps cannot drift over the course of an afternoon."""
+        return self._taken / self.format.rate
+
+    def available(self) -> int:
+        """How many whole frames have been written that nobody has taken yet.
+        A partly written frame is not one of them: it is the recorder halfway
+        through a sample, and it will be whole a millisecond from now."""
+        try:
+            size = self.path.stat().st_size
+        except OSError as e:
+            raise GatewayError(f"the recording at {self.path} went away: {e}") from e
+        written = max(0, size - self._audio_at) // self.format.frame_bytes
+        return max(0, written - self._taken)
+
+    def peek(self, frames: int) -> bytes:
+        """The next stretch of audio, without consuming it."""
+        if frames <= 0:
+            return b""
+        frame = self.format.frame_bytes
+        try:
+            with self.path.open("rb") as f:
+                f.seek(self._audio_at + self._taken * frame)
+                raw = f.read(frames * frame)
+        except OSError as e:
+            raise GatewayError(f"cannot read the recording at {self.path}: {e}") from e
+        return raw[: len(raw) - len(raw) % frame]
+
+    def advance(self, frames: int) -> None:
+        """Gives up on ever reading a stretch again, once it has been kept."""
+        self._taken += max(0, frames)

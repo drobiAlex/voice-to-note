@@ -79,14 +79,31 @@ def _pipeline(
     the caller may have had to ask it something before any of this could start,
     and one connection for the command keeps that question and this work reading
     the same memos."""
-    result = services.process_memo(
+    _finished(
         repo,
-        src,
-        project=args.project,
-        log=status,
-        num_speakers=count,
-        diarize="speakers" in steps,
+        services.process_memo(
+            repo,
+            src,
+            project=args.project,
+            log=status,
+            num_speakers=count,
+            diarize="speakers" in steps,
+        ),
+        args,
+        steps,
     )
+
+
+def _finished(
+    repo: Repository,
+    result: services.ProcessResult,
+    args: argparse.Namespace,
+    steps: frozenset[str],
+) -> None:
+    """What happens to a memo once its transcript and speakers are stored,
+    however they got there. Kept apart from the transcription above it because
+    a meeting transcribed while it was being recorded arrives here having
+    skipped that stage entirely, and everything from here on is the same."""
     status(
         f"memo {result.memo_id} — {result.segment_count} segments,"
         f" {len(result.labels)} speakers, language={result.language}"
@@ -187,7 +204,14 @@ def cmd_record(args: argparse.Namespace) -> None:
     then they are kept whatever goes wrong, since they are the only copy of a
     meeting nobody can hold twice. A meter runs the whole time on a terminal,
     because a side that is recording silence is worth knowing about while
-    somebody is still in the room to fix it."""
+    somebody is still in the room to fix it.
+
+    The meeting is transcribed while it is still being recorded, a stretch at a
+    time, so that stopping the recording leaves the last stretch and the
+    speaker pass to do rather than the whole meeting — minutes of a machine at
+    full tilt, at the moment somebody wants to close the laptop and leave. A
+    live pass that cannot run costs nothing but itself: the recording is then
+    transcribed the ordinary way, from the merged file, exactly as before."""
     if sys.platform != "darwin":
         sys.exit("meeting recording is macOS-only")
     steps, count = _checked(args)
@@ -204,27 +228,55 @@ def cmd_record(args: argparse.Namespace) -> None:
         input_uid=args.input_device,
         levels=levels,
     )
-    status(f"recording — press Ctrl+C to stop ({tracks})")
-    try:
-        code = recording.wait()
-        ended = f"recording ended on its own: vtn-capture exited with code {code}"
-    except KeyboardInterrupt:
-        ended = ""
-    # the helper is stopped before the meter is ended and anything else said: a
-    # reading arriving afterwards would draw half a frame under the line below
-    recording.stop()
-    meter_done()
-    status(ended)
-
-    if not _taped(system_wav) or not _taped(mic_wav):
-        sys.exit(f"nothing was recorded — no audio in {tracks}")
-    status("merging the two tracks …")
-    audio.merge_tracks(system_wav, mic_wav, merged)
-    system_wav.unlink()
-    mic_wav.unlink()
-    tracks.rmdir()
-    status(f"recorded {merged}")
     with Repository() as repo:
+        live = services.start_live(
+            repo, system_wav, mic_wav, merged.name, args.project, log=status
+        )
+        status(f"recording — press Ctrl+C to stop ({tracks})")
+        try:
+            code = recording.wait()
+            ended = f"recording ended on its own: vtn-capture exited with code {code}"
+        except KeyboardInterrupt:
+            ended = ""
+        # the helper is stopped before the meter is ended and anything else
+        # said: a reading arriving afterwards would draw half a frame under the
+        # line below
+        recording.stop()
+        meter_done()
+        status(ended)
+        # the last stretch of the meeting is read before the tracks are merged
+        # away, and while the two of them are still on disk to be read from
+        heard = live.stop() if live is not None else None
+
+        if not _taped(system_wav) or not _taped(mic_wav):
+            if live is not None:
+                services.discard_live(repo, live.memo_id)
+            sys.exit(f"nothing was recorded — no audio in {tracks}")
+        status("merging the two tracks …")
+        audio.merge_tracks(system_wav, mic_wav, merged)
+        system_wav.unlink()
+        mic_wav.unlink()
+        tracks.rmdir()
+        status(f"recorded {merged}")
+        if live is not None and heard is not None and heard.segment_count:
+            status(f"transcribed while recording — {heard.segment_count} segments")
+            _finished(
+                repo,
+                services.finish_live(
+                    repo,
+                    live.memo_id,
+                    merged,
+                    language=heard.language,
+                    log=status,
+                    num_speakers=count,
+                    diarize="speakers" in steps,
+                ),
+                args,
+                steps,
+            )
+            return
+        if live is not None:
+            services.discard_live(repo, live.memo_id)
         _pipeline(repo, merged, args, steps, count)
 
 
