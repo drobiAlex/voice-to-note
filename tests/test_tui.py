@@ -4460,3 +4460,246 @@ async def test_a_tick_landing_after_the_sidebar_has_gone_leaves_the_write_unread
         pilot.app._take_in_outside_writes()
 
         assert pilot.app.seen_version == unread
+
+
+# --- talking about memos, and keeping the thread ------------------------
+
+
+async def finish_chat(pilot) -> None:
+    """Waits for a chat screen's own answer to come back."""
+    replies = [worker for worker in pilot.app.workers if worker.name == "_reply"]
+    if replies:
+        await pilot.app.workers.wait_for_complete(replies)
+    await pilot.pause()
+
+
+def chat_log(pilot) -> str:
+    """The thread as it reads on screen."""
+    return pilot.app.screen.query_one("#chat-log", Markdown).source
+
+
+async def start_chat(pilot, memo_id: int) -> None:
+    """Opens a chat about one memo the way a person does: C, then enter on
+    the scope picker with that memo already ticked."""
+    await open_memo(pilot, memo_id)
+    await pilot.press("C")
+    await pilot.pause()
+    assert showing(pilot.app, "#chat-scope")
+    await pilot.press("enter")
+    await pilot.pause()
+
+
+async def send(pilot, question: str) -> None:
+    """Types a question into the open chat and sends it."""
+    pilot.app.screen.query_one("#chat-input", Input).value = question
+    await pilot.press("enter")
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_pressing_shift_c_offers_the_memos_with_the_one_on_screen_ticked(repo):
+    work, home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, home)
+        await pilot.press("C")
+        await pilot.pause()
+
+        picker = pilot.app.screen.query_one("#chat-scope", SelectionList)
+        assert picker.selected == [home]
+        assert picker.option_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_chat_over_nothing_is_refused_while_the_picker_is_open(repo):
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("C")
+        await pilot.pause()
+        pilot.app.screen.query_one("#chat-scope", SelectionList).deselect_all()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert showing(pilot.app, "#chat-scope")
+        assert "tick at least one memo" in said(pilot)
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_chat_says_what_it_is_about_and_files_nothing_until_asked(repo):
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await start_chat(pilot, work)
+
+        assert showing(pilot.app, "#chat-input")
+        about = str(pilot.app.screen.query_one("#chat-about", Static).content)
+        assert about.startswith("new conversation") and "standup.m4a" in about
+        assert "nothing asked yet" in chat_log(pilot)
+        assert services.conversations(repo) == []
+
+
+@pytest.mark.asyncio
+async def test_a_question_shows_in_the_thread_before_its_answer_arrives(repo, monkeypatch):
+    work, _home = seed(repo)
+    holding = threading.Event()
+
+    def slow_chat(_repo, _cid, asked):
+        holding.wait(timeout=5)
+        return services.ChatTurn("claude", "On Friday.")
+
+    monkeypatch.setattr(services, "chat", slow_chat)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await start_chat(pilot, work)
+        await send(pilot, "When do they ship?")
+
+        assert "When do they ship?" in chat_log(pilot)
+        assert "answering" in chat_log(pilot)
+        assert pilot.app.screen.query_one("#chat-input", Input).value == ""
+
+        holding.set()
+        await finish_chat(pilot)
+
+
+@pytest.mark.asyncio
+async def test_the_reply_lands_in_the_thread_and_the_thread_is_kept(repo, monkeypatch):
+    work, _home = seed(repo)
+    # the real use case with only the backend chain faked, so the thread lands
+    # in the database through the worker's own connection
+    monkeypatch.setattr(
+        services, "_converse", lambda system, history, q, **k: ("claude", f"re: {q}")
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await start_chat(pilot, work)
+        await send(pilot, "When do they ship?")
+        await finish_chat(pilot)
+
+        log = chat_log(pilot)
+        assert "**You**\n\nWhen do they ship?" in log
+        assert "**Assistant** · claude\n\nre: When do they ship?" in log
+        assert "answering" not in log
+        assert "answered via claude" in said(pilot)
+        assert showing(pilot.app, "#chat-input")
+
+    (listing,) = services.conversations(repo)
+    assert listing.messages == 2
+    assert listing.conversation.memo_ids == (work,)
+
+
+@pytest.mark.asyncio
+async def test_a_second_question_waits_for_the_first(repo, monkeypatch):
+    work, _home = seed(repo)
+    holding = threading.Event()
+
+    def slow_chat(_repo, _cid, asked):
+        holding.wait(timeout=5)
+        return services.ChatTurn("claude", "ok")
+
+    monkeypatch.setattr(services, "chat", slow_chat)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await start_chat(pilot, work)
+        await send(pilot, "first?")
+        await send(pilot, "second?")
+
+        assert "still answering" in said(pilot)[-1]
+        assert pilot.app.screen.query_one("#chat-input", Input).value == "second?"
+
+        holding.set()
+        await finish_chat(pilot)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_answer_hands_the_question_back_to_the_input(repo, monkeypatch):
+    work, _home = seed(repo)
+
+    def failing(_repo, _cid, _asked):
+        raise services.ExtractionError("chat failed: claude: down")
+
+    monkeypatch.setattr(services, "chat", failing)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await start_chat(pilot, work)
+        await send(pilot, "When do they ship?")
+        await finish_chat(pilot)
+
+        assert pilot.app.screen.query_one("#chat-input", Input).value == "When do they ship?"
+        assert "When do they ship?" not in chat_log(pilot)
+        assert "chat failed: claude: down" in said(pilot)
+
+
+@pytest.mark.asyncio
+async def test_a_blank_question_is_refused_with_the_chat_still_open(repo, monkeypatch):
+    work, _home = seed(repo)
+    monkeypatch.setattr(services, "chat", lambda *a: (_ for _ in ()).throw(AssertionError("sent")))
+
+    async with MemoApp(repo).run_test() as pilot:
+        await start_chat(pilot, work)
+        await send(pilot, "   ")
+
+        assert showing(pilot.app, "#chat-input")
+        assert "a question needs something in it" in said(pilot)
+
+
+@pytest.mark.asyncio
+async def test_the_chat_list_reopens_a_thread_with_everything_said_in_it(repo):
+    work, _home = seed(repo)
+    cid = services.start_chat(repo, [work], title="shipping")
+    repo.add_messages(cid, [("user", "when?", ""), ("assistant", "friday", "claude")])
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("H")
+        await pilot.pause()
+        table = pilot.app.screen.query_one("#chats", DataTable)
+        assert table.row_count == 1
+        assert str(table.get_row_at(0)[1]) == "shipping"
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert "shipping" in str(pilot.app.screen.query_one("#chat-about", Static).content)
+        assert "**Assistant** · claude\n\nfriday" in chat_log(pilot)
+
+
+@pytest.mark.asyncio
+async def test_the_chat_list_says_so_when_there_is_nothing_in_it(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("H")
+        await pilot.pause()
+
+        assert showing(pilot.app, "#no-chats")
+        assert pilot.app.screen.query_one("#no-chats", Static).display is True
+        await pilot.press("enter")
+        await pilot.pause()
+        assert showing(pilot.app, "#no-chats")
+
+
+@pytest.mark.asyncio
+async def test_delete_on_the_chat_list_throws_the_thread_away(repo):
+    work, _home = seed(repo)
+    cid = services.start_chat(repo, [work], title="shipping")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await pilot.press("H")
+        await pilot.pause()
+        await pilot.press("delete")
+        await pilot.pause()
+
+        assert showing(pilot.app, "#no-chats")
+        assert f"conversation {cid} deleted" in said(pilot)
+
+    assert services.conversations(repo) == []
+
+
+@pytest.mark.asyncio
+async def test_the_chat_key_is_offered_only_while_a_memo_is_pointed_at(repo):
+    async with MemoApp(repo).run_test() as pilot:
+        # an empty library has no memo to talk about
+        assert pilot.app.check_action("chat", ()) is False
+        assert "chat" in tui_app.MEMO_ACTIONS
+        assert any(keys == ("C",) for keys, _a, _l in tui_app._MENU_ROWS)

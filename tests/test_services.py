@@ -2809,3 +2809,26 @@ def test_memo_ids_read_a_comma_list_however_it_is_spaced(text, ids):
 def test_memo_ids_refuse_anything_but_numbers(text):
     with pytest.raises(services.InvalidInput):
         services.memo_ids(text)
+
+
+def test_a_thread_renders_each_turn_under_who_said_it_with_the_question_in_flight_last():
+    from voice_to_note.domain import Message
+
+    turns = [Message("user", "when?", "t"), Message("assistant", "friday", "t", "claude")]
+    text = services.chat_markdown(turns, pending="sure?")
+    assert text.split("\n\n---\n\n") == [
+        "**You**\n\nwhen?",
+        "**Assistant** · claude\n\nfriday",
+        "**You**\n\nsure?\n\n*answering …*",
+    ]
+    assert services.chat_markdown([]).startswith("*nothing asked yet")
+
+
+def test_chat_rows_carry_what_a_table_shows(repo, wav, monkeypatch):
+    memo_id = said(repo, wav, "x", filename="standup")
+    fake_llm(monkeypatch, claude="ok")
+    cid = services.start_chat(repo, [memo_id])
+    services.chat(repo, cid, "when?")
+    (row,) = services.chat_rows(repo)
+    assert (row.id, row.title, row.about, row.messages) == (cid, "when?", f"{memo_id} standup", "2")
+    assert services.chat_rows(repo, memo_id=999) == []

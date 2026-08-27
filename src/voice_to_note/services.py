@@ -1884,6 +1884,57 @@ def chat_scope_text(convo: Conversation) -> str:
     )
 
 
+def memo_scope_text(repo: Repository, memo_ids: Sequence[int]) -> str:
+    """The memos a conversation is about to be about, as a heading says it,
+    for a screen showing a thread that has not been opened yet."""
+    ids, titles = _scope(repo, memo_ids)
+    return ", ".join(f"{memo_id} {title}" for memo_id, title in zip(ids, titles, strict=True))
+
+
+def chat_markdown(messages: Sequence[Message], pending: str | None = None) -> str:
+    """A thread as Markdown for a screen that renders it: each turn under who
+    said it, the model's turns naming their backend, and a question still
+    being answered shown at the end so the screen never reads as having lost
+    it. Formatted here rather than on the screen, like every other thing the
+    screen draws, so the two front ends cannot come to word a thread
+    differently."""
+    parts = []
+    for m in messages:
+        who = "**You**" if m.role == "user" else f"**Assistant** · {m.backend}"
+        parts.append(f"{who}\n\n{m.text}")
+    if pending is not None:
+        parts.append(f"**You**\n\n{pending}\n\n*answering …*")
+    if not parts:
+        return "*nothing asked yet — type a question below*"
+    return "\n\n---\n\n".join(parts)
+
+
+@dataclass(frozen=True)
+class ChatRow:
+    """One conversation as a table lists it: the id its row is keyed by, and
+    what a person picks it out by."""
+
+    id: int
+    title: str
+    about: str
+    messages: str
+    last: str
+
+
+def chat_rows(repo: Repository, memo_id: int | None = None) -> list[ChatRow]:
+    """Every conversation as rows for a table, latest first."""
+    return [
+        ChatRow(
+            c.conversation.id,
+            c.conversation.title or "(untitled)",
+            chat_scope_text(c.conversation),
+            str(c.messages),
+            c.last_at,
+        )
+        for c in conversations(repo, memo_id)
+    ]
+
+
 def chat_text(repo: Repository, conversation_id: int) -> str:
     """A conversation as a person reads it: a heading with what it is about,
     then every turn under who said it, the model's turns naming the backend
