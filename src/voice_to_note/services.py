@@ -1739,6 +1739,24 @@ def _scope(repo: Repository, memo_ids: Sequence[int]) -> tuple[list[int], list[s
     return ids, titles
 
 
+def memo_ids(text: str) -> list[int]:
+    """Memo ids as a person types them on one command line — "3,5" or
+    "3, 5" — refusing anything that is not a number. A comma list rather
+    than separate words, so a question that begins with a number can follow
+    the ids on the same line without being mistaken for one."""
+    ids = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if not part.isdigit():
+            raise InvalidInput(f"memo ids are numbers separated by commas, not {part!r}")
+        ids.append(int(part))
+    if not ids:
+        raise InvalidInput("a conversation needs at least one memo")
+    return ids
+
+
 def start_chat(repo: Repository, memo_ids: Sequence[int], title: str = "") -> int:
     """Opens a conversation about some memos, handing back its id so the
     first question can be put to it. Nothing is asked of a model yet: opening

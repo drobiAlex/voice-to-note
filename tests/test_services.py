@@ -2798,3 +2798,14 @@ def test_the_chat_template_is_listed_beside_the_others(templates_dir):
     infos = {row[0]: row for row in services.template_infos()}
     assert infos["chat"][3].startswith("holds a conversation")
     assert "chat" not in services.note_templates()
+
+
+@pytest.mark.parametrize("text, ids", [("3", [3]), ("3,5", [3, 5]), (" 3 , 5, ", [3, 5])])
+def test_memo_ids_read_a_comma_list_however_it_is_spaced(text, ids):
+    assert services.memo_ids(text) == ids
+
+
+@pytest.mark.parametrize("text", ["", ",", "3 5", "a", "3,-1"])
+def test_memo_ids_refuse_anything_but_numbers(text):
+    with pytest.raises(services.InvalidInput):
+        services.memo_ids(text)
