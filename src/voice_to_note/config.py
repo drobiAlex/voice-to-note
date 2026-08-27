@@ -191,6 +191,22 @@ SETTINGS: dict[str, Setting] = {
     "gemini_timeout_s": Setting(
         600, int, "seconds before a stuck gemini call is given up on", kind="int"
     ),
+    "chat_model": Setting(
+        "sonnet",
+        str,
+        "claude model used for chat about memos",
+        kind="choice",
+        choices=("sonnet", "haiku", "opus"),
+    ),
+    "chat_history_turns": Setting(
+        12, int, "past chat messages replayed into each new question", kind="int"
+    ),
+    "chat_context_chars": Setting(
+        60000,
+        int,
+        "characters of transcript a chat sends along; memos past that go in as notes only",
+        kind="int",
+    ),
     "refine_workers": Setting(4, int, "repair windows a refine pass runs at once", kind="int"),
     "refine_window": Setting(
         20, int, "transcript lines repaired together in one refine window", kind="int"
@@ -276,6 +292,10 @@ CLAUDE_TIMEOUT_S: int = _setting("claude_timeout_s")
 OLLAMA_TIMEOUT_S: int = _setting("ollama_timeout_s")
 CODEX_TIMEOUT_S: int = _setting("codex_timeout_s")
 GEMINI_TIMEOUT_S: int = _setting("gemini_timeout_s")
+
+CHAT_MODEL: str = _setting("chat_model")
+CHAT_HISTORY_TURNS: int = _setting("chat_history_turns")
+CHAT_CONTEXT_CHARS: int = _setting("chat_context_chars")
 
 REFINE_WORKERS: int = _setting("refine_workers")
 REFINE_WINDOW: int = _setting("refine_window")

@@ -500,3 +500,84 @@ def test_geminis_complete_drops_both_the_schema_and_the_callers_model_override(m
     llm.BACKENDS["gemini"].complete("summarise this", {"type": "object"}, "haiku")
 
     assert seen == {"prompt": "summarise this", "model": None}
+
+
+# --- chat ----------------------------------------------------------------
+
+
+def turns(*pairs):
+    """A stored history, as (role, text) pairs."""
+    from voice_to_note.domain import Message
+
+    return [Message(role, text, "2026-01-01 00:00:00") for role, text in pairs]
+
+
+def test_the_chat_system_carries_the_template_the_person_and_the_memos():
+    system = llm.chat_system("=== memo 1 ===\nhello", "Sasha", "2026-08-27")
+    assert system.startswith(llm.CHAT_PROMPT)
+    assert "goes by Sasha" in system
+    assert "Today is 2026-08-27" in system
+    assert system.endswith("=== Memos ===\n=== memo 1 ===\nhello")
+
+
+def test_a_flattened_chat_replays_the_history_before_the_question():
+    prompt = llm.chat_prompt("SYS", turns(("user", "when?"), ("assistant", "friday")), "sure?")
+    assert prompt.startswith("SYS\n\n=== Conversation so far ===\nUser: when?\n\nAssistant: friday")
+    assert prompt.endswith("=== Now ===\nUser: sure?\n\nAssistant:")
+
+
+def test_a_flattened_chat_with_no_history_says_so():
+    assert "(nothing yet)" in llm.chat_prompt("SYS", [], "hi")
+
+
+def test_the_chat_template_can_be_overridden_like_any_other(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "TEMPLATES_DIR", tmp_path)
+    (tmp_path / "chat.md").write_text("be terse")
+    assert llm.chat_system("ctx", "A", "2026-01-01").startswith("be terse")
+
+
+def test_ollama_is_handed_the_conversation_as_messages(monkeypatch):
+    seen: dict = {}
+
+    def urlopen(req, timeout=None):
+        seen["payload"] = json.loads(req.data)
+        return FakeResponse(json.dumps({"message": {"content": "yes"}}).encode())
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", urlopen)
+
+    reply = llm.ollama_chat("SYS", turns(("user", "when?"), ("assistant", "friday")), "sure?")
+
+    assert reply == "yes"
+    assert seen["payload"]["messages"] == [
+        {"role": "system", "content": "SYS"},
+        {"role": "user", "content": "when?"},
+        {"role": "assistant", "content": "friday"},
+        {"role": "user", "content": "sure?"},
+    ]
+    assert "format" not in seen["payload"]
+
+
+def test_only_ollama_offers_a_message_channel():
+    assert llm.BACKENDS["ollama"].chat is not None
+    assert all(llm.BACKENDS[n].chat is None for n in ("claude", "codex", "gemini"))
+
+
+def test_ollamas_chat_entry_reaches_the_module_function(monkeypatch):
+    seen: dict = {}
+    monkeypatch.setattr(
+        llm, "ollama_chat", lambda system, history, question: seen.update(q=question) or "ok"
+    )
+    assert llm.BACKENDS["ollama"].chat("SYS", [], "hi?") == "ok"
+    assert seen == {"q": "hi?"}
+
+
+def test_a_prompt_too_long_for_geminis_command_line_is_a_backend_failure(monkeypatch):
+    # the prompt travels in argv; a conversation over several memos can be
+    # more than the kernel allows, and that must demote gemini, not crash
+    def run(*args, **kwargs):
+        raise OSError(7, "Argument list too long")
+
+    monkeypatch.setattr(llm.subprocess, "run", run)
+
+    with pytest.raises(llm.BackendError, match="Argument list too long"):
+        llm.gemini_complete("x" * 10)

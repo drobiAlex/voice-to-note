@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import random
 import re
@@ -69,6 +70,15 @@ def fake_llm(monkeypatch, *, claude=None, ollama=None) -> list[str]:
     monkeypatch.setattr(services.llm, "ollama_available", lambda: ollama is not None)
     monkeypatch.setattr(services.llm, "claude_complete", backend(claude))
     monkeypatch.setattr(services.llm, "ollama_complete", backend(ollama))
+    # ollama is handed a conversation as messages; the flattened form of the
+    # same conversation is what lands in `seen`, so a test reads both alike
+    monkeypatch.setattr(
+        services.llm,
+        "ollama_chat",
+        lambda system, history, question: backend(ollama)(
+            llm.chat_prompt(system, history, question)
+        ),
+    )
     return seen
 
 
@@ -2563,3 +2573,228 @@ def test_re_extracting_keeps_the_name_the_first_extraction_gave(repo, wav, monke
     services.run_extraction(repo, memo_id)
 
     assert repo.memo(memo_id).filename == "orbit - Sprint planning"
+
+
+# --- chat ----------------------------------------------------------------
+
+
+def said(repo, wav, *lines: str, filename="memo.m4a") -> int:
+    """A memo whose transcript is these lines, one per second."""
+    return add_memo(
+        repo, wav, filename=filename,
+        segments=[Segment(i * 1000, i * 1000 + 900, t, speaker="S1") for i, t in enumerate(lines)],
+    )
+
+
+def test_a_chat_is_opened_over_memos_that_exist_and_remembers_their_names(repo, wav):
+    a = said(repo, wav, "one", filename="a - pricing")
+    b = said(repo, wav, "two", filename="b - roadmap")
+    cid = services.start_chat(repo, [b, a, b], title="  plans ")
+    convo = repo.conversation(cid)
+    assert (convo.title, convo.memo_ids, convo.memo_titles) == (
+        "plans", (b, a), ("b - roadmap", "a - pricing")
+    )
+
+
+def test_a_chat_about_no_memos_or_a_missing_one_is_refused(repo, wav):
+    with pytest.raises(services.InvalidInput):
+        services.start_chat(repo, [])
+    with pytest.raises(services.NotFound):
+        services.start_chat(repo, [999])
+
+
+def test_a_turn_sends_the_notes_and_transcript_and_files_both_sides(repo, wav, monkeypatch):
+    memo_id = said(repo, wav, "Ship it Friday")
+    repo.save_notes_md(memo_id, "# Notes\n- ship friday")
+    prompts = fake_llm(monkeypatch, claude="  Friday, S1 said so.  ")
+    cid = services.start_chat(repo, [memo_id])
+
+    turn = services.chat(repo, cid, "  When do they ship?  ")
+
+    assert turn == services.ChatTurn("claude", "Friday, S1 said so.")
+    assert "- ship friday" in prompts[0]
+    assert "[00:00] S1: Ship it Friday" in prompts[0]
+    assert prompts[0].rstrip().endswith("User: When do they ship?\n\nAssistant:")
+    assert [(m.role, m.text, m.backend) for m in services.chat_history(repo, cid)] == [
+        ("user", "When do they ship?", ""),
+        ("assistant", "Friday, S1 said so.", "claude"),
+    ]
+
+
+def test_an_unnamed_chat_takes_its_first_question_as_a_name(repo, wav, monkeypatch):
+    memo_id = said(repo, wav, "x")
+    fake_llm(monkeypatch, claude="ok")
+    cid = services.start_chat(repo, [memo_id])
+    services.chat(repo, cid, "What was decided about the pricing tiers for the enterprise plan?")
+    assert repo.conversation(cid).title == "What was decided about the pricing tiers for the enterpri…"
+    services.chat(repo, cid, "and?")
+    assert repo.conversation(cid).title.startswith("What was decided")
+
+
+def test_a_named_chat_keeps_its_name_through_the_first_question(repo, wav, monkeypatch):
+    memo_id = said(repo, wav, "x")
+    fake_llm(monkeypatch, claude="ok")
+    cid = services.start_chat(repo, [memo_id], title="pricing")
+    services.chat(repo, cid, "anything?")
+    assert repo.conversation(cid).title == "pricing"
+
+
+def test_the_next_turn_replays_the_earlier_ones(repo, wav, monkeypatch):
+    memo_id = said(repo, wav, "x")
+    prompts = fake_llm(monkeypatch, claude="friday")
+    cid = services.start_chat(repo, [memo_id])
+    services.chat(repo, cid, "when?")
+    services.chat(repo, cid, "sure?")
+    assert "User: when?\n\nAssistant: friday" in prompts[1]
+    assert prompts[1].rstrip().endswith("User: sure?\n\nAssistant:")
+
+
+def test_only_the_last_so_many_turns_are_replayed(repo, wav, monkeypatch):
+    memo_id = said(repo, wav, "x")
+    prompts = fake_llm(monkeypatch, claude="a")
+    monkeypatch.setattr(config, "CHAT_HISTORY_TURNS", 2)
+    cid = services.start_chat(repo, [memo_id])
+    services.chat(repo, cid, "first?")
+    services.chat(repo, cid, "second?")
+    services.chat(repo, cid, "third?")
+    assert "first?" not in prompts[2]
+    assert "User: second?\n\nAssistant: a" in prompts[2]
+
+
+def test_a_backend_that_takes_messages_is_given_them_rather_than_a_prompt(repo, wav, monkeypatch):
+    memo_id = said(repo, wav, "Ship it")
+    seen: dict = {}
+
+    def chat(system, history, question):
+        seen.update(system=system, history=list(history), question=question)
+        return "yes"
+
+    monkeypatch.setattr(config, "LLM_BACKENDS", "talker")
+    monkeypatch.setattr(
+        services.llm,
+        "BACKENDS",
+        {"talker": dataclasses.replace(fake_backend("talker", reply="never"), chat=chat)},
+    )
+    cid = services.start_chat(repo, [memo_id])
+    services.chat(repo, cid, "when?")
+    services.chat(repo, cid, "sure?")
+
+    assert seen["question"] == "sure?"
+    assert [(m.role, m.text) for m in seen["history"]] == [("user", "when?"), ("assistant", "yes")]
+    assert "[00:00] S1: Ship it" in seen["system"]
+
+
+def test_a_blank_reply_demotes_the_backend_to_the_next_one(repo, wav, monkeypatch):
+    memo_id = said(repo, wav, "x")
+    fake_llm(monkeypatch, claude="   ", ollama="from ollama")
+    cid = services.start_chat(repo, [memo_id])
+    assert services.chat(repo, cid, "hi?").backend.startswith("ollama")
+
+
+def test_a_failed_turn_leaves_the_thread_as_it_was(repo, wav, monkeypatch):
+    memo_id = said(repo, wav, "x")
+    fake_llm(monkeypatch, claude=llm.BackendError("down"))
+    cid = services.start_chat(repo, [memo_id])
+    with pytest.raises(services.ExtractionError, match="chat failed"):
+        services.chat(repo, cid, "hi?")
+    assert services.chat_history(repo, cid) == []
+
+
+def test_a_chat_over_several_memos_sends_each_under_its_own_heading(repo, wav, monkeypatch):
+    a = said(repo, wav, "alpha", filename="a - one")
+    b = said(repo, wav, "beta", filename="b - two")
+    prompts = fake_llm(monkeypatch, claude="ok")
+    cid = services.start_chat(repo, [a, b])
+    services.chat(repo, cid, "hi?")
+    assert prompts[0].index(f"=== memo {a} — a - one") < prompts[0].index(f"=== memo {b} — b - two")
+    assert "[00:00] S1: alpha" in prompts[0] and "[00:00] S1: beta" in prompts[0]
+
+
+def test_a_transcript_past_the_budget_goes_in_as_notes_only(repo, wav, monkeypatch):
+    short = said(repo, wav, "tiny", filename="short")
+    long = said(repo, wav, "a" * 200, filename="long")
+    prompts = fake_llm(monkeypatch, claude="ok")
+    monkeypatch.setattr(config, "CHAT_CONTEXT_CHARS", 100)
+    cid = services.start_chat(repo, [long, short])
+    services.chat(repo, cid, "hi?")
+    assert "a" * 200 not in prompts[0]
+    assert "transcript omitted" in prompts[0]
+    assert "[00:00] S1: tiny" in prompts[0]
+
+
+def test_a_chat_whose_memos_were_all_deleted_is_refused_before_a_backend_is_called(
+    repo, wav, monkeypatch
+):
+    memo_id = said(repo, wav, "x")
+    prompts = fake_llm(monkeypatch, claude="ok")
+    cid = services.start_chat(repo, [memo_id])
+    repo.delete_memo(memo_id)
+    with pytest.raises(services.InvalidInput):
+        services.chat(repo, cid, "hi?")
+    assert prompts == []
+
+
+def test_asking_an_unknown_chat_is_refused(repo, wav, monkeypatch):
+    fake_llm(monkeypatch, claude="ok")
+    with pytest.raises(services.NotFound):
+        services.chat(repo, 99, "hi?")
+    with pytest.raises(services.NotFound):
+        services.chat_history(repo, 99)
+
+
+def test_a_chat_can_be_renamed_rescoped_and_deleted(repo, wav):
+    a, b = said(repo, wav, "x", filename="a"), said(repo, wav, "y", filename="b")
+    cid = services.start_chat(repo, [a])
+    services.rename_chat(repo, cid, " pricing ")
+    services.set_chat_memos(repo, cid, [b])
+    convo = repo.conversation(cid)
+    assert (convo.title, convo.memo_ids) == ("pricing", (b,))
+    with pytest.raises(services.InvalidInput):
+        services.rename_chat(repo, cid, "  ")
+    with pytest.raises(services.NotFound):
+        services.rename_chat(repo, 99, "x")
+    services.delete_chat(repo, cid)
+    with pytest.raises(services.NotFound):
+        services.delete_chat(repo, cid)
+
+
+def test_the_chat_reads_as_a_person_would_and_as_a_script_would(repo, wav, monkeypatch):
+    memo_id = said(repo, wav, "x", filename="standup")
+    fake_llm(monkeypatch, claude="friday")
+    cid = services.start_chat(repo, [memo_id], title="ship")
+    services.chat(repo, cid, "when?")
+
+    text = services.chat_text(repo, cid)
+    assert text.startswith(f"conversation {cid} — ship\nabout: {memo_id} standup\n")
+    assert "you:\nwhen?" in text
+    assert "assistant (claude):\nfriday" in text
+
+    data = json.loads(services.chat_json(repo, cid))
+    assert data["title"] == "ship"
+    assert data["memo_ids"] == [memo_id]
+    assert [(m["role"], m["text"]) for m in data["messages"]] == [
+        ("user", "when?"), ("assistant", "friday")
+    ]
+
+
+def test_the_chat_list_reads_latest_first_with_its_length(repo, wav, monkeypatch):
+    memo_id = said(repo, wav, "x", filename="standup")
+    fake_llm(monkeypatch, claude="ok")
+    first = services.start_chat(repo, [memo_id], title="first")
+    second = services.start_chat(repo, [memo_id])
+    repo.con.execute("UPDATE conversations SET created_at='2026-01-01 00:00:00'")
+    services.chat(repo, first, "hi?")
+
+    lines = services.chats_text(repo).splitlines()
+    assert lines[0].startswith(f"{first:>4}  ") and "  2 msgs  first" in lines[0]
+    assert lines[1].startswith(f"{second:>4}  ") and "(untitled)" in lines[1]
+    assert services.chats_text(repo, memo_id=999) == ""
+
+    rows = json.loads(services.chats_json(repo))
+    assert [(r["id"], r["messages"]) for r in rows] == [(first, 2), (second, 0)]
+
+
+def test_the_chat_template_is_listed_beside_the_others(templates_dir):
+    infos = {row[0]: row for row in services.template_infos()}
+    assert infos["chat"][3].startswith("holds a conversation")
+    assert "chat" not in services.note_templates()

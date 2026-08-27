@@ -1,3 +1,4 @@
+import datetime
 import hashlib
 import json
 import os
@@ -16,8 +17,11 @@ from typing import Any, TypeVar
 
 from . import config
 from .domain import (
+    Conversation,
+    ConversationListing,
     Extraction,
     Memo,
+    Message,
     NotesPayload,
     Segment,
     Speaker,
@@ -648,6 +652,7 @@ _TEMPLATE_DOCS: dict[str, str] = {
     "notes": "extracts title, summary, action items and decisions from a transcript",
     "refine": "repairs mishearings and misplaced sentence breaks in transcribed lines",
     "ask": "answers a question about a memo using only its transcript",
+    "chat": "holds a conversation about one or several memos, grounded in their notes",
 }
 
 
@@ -1250,24 +1255,18 @@ def _backends() -> list[llm.Backend]:
     return backends
 
 
-def _complete(
-    prompt: str,
-    schema: dict | None,
-    parse: Callable[[str], T],
-    failure: str,
-    unavailable: str,
-    model: str | None = None,
-) -> tuple[str, T]:
-    """Gets an answer from the best backend that gives a usable one, tried in
-    the order config.llm_backends names them; a reply that cannot be used
-    demotes that backend rather than failing outright. The model steers
-    whichever backends accept a per-call choice — others ignore it."""
+def _first_usable(attempt: Callable[[llm.Backend], T], failure: str, unavailable: str) -> T:
+    """Runs one attempt against each backend config.llm_backends names, in
+    that order, until one gives a usable answer; a reply that cannot be used
+    demotes that backend rather than failing outright. The attempt is what
+    varies between a one-shot prompt and a conversation, so the loop is
+    written once and both hand it their own."""
     errors = []
     for backend in _backends():
         if not backend.available():
             continue
         try:
-            return backend.describe(model), parse(backend.complete(prompt, schema, model))
+            return attempt(backend)
         except (llm.BackendError, ValueError) as e:
             errors.append(f"{backend.name}: {e}")
     if errors:
@@ -1276,6 +1275,48 @@ def _complete(
         f"{unavailable}: install claude CLI, or run Ollama and"
         f" `ollama pull {config.OLLAMA_MODEL}`"
     )
+
+
+def _complete(
+    prompt: str,
+    schema: dict | None,
+    parse: Callable[[str], T],
+    failure: str,
+    unavailable: str,
+    model: str | None = None,
+) -> tuple[str, T]:
+    """Gets an answer from the best backend that gives a usable one. The
+    model steers whichever backends accept a per-call choice — others
+    ignore it."""
+    return _first_usable(
+        lambda b: (b.describe(model), parse(b.complete(prompt, schema, model))),
+        failure,
+        unavailable,
+    )
+
+
+def _converse(
+    system: str,
+    history: Sequence[Message],
+    question: str,
+    parse: Callable[[str], T],
+    failure: str,
+    unavailable: str,
+    model: str | None = None,
+) -> tuple[str, T]:
+    """Gets the next turn of a conversation from the best backend that gives
+    a usable one. A backend that takes messages is given the conversation as
+    messages; one that only takes a prompt is given the same conversation
+    flattened into one, so the thread reads the same whichever answers."""
+
+    def attempt(b: llm.Backend) -> tuple[str, T]:
+        if b.chat is not None:
+            reply = b.chat(system, history, question)
+        else:
+            reply = b.complete(llm.chat_prompt(system, history, question), None, model)
+        return b.describe(model), parse(reply)
+
+    return _first_usable(attempt, failure, unavailable)
 
 
 # what a memo still named after the recording it was made from looks like. The
@@ -1652,6 +1693,220 @@ def ask(repo: Repository, memo_id: int, asked: str) -> tuple[str, str]:
         parse=str.strip,
         failure="ask failed",
         unavailable="no backend",
+    )
+
+
+def _nonempty(text: str) -> str:
+    """A reply with something in it. A backend that answers nothing has not
+    answered, and raising is what demotes it to the next in the chain rather
+    than filing a blank turn into somebody's history."""
+    answer = text.strip()
+    if not answer:
+        raise ValueError("empty reply")
+    return answer
+
+
+@dataclass(frozen=True)
+class ChatTurn:
+    """What one exchange produced: the reply, and the backend that gave it."""
+
+    backend: str
+    answer: str
+
+
+def require_conversation(repo: Repository, conversation_id: int) -> Conversation:
+    """Finds a conversation, or fails with something the user can act on."""
+    convo = repo.conversation(conversation_id)
+    if not convo:
+        raise NotFound(f"no conversation with id {conversation_id}")
+    return convo
+
+
+def _scope(repo: Repository, memo_ids: Sequence[int]) -> tuple[list[int], list[str]]:
+    """The memos a conversation is to be about, each checked to exist and
+    listed once in the order first given, with the names a thread remembers
+    them by. Refused empty: a conversation about nothing has nothing to be
+    answered from, and would cost a model call to find that out."""
+    ids: list[int] = []
+    titles: list[str] = []
+    for memo_id in memo_ids:
+        if memo_id in ids:
+            continue
+        ids.append(memo_id)
+        titles.append(require_memo(repo, memo_id).filename)
+    if not ids:
+        raise InvalidInput("a conversation needs at least one memo")
+    return ids, titles
+
+
+def start_chat(repo: Repository, memo_ids: Sequence[int], title: str = "") -> int:
+    """Opens a conversation about some memos, handing back its id so the
+    first question can be put to it. Nothing is asked of a model yet: opening
+    a thread is free, and a screen wants to show it before the first turn."""
+    ids, titles = _scope(repo, memo_ids)
+    return repo.create_conversation(ids, titles, title.strip())
+
+
+def _memo_block(repo: Repository, memo_id: int, title: str, transcript_text: str | None) -> str:
+    """One memo as the model reads it: what it is, its notes, and its
+    transcript where the budget allowed one. A memo deleted since the thread
+    was opened is not here at all — the scope no longer holds it."""
+    memo = repo.memo(memo_id)
+    if memo is None:
+        return ""
+    head = (
+        f"=== memo {memo.id} — {title} (project: {memo.project},"
+        f" recorded: {memo.recorded_at or memo.created_at}, length: {_duration(memo.duration_s)}) ==="
+    )
+    body = f"## Notes\n{notes_markdown(repo, memo_id)}\n\n## Transcript\n"
+    if transcript_text is None:
+        body += "*(transcript omitted — ask about this memo alone for the full text)*"
+    else:
+        body += transcript_text or "*(nothing transcribed)*"
+    return f"{head}\n{body}"
+
+
+def _chat_context(repo: Repository, convo: Conversation) -> str:
+    """The memos of a thread as the model reads them. Every memo's notes go
+    in — they are the distilled form, and small; transcripts follow while the
+    running total stays within config.chat_context_chars, memo by memo in
+    scope order. A memo whose transcript would not fit goes in as notes only,
+    with the omission said: a transcript cut halfway makes a model confidently
+    wrong about what was decided in the half it never saw, where a memo
+    marked as notes-only makes it say so. Read at call time so the setting
+    can be changed without a restart."""
+    budget = config.CHAT_CONTEXT_CHARS
+    blocks = []
+    for memo_id, title in zip(convo.memo_ids, convo.memo_titles, strict=True):
+        full = transcript(repo, memo_id)
+        fits = len(full) <= budget
+        if fits:
+            budget -= len(full)
+        blocks.append(_memo_block(repo, memo_id, title, full if fits else None))
+    return "\n\n".join(b for b in blocks if b)
+
+
+def chat(repo: Repository, conversation_id: int, asked: str) -> ChatTurn:
+    """Puts the next question to a conversation and files both it and the
+    answer. The two land together after the answer arrives, never before: a
+    call that fails leaves the thread as it was, so asking again cannot leave
+    the question standing twice. A thread with no name yet takes its first
+    question as one, which a person can rename over."""
+    text = question(asked)
+    convo = require_conversation(repo, conversation_id)
+    if not convo.memo_ids:
+        raise InvalidInput("every memo this conversation was about has been deleted")
+    system = llm.chat_system(
+        _chat_context(repo, convo), config.MY_NAME, datetime.date.today().isoformat()
+    )
+    history = repo.messages(conversation_id)
+    turns = config.CHAT_HISTORY_TURNS
+    backend, answer = _converse(
+        system,
+        history[-turns:] if turns > 0 else [],
+        text,
+        parse=_nonempty,
+        failure="chat failed",
+        unavailable="no chat backend",
+        model=config.CHAT_MODEL,
+    )
+    repo.add_messages(conversation_id, [("user", text, ""), ("assistant", answer, backend)])
+    if not convo.title:
+        repo.set_conversation_title(conversation_id, _title_from(text))
+    return ChatTurn(backend, answer)
+
+
+def _title_from(text: str) -> str:
+    """A thread's name from its first question: the first line, cut to a
+    length a list column can carry, rather than a model call spent naming
+    something a person will rename anyway if it matters."""
+    line = text.strip().splitlines()[0]
+    return line if len(line) <= 60 else line[:57].rstrip() + "…"
+
+
+def chat_history(repo: Repository, conversation_id: int) -> list[Message]:
+    """A conversation's turns so far, for a screen drawing them."""
+    require_conversation(repo, conversation_id)
+    return repo.messages(conversation_id)
+
+
+def conversations(repo: Repository, memo_id: int | None = None) -> list[ConversationListing]:
+    """Every conversation, latest first, or only those one memo takes part in."""
+    return repo.conversation_listings(memo_id)
+
+
+def rename_chat(repo: Repository, conversation_id: int, title: str) -> None:
+    """Gives a conversation the name a person wants it listed under."""
+    name = title.strip()
+    if not name:
+        raise InvalidInput("a conversation needs a name")
+    if not repo.set_conversation_title(conversation_id, name):
+        raise NotFound(f"no conversation with id {conversation_id}")
+
+
+def delete_chat(repo: Repository, conversation_id: int) -> None:
+    """Removes a conversation and everything said in it."""
+    if not repo.delete_conversation(conversation_id):
+        raise NotFound(f"no conversation with id {conversation_id}")
+
+
+def set_chat_memos(repo: Repository, conversation_id: int, memo_ids: Sequence[int]) -> None:
+    """Changes what a conversation is about, keeping what was already said."""
+    require_conversation(repo, conversation_id)
+    ids, titles = _scope(repo, memo_ids)
+    repo.set_conversation_memos(conversation_id, ids, titles)
+
+
+def chat_scope_text(convo: Conversation) -> str:
+    """The memos a thread is about, as a heading says it: ids and names."""
+    if not convo.memo_ids:
+        return "(every memo deleted)"
+    return ", ".join(
+        f"{memo_id} {title}" for memo_id, title in zip(convo.memo_ids, convo.memo_titles, strict=True)
+    )
+
+
+def chat_text(repo: Repository, conversation_id: int) -> str:
+    """A conversation as a person reads it: a heading with what it is about,
+    then every turn under who said it, the model's turns naming the backend
+    that gave them. Empty turns list reads as an opened thread nobody has
+    asked anything of yet."""
+    convo = require_conversation(repo, conversation_id)
+    lines = [
+        f"conversation {convo.id} — {convo.title or '(untitled)'}",
+        f"about: {chat_scope_text(convo)}",
+    ]
+    for m in repo.messages(conversation_id):
+        who = f"assistant ({m.backend})" if m.role == "assistant" else "you"
+        lines += ["", f"[{m.created_at}] {who}:", m.text]
+    return "\n".join(lines)
+
+
+def chat_json(repo: Repository, conversation_id: int) -> str:
+    """A conversation as a script reads it: the thread and its turns."""
+    convo = require_conversation(repo, conversation_id)
+    return json.dumps(
+        {**asdict(convo), "messages": [asdict(m) for m in repo.messages(conversation_id)]},
+        ensure_ascii=False,
+    )
+
+
+def chats_text(repo: Repository, memo_id: int | None = None) -> str:
+    """The conversation list as a person reads it, latest first and
+    column-aligned like the memo list. Empty when nothing has been asked."""
+    return "\n".join(
+        f"{c.conversation.id:>4}  {c.last_at}  {c.messages:>3} msgs"
+        f"  {c.conversation.title or '(untitled)':<40} about: {chat_scope_text(c.conversation)}"
+        for c in conversations(repo, memo_id)
+    )
+
+
+def chats_json(repo: Repository, memo_id: int | None = None) -> str:
+    """The conversation list as a script reads it."""
+    return json.dumps(
+        [{**asdict(c.conversation), "messages": c.messages, "last_at": c.last_at}
+         for c in conversations(repo, memo_id)],
+        ensure_ascii=False,
     )
 
 
