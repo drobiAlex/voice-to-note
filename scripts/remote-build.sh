@@ -71,7 +71,7 @@ if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
     exit 1
 fi
 
-GIT_SSH_COMMAND="ssh ${ssh_opts[*]}" git push -q --force-with-lease "$host:build/voice-to-note.git" "$branch"
+GIT_SSH_COMMAND="ssh ${ssh_opts[*]}" git push -q --force "$host:build/voice-to-note.git" "$branch"   # scratch mirror, only this script writes it
 run_remote sync "$branch"
 
 case "$action" in
