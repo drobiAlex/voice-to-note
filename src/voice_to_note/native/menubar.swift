@@ -623,13 +623,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// left at last time. Pressing its middle closes it and starts the tape for
     /// that long; turning it is remembered as it turns, so a dial dismissed by
     /// a click elsewhere still leaves the length it was turned to.
-    private func openDial() {
+    private func openDial(at minutes: Int? = nil, remembering: Bool = true) {
         guard dial == nil else { return }
         closePanel()
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let view = DialView(minutes: chosenMinutes, reduceMotion: reduceMotion)
-        view.onChange = { minutes in
-            UserDefaults.standard.set(minutes, forKey: Key.minutes)
+        let view = DialView(minutes: minutes ?? chosenMinutes, reduceMotion: reduceMotion)
+        // a preview's dial forgets: it is being turned to look at, and the
+        // length somebody set for their next real meeting must survive that
+        if remembering {
+            view.onChange = { minutes in
+                UserDefaults.standard.set(minutes, forKey: Key.minutes)
+            }
         }
         view.onStart = { [weak self] minutes in
             guard let self else { return }
@@ -658,18 +662,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// long is still the meeting and a wake-up of its own for the exact second
     /// is not worth having.
     private func scheduleStop() {
+        guard let timedMinutes else {
+            forgetDeadline()
+            return
+        }
+        scheduleStop(after: TimeInterval(timedMinutes * 60))
+    }
+
+    private func scheduleStop(after seconds: TimeInterval) {
         stopAt?.invalidate()
-        stopAt = nil
-        deadline = nil
-        guard let timedMinutes else { return }
-        let deadline = Date().addingTimeInterval(TimeInterval(timedMinutes * 60))
+        let deadline = Date().addingTimeInterval(seconds)
         self.deadline = deadline
-        let stop = Timer(timeInterval: deadline.timeIntervalSinceNow, repeats: false) { [weak self] _ in
-            self?.stopRecording()
+        let stop = Timer(timeInterval: seconds, repeats: false) { [weak self] _ in
+            self?.deadlineReached()
         }
         stop.tolerance = 1
         RunLoop.main.add(stop, forMode: .common)
         stopAt = stop
+    }
+
+    /// The length is up. A real tape is stopped the way the menu stops it; a
+    /// preview moves on to the state a stopped tape lands in, since what is
+    /// being watched is the app reacting to its own deadline, and a preview
+    /// whose deadline came and went with nothing happening would be showing a
+    /// timer that does not work.
+    private func deadlineReached() {
+        if previewing {
+            showPreview(.processing)
+        } else {
+            stopRecording()
+        }
     }
 
     private func forgetDeadline() {
@@ -1198,8 +1220,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private enum Scenario: CaseIterable {
         case idle
         case dial
+        case dialFull
         case starting
         case voices
+        case timed
+        case timedEnding
         case microphoneDead
         case bothSilent
         case processing
@@ -1208,8 +1233,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             switch self {
             case .idle: return "Idle"
             case .dial: return "Idle — dial open"
+            case .dialFull: return "Idle — dial at two hours"
             case .starting: return "Starting"
             case .voices: return "Recording — voices"
+            case .timed: return "Recording — timed, 20 min left"
+            case .timedEnding: return "Recording — timed, stops in 45 s"
             case .microphoneDead: return "Recording — microphone dead"
             case .bothSilent: return "Recording — both silent"
             case .processing: return "Processing"
@@ -1223,9 +1251,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         /// than a picture of one.
         var state: RecorderState {
             switch self {
-            case .idle, .dial: return .idle
+            case .idle, .dial, .dialFull: return .idle
             case .starting: return .starting
-            case .voices, .microphoneDead, .bothSilent: return .recording
+            case .voices, .timed, .timedEnding, .microphoneDead, .bothSilent: return .recording
             case .processing: return .processing
             }
         }
@@ -1236,10 +1264,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         /// like, and it would be the first thing to disbelieve.
         var sides: (system: Rehearsal.Side, microphone: Rehearsal.Side)? {
             switch self {
-            case .voices: return (.talking(seed: 7), .talking(seed: 31))
+            case .voices, .timed, .timedEnding: return (.talking(seed: 7), .talking(seed: 31))
             case .microphoneDead: return (.talking(seed: 7), .quiet(seed: 5))
             case .bothSilent: return (.quiet(seed: 11), .quiet(seed: 5))
-            case .idle, .dial, .starting, .processing: return nil
+            case .idle, .dial, .dialFull, .starting, .processing: return nil
+            }
+        }
+
+        /// How long a timed scenario's tape has left, or nothing for one that
+        /// runs until stopped. Forty-five seconds is short enough to sit and
+        /// watch the deadline arrive, and long enough to read the heading it
+        /// wears on the way there.
+        var secondsLeft: TimeInterval? {
+            switch self {
+            case .timed: return 20 * 60
+            case .timedEnding: return 45
+            default: return nil
+            }
+        }
+
+        /// The dial's setting where the scenario is a dial, or nothing.
+        var dialMinutes: Int? {
+            switch self {
+            case .dial: return nil
+            case .dialFull: return DialView.longest
+            default: return nil
             }
         }
     }
@@ -1286,14 +1335,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // wrong moment and never stop
         stopRehearsing()
         stopTicking()
+        forgetDeadline()
         startedAt = nil
         guard let sides = scenario.sides else {
             state = scenario.state
             show()
             // the dial by the door it is opened from, and its middle wired to
             // nothing but closing it: a preview starts no tape
-            if scenario == .dial {
-                openDial()
+            if scenario == .dial || scenario == .dialFull {
+                openDial(at: scenario.dialMinutes, remembering: false)
                 dialView?.onStart = { [weak self] _ in self?.closeDial() }
             }
             return
@@ -1306,6 +1356,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         startedAt = Date()
         state = .recording
         startTicking()
+        // a timed scenario is given its deadline the way a real tape is given
+        // one — after the tape is rolling — so the heading counts down and the
+        // deadline, when it comes, moves the preview on by itself
+        if let left = scenario.secondsLeft {
+            scheduleStop(after: left)
+        }
         show()
         startRehearsing(sides)
     }
