@@ -230,3 +230,169 @@ Monitoring Energy Usage) · Core Animation Programming Guide (Improving Animatio
 Performance) · `NSView.displayLink(target:selector:)` · `CADisplayLink.preferredFrameRateRange` ·
 `NSWindow.hasShadow` · `NSView.layerContentsRedrawPolicy` · `NSWorkspace.accessibilityDisplayShouldReduceMotion` ·
 WWDC23 10054, WWDC21 10147, WWDC22 10083 · HIG: The menu bar, Materials, Motion.
+
+---
+
+# Part two: a dial that goes anywhere and tucks into the edge
+
+The second ask: drag the dial anywhere, drop it against a screen edge and it tucks in,
+leaving a sliver; hover the sliver and it slides out. Two more researchers, the same rule
+— shipped code or an Apple document behind every choice. **Loop's `Stashing/` module is
+this feature end to end** (tuck, sliver, hover reveal, multi-display, persistence, ~800
+lines across four files) and most choices below are its, verified in the source.
+
+## Decisions
+
+### 9. Dragging the window: `performDrag(with:)` from `mouseDown`, chosen by where the press landed
+
+Two shipped ways. Maccy sets `isMovableByWindowBackground = true` on the panel and turns
+it *off* while the pointer is over a control (`Maccy/Views/ToolbarView.swift` L48–52,
+`.onHover { window.isMovableByWindowBackground = !inside }`). mini-player does it by hand
+(`Mini Player/WindowMovingView.swift` L32–40):
+
+```swift
+override func mouseDown(with event: NSEvent) { window?.performDrag(with: event) }
+override func acceptsFirstMouse(for event: NSEvent?) -> Bool { return true }
+```
+
+The dial already decides in `mouseDown` whether a press is on the ring, so the second
+form is the natural one: press on the ring turns, press on the ground or margin calls
+`performDrag`. `acceptsFirstMouse` is the load-bearing half on a non-activating panel
+(already set). Maccy notes macOS 26 dropped gestures on views with no background and
+paints `Color.white.opacity(0.001)` to keep hit-testing — the dial's disc is opaque, so
+not an issue, but the margin around it is clear and must not be relied on for hits.
+
+### 10. Edge detection on release: `screen.frame`, not `visibleFrame`, small threshold
+
+Rectangle (`Snapping/SnappingManager.swift` L441–482) tests the *pointer* against
+`screen.frame` — the snap must fire under the menu bar and Dock, which `visibleFrame`
+excludes — with per-edge margins that default to **5 pt** (`Defaults.swift` L21–24). Loop
+(`Core/WindowDragManager.swift` L245–265) insets the screen by a threshold that defaults
+to **2 pt** and widens the top edge to half the menu bar's height. Both use a pointer
+position, not the window frame. The dial does the same: on mouse-up after a move, if the
+pointer is within **8 pt** of a screen edge, tuck to that edge. Apple confirms the
+trigger is a band, not a line: `NSScreen.visibleFrame` docs — "The system uses a small
+boundary area to determine when it displays the dock."
+
+Loop documents the multi-display trap: `CGRect.contains` is half-open, so a pointer on
+`maxX`/`maxY` is in no screen; use the screen the pointer is on with an inclusive test
+(`NSScreen+Extensions.swift` L28–40).
+
+### 11. Tucked = the full window moved off-screen, a sliver left; never shrunk
+
+Loop `WindowFrameResolver.swift` L100–124, `getStashedFrame`:
+
+```swift
+case .left, .right:
+    let maxPeekSize = frame.width * maxPeekPercent            // 20 %
+    let clampedPeekSize = max(minPeekSize, min(peekSize, maxPeekSize))   // min 1 pt
+    if action.stashEdge == .left {
+        frame.origin.x = bounds.minX - frame.width + clampedPeekSize
+    } else {
+        frame.origin.x = bounds.maxX - clampedPeekSize
+    }
+```
+
+Frame keeps its size; only the origin moves; the peek defaults to **20 pt** and is never
+0, because a window with no on-screen pixels gets no events. AppKit will pull a titled
+window back on screen (`constrainFrameRect(_:to:)` docs: "invoked automatically…
+whenever a titled NSWindow object is placed onscreen") — the dial's panel is borderless,
+and alt-tab-macos overrides it anyway to be safe (`src/switcher/PreviewPanel.swift`
+L9–12: `override func constrainFrameRect(...) -> NSRect { frameRect }`). The dial
+overrides it too.
+
+The visible sliver is the disc's rim plus a few lit ticks: **22 pt** peek, so the round
+edge and the green read as a tab. It is drawn at reduced alpha while tucked (window
+`alphaValue`, one property, composited).
+
+### 12. Hover reveal: a tracking area on the sliver, dwell then re-check, never `.mouseMoved`
+
+Apple, *Event Architecture*: tracking rectangles "are a less expensive way of following
+the mouse's location"; *Handling Mouse Events*: mouse-moved events "occur so frequently
+that they can quickly flood the event-dispatch machinery, an NSWindow object by default
+does not receive them". So: one `NSTrackingArea` with `[.mouseEnteredAndExited,
+.activeAlways]` and **not** `.mouseMoved`, on the dial view (the sliver is part of it).
+That is what boring.notch and DynamicNotchKit do (SwiftUI `.onHover`, tracking-area
+backed, no global monitor anywhere in either repo). Ice uses a global monitor and stops
+it when not needed; Loop uses a listen-only CGEvent tap that exists *only while something
+is stashed* (`StashManager.swift` L228, L689) — the structural answer to idle cost. The
+dial needs neither: the tracking area costs nothing between crossings.
+
+Timings that shipped: boring.notch enter dwell **0.3 s**, leave grace **100 ms**
+(`ContentView.swift` L513–558, one cancellable task slot); Ice `showOnHoverDelay` **0.2 s**
+with a re-check "Make sure the mouse is still inside" after the sleep
+(`Events/EventManager.swift`); the Dock's observed (undocumented) dwell is 0.2 s. Loop
+hides only when the pointer is outside the revealed frame inset by **−15 pt**
+(`StashManager.swift` L552–562) — the slop ring that stops flicker at the boundary. The
+dial: enter dwell 0.2 s, re-check on fire; leave grace 0.4 s, re-check on fire, never
+while a drag is in progress; the tracking rect is the disc inset by −15 pt.
+
+### 13. The slide: `NSAnimationContext`, fixed duration, `animationBehavior = .none`
+
+`setFrame(_:display:animate:)` scales its time by distance (`animationResizeTime` docs:
+"time in seconds to resize by 150 pixels… 0.20 seconds") — wrong for a peek that should
+take the same time from every edge. `NSAnimationContext` with `animator().setFrame` and a
+fixed **0.22 s** ease-out, and `panel.animationBehavior = .none` so AppKit's own
+order-front animation does not fight it (Maccy, Ice both set it). Reduce Motion: snap.
+Apple's wording — "avoid large animations" — a window sliding 200 pt is one.
+
+### 14. Remembering where it was: a screen-relative point, clamped on restore
+
+`setFrameAutosaveName` is the built-in (stats `Settings.swift` L83–86, with a fallback
+when `setFrameUsingName` returns false). Maccy stores a *fraction of the screen*
+(`FloatingPanel.swift` L113–122) so a resolution change keeps the place, and clamps the
+restored origin into `visibleFrame` (`PopupPosition.swift` L67–75). Loop stores only the
+edge and recomputes geometry. The dial stores `{edge | free}` plus a fraction of the
+screen's frame; on restore, a screen that is gone puts it back under the status item, and
+`NSApplication.didChangeScreenParametersNotification` re-anchors a tucked dial (Ice closes
+its bar on the same notification).
+
+### 15. Hover is a shortcut, not the only way in
+
+WWDC21 *Discoverable design*: "Use gestures as a shortcut, not a replacement… You should
+still have a primary way to perform the same action that is clearly legible." Apple's
+accessibility guide: "a user should be able to perform all your app's functions using the
+keyboard alone." So the menu keeps *Record for…* (⌘T), which reveals a tucked dial
+rather than opening a second one, and *Tuck Dial* / *Show Dial* appear in the menu while
+one exists. Clicking the sliver also reveals — a click is legible where a hover is not.
+
+## The state machine, as it will be coded
+
+```
+hanging ──drag off the status item──▶ free ──released within 8 pt of an edge──▶ tucked
+   │                                    ▲                                        │ ▲
+   │ click elsewhere closes             │ dragged away from the edge             │ │ leave + 0.4 s
+   ▼                                    │                                        ▼ │
+ closed ◀── start / ⌘T again / Quit ── free ◀──────────── peeking ◀── hover 0.2 s / click / ⌘T
+```
+
+- *hanging* is today's behaviour. Leaving it ends the outside-click closing and the
+  status item highlight: a placed window stays until it is told to go.
+- *tucked*: alpha 0.6, 22 pt showing, one tracking area, no timers.
+- *peeking*: full disc over the edge, full alpha; a drag on the ring while peeking works
+  and cancels the leave grace; a drag on the ground moves it (and un-tucks it).
+- Pressing the centre starts the tape and closes the dial from any state.
+
+## Cost, idle
+
+Tucked or free and untouched: zero timers, zero monitors, one tracking area; the window
+is ordered in (memory, not energy). The dwell/grace timers exist only between a crossing
+and its re-check. Proof is the same `powermetrics --samplers tasks` line as part one.
+
+## Sources, part two
+
+Code: MrKai77/Loop (`Stashing/StashManager.swift`, `WindowFrameResolver.swift`,
+`WindowDragManager.swift`) · rxhanson/Rectangle · p0deje/Maccy · TheBoredTeam/boring.notch ·
+MrKai77/DynamicNotchKit · jordanbaird/Ice · lwouis/alt-tab-macos · exelban/stats ·
+thompsonate/mini-player · iina/iina · mpv-player/mpv.
+
+Apple: Event Architecture · Handling Mouse Events · Event Objects and Types · NSTrackingArea ·
+`addGlobalMonitorForEvents` · Energy Efficiency Guide (Timers, Best Practices) ·
+`constrainFrameRect(_:to:)` · Sizing and Placing Windows · `NSScreen.visibleFrame` ·
+`didChangeScreenParametersNotification` · `animationResizeTime` · NSAnimationContext ·
+`NSWindow.animationBehavior` · WWDC21 10126 Discoverable design · Accessibility
+Programming Guide for OS X · `accessibilityDisplayShouldReduceMotion`.
+
+Not sourceable to Apple, flagged: the Dock's `autohide-delay` 0.2 s / `autohide-time-modifier`
+0.5 (community-measured), current HIG hover wording (the HIG site is client-rendered), and
+"a pure window move is cheaper than a resize" (sound inference, no Apple sentence).
