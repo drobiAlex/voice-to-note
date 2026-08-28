@@ -312,8 +312,10 @@ the mouse's location"; *Handling Mouse Events*: mouse-moved events "occur so fre
 that they can quickly flood the event-dispatch machinery, an NSWindow object by default
 does not receive them". So: one `NSTrackingArea` with `[.mouseEnteredAndExited,
 .activeAlways]` and **not** `.mouseMoved`, on the dial view (the sliver is part of it).
-That is what boring.notch and DynamicNotchKit do (SwiftUI `.onHover`, tracking-area
-backed, no global monitor anywhere in either repo). Ice uses a global monitor and stops
+That is what boring.notch and DynamicNotchKit do for hover (SwiftUI `.onHover`,
+tracking-area backed; neither has a `.mouseMoved` monitor or a hand-made tracking area —
+boring.notch's three global monitors in `observers/DragDetector.swift` watch for a file
+being dragged at the notch, not for the pointer). Ice uses a global monitor and stops
 it when not needed; Loop uses a listen-only CGEvent tap that exists *only while something
 is stashed* (`StashManager.swift` L228, L689) — the structural answer to idle cost. The
 dial needs neither: the tracking area costs nothing between crossings.
@@ -392,6 +394,10 @@ Apple: Event Architecture · Handling Mouse Events · Event Objects and Types ·
 `didChangeScreenParametersNotification` · `animationResizeTime` · NSAnimationContext ·
 `NSWindow.animationBehavior` · WWDC21 10126 Discoverable design · Accessibility
 Programming Guide for OS X · `accessibilityDisplayShouldReduceMotion`.
+
+One researcher wrote its hover-timing section before its own verification returned and
+corrected itself afterwards; the numbers above (0.3 s / 100 ms, `ContentView.swift`
+L513–558) were then read from the file and stand.
 
 Not sourceable to Apple, flagged: the Dock's `autohide-delay` 0.2 s / `autohide-time-modifier`
 0.5 (community-measured), current HIG hover wording (the HIG site is client-rendered), and
