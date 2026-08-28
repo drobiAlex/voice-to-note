@@ -88,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // the same reason the shimmer does. Emptying them on every state
             // that is not recording is also what makes each recording start
             // from silence rather than from whatever the last one ended on
+            puckView?.show(state: state, elapsed: elapsed())
             if state == .recording {
                 // a preview keeps its menu through every state, where a
                 // recording gives it up for the panel: that menu is the only
@@ -139,24 +140,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var panel: NSPanel?
     private var panelView: RecordingPanelView?
 
-    /// The dial the length of the next recording is set on, and the view in
-    /// it. A second floating window rather than a face of the first: the
-    /// island is a thing watched during a recording and the dial is a thing
-    /// turned before one, and the two are never on screen at once.
-    private var dial: NSPanel?
-    private var dialView: DialView?
+    /// The recorder puck — the button and the three pickers as a window that
+    /// can be left anywhere — and the view in it. It lives alongside the island
+    /// rather than instead of it: the island is the meters, watched during a
+    /// recording; the puck is the controls, kept where the hand goes.
+    private var puck: NSPanel?
+    private var puckView: RecorderPuckView?
 
-    /// Where the dial lives and how it moves between places; it owns nothing
+    /// Where the puck lives and how it moves between places; it owns nothing
     /// the two above do not, and goes when they go.
-    private var dialDock: DialDock?
-
-    /// How long the recording under way was asked to run, or nothing for one
-    /// that runs until it is stopped, and the one timer that stops it. Set the
-    /// moment the tape actually rolls rather than when the recorder is
-    /// launched, so the length is measured in tape and not in start-up.
-    private var timedMinutes: Int?
-    private var deadline: Date?
-    private var stopAt: Timer?
+    private var puckDock: Dock?
 
     /// How long a panel that opened itself stays up: long enough to read the
     /// header and watch both meters move, and over before it is in the way of
@@ -243,6 +236,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             button.image = shimmerFrames[shimmerFrame]
             button.attributedTitle = NSAttributedString(string: "")
         }
+        puckView?.show(state: state, elapsed: elapsed())
     }
 
     /// A fresh reading from each side. These are the only clock the waveforms
@@ -276,21 +270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.toolTip = spoken
         statusItem.button?.setAccessibilityLabel(spoken)
         panelView?.showElapsed(elapsed())
-        panelView?.showHeading(heading(now: now))
         panelView?.showFooter(system: systemLevels, microphone: microphoneLevels, now: now)
-    }
-
-    /// What the island calls the recording: plain "Recording", or with how long
-    /// it has left to run when it was given a length. Minutes rather than
-    /// seconds — a countdown in seconds is a thing stared at, and the point
-    /// of a tape that stops itself is that nobody has to.
-    private func heading(now: Date = Date()) -> String {
-        guard let deadline else { return "Recording" }
-        let left = Int((deadline.timeIntervalSince(now) / 60).rounded(.up))
-        if left <= 1 {
-            return "Recording · stops in a minute"
-        }
-        return "Recording · \(left) min left"
     }
 
     /// Everything the meters were made of, dropped. The panel goes with the
@@ -396,12 +376,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch state {
         case .idle:
             menu.addItem(action("Start Recording", #selector(startRecording), key: "r"))
-            menu.addItem(action("Record for…", #selector(openDialFromMenu), key: "t"))
-            // offered only once the dial has somewhere to come back from, so
-            // that a dial nobody has moved is not followed by a line about it
-            if rememberedPlace != .hanging || dialDock?.state.isHanging == false {
-                menu.addItem(action("Return Dial to Menu Bar", #selector(returnDial)))
-            }
             menu.addItem(.separator())
             menu.addItem(.sectionHeader(title: "Next Recording"))
             menu.addItem(picker("Project", projectItems()))
@@ -421,9 +395,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // both streams are live, and a menu already on screen has to say
             // something true rather than the state it was opened in
             menu.addItem(action("Stop Recording", #selector(stopRecording), key: "r"))
-            menu.addItem(note(state == .recording ? "\(heading()) — \(elapsed())" : "Starting …"))
+            menu.addItem(note(state == .recording ? "Recording \(elapsed())" : "Starting …"))
         case .processing:
             menu.addItem(note("Processing memo …"))
+        }
+        menu.addItem(.separator())
+        // the puck is offered in every state, since it shows every state; the
+        // way back is offered only once it has somewhere to come back from
+        menu.addItem(action("Show Recorder", #selector(openPuckFromMenu), key: "t"))
+        if rememberedPlace != .hanging || puckDock?.state.isHanging == false {
+            menu.addItem(action("Return Recorder to Menu Bar", #selector(returnPuck)))
         }
         menu.addItem(.separator())
         menu.addItem(action("Quit", #selector(quit), key: "q"))
@@ -530,14 +511,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// A window for a view to float in under the menu bar, built the same way
-    /// for the island and for the dial: borderless, never activating, at the
+    /// for the island and for the puck: borderless, never activating, at the
     /// status bar's own level, on every space. The island asks the window for
-    /// its shadow; the dial draws its own, because a shadow a window works out
+    /// its shadow; the puck draws its own, because a shadow a window works out
     /// from transparent pixels is worked out again every time they change.
     private func floating(_ view: NSView, shadow: Bool, offscreen: Bool = false) -> NSPanel {
         let panel: NSPanel
         if offscreen {
-            panel = DialPanel(
+            panel = DockPanel(
                 contentRect: view.frame, styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered, defer: false
             )
@@ -610,7 +591,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// button's light with them: it is lit for whichever window is up, and goes
     /// out with the last of them.
     private func stopWatchingClicks() {
-        guard panel == nil, dialDock?.state.isHanging != true else { return }
+        guard panel == nil, puckDock?.state.isHanging != true else { return }
         if let clicksElsewhere {
             NSEvent.removeMonitor(clicksElsewhere)
         }
@@ -626,77 +607,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// means is the same for both.
     private func closeFloating() {
         closePanel()
-        // only a hanging dial goes on a click elsewhere: one that has been put
+        // only a hanging puck goes on a click elsewhere: one that has been put
         // somewhere is a window somebody expects to find there
-        if dialDock?.state.isHanging == true {
-            closeDial()
+        if puckDock?.state.isHanging == true {
+            closePuck()
         }
     }
 
-    // --- the dial ---------------------------------------------------------------
+    // --- the puck ---------------------------------------------------------------
 
-    /// The dial opened from the menu, over an idle recorder only: it sets the
-    /// length of the *next* recording, and there is no next one while a tape
-    /// is rolling.
-    @objc private func openDialFromMenu() {
-        guard state == .idle else { return }
-        // the way in that needs no pointer: a dial tucked into an edge comes
-        // out, one somewhere on the screen comes to the front
-        if let dialDock {
-            dialDock.reveal()
+    /// The puck opened from the menu — or, if it is already up, brought to
+    /// where it can be used: out of its edge, or to the front. This is the way
+    /// in that needs no pointer.
+    @objc private func openPuckFromMenu() {
+        if let puckDock {
+            puckDock.reveal()
             return
         }
-        openDial()
+        openPuck()
     }
 
-    /// The dial's place forgotten and the dial, if it is up, hung under the
+    /// The puck's place forgotten and the puck, if it is up, hung under the
     /// status item again — the way back for a window carried somewhere that
     /// turned out not to suit.
-    @objc private func returnDial() {
-        UserDefaults.standard.removeObject(forKey: Key.dialPlace)
-        guard dial != nil else { return }
-        closeDial()
-        openDial()
+    @objc private func returnPuck() {
+        UserDefaults.standard.removeObject(forKey: Key.puckPlace)
+        guard puck != nil else { return }
+        closePuck()
+        openPuck()
     }
 
-    /// The dial put on screen under the status item, set to whatever it was
-    /// left at last time. Pressing its middle closes it and starts the tape for
-    /// that long; turning it is remembered as it turns, so a dial dismissed by
-    /// a click elsewhere still leaves the length it was turned to.
-    private func openDial(at minutes: Int? = nil, remembering: Bool = true, place: DialPlace? = nil) {
-        guard dial == nil else { return }
+    /// The puck put on screen: back where it was left, or under the status item
+    /// for one that has never been moved. Its button and pickers go through the
+    /// same calls the menu goes through, and a preview's go nowhere at all —
+    /// they move the preview from one scenario to the next, which is what a
+    /// button pressed in a preview should be seen to do.
+    private func openPuck(remembering: Bool = true, place: DockPlace? = nil) {
+        guard puck == nil else { return }
         closePanel()
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let view = DialView(minutes: minutes ?? chosenMinutes, reduceMotion: reduceMotion)
-        // a preview's dial forgets: it is being turned to look at, and the
-        // length somebody set for their next real meeting must survive that
-        if remembering {
-            view.onChange = { minutes in
-                UserDefaults.standard.set(minutes, forKey: Key.minutes)
-            }
-        }
-        view.onStart = { [weak self] minutes in
+        let view = RecorderPuckView(reduceMotion: reduceMotion)
+        view.onRecord = { [weak self] in
             guard let self else { return }
-            self.closeDial()
-            self.startTimedRecording(minutes)
+            if self.previewing { self.showPreview(.voices) } else { self.startRecording() }
         }
+        view.onStop = { [weak self] in
+            guard let self else { return }
+            if self.previewing { self.showPreview(.processing) } else { self.stopRecording() }
+        }
+        view.onProject = { [weak self] name in self?.pickProject(name) }
+        view.onInput = { [weak self] device in self?.pickInput(device) }
+        view.onOutput = { [weak self] device in self?.pickOutput(device) }
         let panel = floating(view, shadow: false, offscreen: true)
-        self.dial = panel
-        self.dialView = view
-        let dock = DialDock(panel: panel, view: view, reduceMotion: reduceMotion)
-        // carried off, the dial is no longer the menu-like thing a click
+        self.puck = panel
+        self.puckView = view
+        feedPuck()
+        view.show(state: state, elapsed: elapsed())
+        let dock = Dock(panel: panel, view: view, inset: RecorderPuckView.inset, reduceMotion: reduceMotion)
+        // carried off, the puck is no longer the menu-like thing a click
         // elsewhere dismisses, and the button it hung from lets go of it
         dock.onLeftHanging = { [weak self] in
             self?.stopWatchingClicks()
         }
         if remembering {
             dock.onPlaced = { place in
-                UserDefaults.standard.set(place.encoded, forKey: Key.dialPlace)
+                UserDefaults.standard.set(place.encoded, forKey: Key.puckPlace)
             }
         }
-        self.dialDock = dock
-        // back where it was, or — for a dial that has never been moved, and
-        // for one whose display is gone — under the status item like a menu
+        self.puckDock = dock
         if dock.restore(place ?? (remembering ? rememberedPlace : .hanging)) {
             return
         }
@@ -706,57 +684,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         watchForClicks()
     }
 
-    private func closeDial() {
-        let closing = dial
-        dial = nil
-        dialView = nil
-        dialDock = nil
+    private func closePuck() {
+        let closing = puck
+        puck = nil
+        puckView = nil
+        puckDock = nil
         stopWatchingClicks()
         vanish(closing)
     }
 
-    /// The tape stopped at the length it was asked for, by one timer set for
-    /// that moment. A second's slack, because a recording that runs a second
-    /// long is still the meeting and a wake-up of its own for the exact second
-    /// is not worth having.
-    private func scheduleStop() {
-        guard let timedMinutes else {
-            forgetDeadline()
+    /// The pickers given what the menu would be given: the lists fetched last,
+    /// and the choices as remembered. A preview has no recorder to ask, so it
+    /// is handed a made-up Mac — two of everything, so the pickers have
+    /// something to pick between.
+    private func feedPuck() {
+        guard let puckView else { return }
+        if previewing {
+            puckView.showProjects([("work", 12), ("personal", 3), ("other", 41)], chosen: "work")
+            puckView.showInputs([
+                AudioDevice(uid: "mic", name: "MacBook Pro Microphone"),
+                AudioDevice(uid: "pods", name: "AirPods Pro"),
+            ], chosen: nil)
+            puckView.showOutputs([
+                AudioDevice(uid: "spk", name: "MacBook Pro Speakers"),
+                AudioDevice(uid: "disp", name: "Studio Display"),
+            ], chosen: nil)
             return
         }
-        scheduleStop(after: TimeInterval(timedMinutes * 60))
-    }
-
-    private func scheduleStop(after seconds: TimeInterval) {
-        stopAt?.invalidate()
-        let deadline = Date().addingTimeInterval(seconds)
-        self.deadline = deadline
-        let stop = Timer(timeInterval: seconds, repeats: false) { [weak self] _ in
-            self?.deadlineReached()
-        }
-        stop.tolerance = 1
-        RunLoop.main.add(stop, forMode: .common)
-        stopAt = stop
-    }
-
-    /// The length is up. A real tape is stopped the way the menu stops it; a
-    /// preview moves on to the state a stopped tape lands in, since what is
-    /// being watched is the app reacting to its own deadline, and a preview
-    /// whose deadline came and went with nothing happening would be showing a
-    /// timer that does not work.
-    private func deadlineReached() {
-        if previewing {
-            showPreview(.processing)
-        } else {
-            stopRecording()
-        }
-    }
-
-    private func forgetDeadline() {
-        stopAt?.invalidate()
-        stopAt = nil
-        deadline = nil
-        timedMinutes = nil
+        puckView.showProjects(projects, chosen: chosenProject)
+        puckView.showInputs(devices?.inputs, chosen: chosenInput)
+        puckView.showOutputs(devices?.outputs, chosen: chosenOutput)
     }
 
     /// The window taken off screen, faded first wherever anything is allowed to
@@ -793,7 +750,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// status item owned a menu until a line ago and a menu opens no panel —
     /// and the guard is what keeps that true of any other way into this.
     private func showBriefly() {
-        guard panel == nil else { return }
+        // nor over a puck already saying the tape is rolling: a second window
+        // opening beside it would be the same news told twice
+        guard panel == nil, puck == nil else { return }
         openPanel()
         guard panel != nil else { return }
         let glance = Timer(timeInterval: AppDelegate.glance, repeats: false) { [weak self] _ in
@@ -850,7 +809,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         clicksHere = NSEvent.addLocalMonitorForEvents(matching: elsewhere) { [weak self] event in
             guard let self else { return event }
-            let ours = [self.panel, self.dial, self.statusItem.button?.window]
+            let ours = [self.panel, self.puck, self.statusItem.button?.window]
             if !ours.contains(where: { $0 === event.window }) {
                 self.closeFloating()
             }
@@ -933,22 +892,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         static let outputName = "outputDeviceName"
         static let inputUID = "inputDeviceUID"
         static let inputName = "inputDeviceName"
-        static let minutes = "recordMinutes"
-        static let dialPlace = "dialPlace"
+        static let puckPlace = "recorderPlace"
     }
 
-    /// Where the dial was last left. Under the status item until somebody
+    /// Where the puck was last left. Under the status item until somebody
     /// carries it somewhere, and there ever after — a window put in a corner is
     /// a window expected to be in that corner next time.
-    private var rememberedPlace: DialPlace {
-        DialPlace(encoded: UserDefaults.standard.string(forKey: Key.dialPlace) ?? "") ?? .hanging
-    }
-
-    /// Half an hour until the dial has been turned: the length a meeting is
-    /// booked for when nobody thought about it.
-    private var chosenMinutes: Int {
-        let stored = UserDefaults.standard.integer(forKey: Key.minutes)
-        return stored == 0 ? 30 : stored
+    private var rememberedPlace: DockPlace {
+        DockPlace(encoded: UserDefaults.standard.string(forKey: Key.puckPlace) ?? "") ?? .hanging
     }
 
     private var chosenProject: String {
@@ -980,15 +931,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func chooseProject(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
-        UserDefaults.standard.set(name, forKey: Key.project)
+        pickProject(name)
     }
 
     @objc private func chooseOutput(_ sender: NSMenuItem) {
-        remember(sender.representedObject as? AudioDevice, Key.outputUID, Key.outputName)
+        pickOutput(sender.representedObject as? AudioDevice)
     }
 
     @objc private func chooseInput(_ sender: NSMenuItem) {
-        remember(sender.representedObject as? AudioDevice, Key.inputUID, Key.inputName)
+        pickInput(sender.representedObject as? AudioDevice)
+    }
+
+    /// The choices themselves, reached from the menu and from the puck alike,
+    /// and each face told about a choice made on the other. A preview's choices
+    /// stop here: its lists are made up, and a made-up microphone remembered as
+    /// somebody's own would be the next real recording dying on the spot.
+    private func pickProject(_ name: String) {
+        guard !previewing else { return }
+        UserDefaults.standard.set(name, forKey: Key.project)
+        feedPuck()
+    }
+
+    private func pickOutput(_ device: AudioDevice?) {
+        guard !previewing else { return }
+        remember(device, Key.outputUID, Key.outputName)
+        feedPuck()
+    }
+
+    private func pickInput(_ device: AudioDevice?) {
+        guard !previewing else { return }
+        remember(device, Key.inputUID, Key.inputName)
+        feedPuck()
     }
 
     // --- keeping the pickers' lists to hand ------------------------------------
@@ -1009,6 +982,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.projects = projects
                 self.devices = devices
                 self.refreshing = false
+                self.feedPuck()
             }
         }
     }
@@ -1079,19 +1053,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // --- driving the recorder ------------------------------------------------
 
-    /// A recording that runs until it is stopped.
     @objc private func startRecording() {
-        timedMinutes = nil
-        launchRecorder()
-    }
-
-    /// A recording that stops itself after this many minutes of tape.
-    private func startTimedRecording(_ minutes: Int) {
-        timedMinutes = minutes
-        launchRecorder()
-    }
-
-    private func launchRecorder() {
         // nothing in a preview's menu offers this, and this guard is what keeps
         // that from being the only thing standing between a preview and a real
         // tape of whatever is being said in the room
@@ -1161,7 +1123,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // which is why stopping the tape is not the end of the session
         recorder.interrupt()
         stopTicking()
-        forgetDeadline()
         state = .processing
         show()
     }
@@ -1197,7 +1158,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 startedAt = Date()
                 state = .recording
                 startTicking()
-                scheduleStop()
                 show()
             }
         }
@@ -1233,7 +1193,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         recorder = nil
         startedAt = nil
         stopTicking()
-        forgetDeadline()
         state = .idle
         show()
         refresh()
@@ -1285,13 +1244,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// arrange for it to go wrong.
     private enum Scenario: CaseIterable {
         case idle
-        case dial
-        case dialFull
-        case dialTucked
+        case puck
+        case puckTucked
         case starting
         case voices
-        case timed
-        case timedEnding
         case microphoneDead
         case bothSilent
         case processing
@@ -1299,13 +1255,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var title: String {
             switch self {
             case .idle: return "Idle"
-            case .dial: return "Idle — dial open"
-            case .dialFull: return "Idle — dial at two hours"
-            case .dialTucked: return "Idle — dial tucked into the right edge"
+            case .puck: return "Idle — recorder open"
+            case .puckTucked: return "Idle — recorder tucked into the right edge"
             case .starting: return "Starting"
             case .voices: return "Recording — voices"
-            case .timed: return "Recording — timed, 20 min left"
-            case .timedEnding: return "Recording — timed, stops in 45 s"
             case .microphoneDead: return "Recording — microphone dead"
             case .bothSilent: return "Recording — both silent"
             case .processing: return "Processing"
@@ -1319,9 +1272,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         /// than a picture of one.
         var state: RecorderState {
             switch self {
-            case .idle, .dial, .dialFull, .dialTucked: return .idle
+            case .idle, .puck, .puckTucked: return .idle
             case .starting: return .starting
-            case .voices, .timed, .timedEnding, .microphoneDead, .bothSilent: return .recording
+            case .voices, .microphoneDead, .bothSilent: return .recording
             case .processing: return .processing
             }
         }
@@ -1332,45 +1285,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         /// like, and it would be the first thing to disbelieve.
         var sides: (system: Rehearsal.Side, microphone: Rehearsal.Side)? {
             switch self {
-            case .voices, .timed, .timedEnding: return (.talking(seed: 7), .talking(seed: 31))
+            case .voices: return (.talking(seed: 7), .talking(seed: 31))
             case .microphoneDead: return (.talking(seed: 7), .quiet(seed: 5))
             case .bothSilent: return (.quiet(seed: 11), .quiet(seed: 5))
-            case .idle, .dial, .dialFull, .dialTucked, .starting, .processing: return nil
+            case .idle, .puck, .puckTucked, .starting, .processing: return nil
             }
         }
 
-        /// How long a timed scenario's tape has left, or nothing for one that
-        /// runs until stopped. Forty-five seconds is short enough to sit and
-        /// watch the deadline arrive, and long enough to read the heading it
-        /// wears on the way there.
-        var secondsLeft: TimeInterval? {
-            switch self {
-            case .timed: return 20 * 60
-            case .timedEnding: return 45
-            default: return nil
-            }
+        var isPuck: Bool {
+            self == .puck || self == .puckTucked
         }
 
-        /// The dial's setting where the scenario is a dial, or nothing.
-        var dialMinutes: Int? {
-            switch self {
-            case .dialFull: return DialView.longest
-            default: return nil
-            }
-        }
-
-        var isDial: Bool {
-            switch self {
-            case .dial, .dialFull, .dialTucked: return true
-            default: return false
-            }
-        }
-
-        /// Where the scenario's dial is put, on the main screen: tucked into
+        /// Where the scenario's puck is put, on the main screen: tucked into
         /// an edge to be hovered out of it, or hanging like any other.
-        var dialPlace: DialPlace {
-            guard self == .dialTucked, let main = NSScreen.main,
-                  let display = DialDock.number(of: main) else { return .hanging }
+        var puckPlace: DockPlace {
+            guard self == .puckTucked, let main = NSScreen.main,
+                  let display = Dock.number(of: main) else { return .hanging }
             return .tucked(.right, display: display, along: 0.5)
         }
     }
@@ -1417,16 +1347,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // wrong moment and never stop
         stopRehearsing()
         stopTicking()
-        forgetDeadline()
         startedAt = nil
         guard let sides = scenario.sides else {
             state = scenario.state
             show()
-            // the dial by the door it is opened from, and its middle wired to
-            // nothing but closing it: a preview starts no tape
-            if scenario.isDial {
-                openDial(at: scenario.dialMinutes, remembering: false, place: scenario.dialPlace)
-                dialView?.onStart = { [weak self] _ in self?.closeDial() }
+            // the puck by the door it is opened from; it stays up through the
+            // scenarios after this one, showing each, the way a real one would
+            if scenario.isPuck {
+                openPuck(remembering: false, place: scenario.puckPlace)
             }
             return
         }
@@ -1438,12 +1366,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         startedAt = Date()
         state = .recording
         startTicking()
-        // a timed scenario is given its deadline the way a real tape is given
-        // one — after the tape is rolling — so the heading counts down and the
-        // deadline, when it comes, moves the preview on by itself
-        if let left = scenario.secondsLeft {
-            scheduleStop(after: left)
-        }
         show()
         startRehearsing(sides)
     }
@@ -2658,12 +2580,6 @@ final class RecordingPanelView: NSView {
     /// reader: the loudness of each side is already spoken on the status item,
     /// and what this window adds is that a recording is running and how long it
     /// has been.
-    func showHeading(_ text: String) {
-        if title.stringValue != text {
-            title.stringValue = text
-        }
-    }
-
     func showElapsed(_ text: String) {
         timer.stringValue = text
         setAccessibilityLabel("Recording, \(text)")
@@ -2717,335 +2633,304 @@ final class RecordingPanelView: NSView {
     }
 }
 
-// MARK: - the dial
+// MARK: - the recorder puck
 
-/// How long the next recording is to run, as a ring turned rather than a number
-/// typed. A meeting has a length before it starts — the invitation says so —
-/// and a tape that stops itself at that length is one nobody has to remember
-/// to stop with a call still up on the screen. Sixty ticks, two minutes each:
-/// as fine as a meeting is ever booked, and as far round as two hours.
+/// The recorder as a small window of its own: one button that starts the tape
+/// and stops it, and beside it the three things a recording is made of — the
+/// project it is filed under, the microphone, the sound it takes from the Mac.
+/// It exists because the menu closes on the first click and lives under one
+/// status item, and a control somebody uses at the start of every call wants
+/// to be where they left it: in a corner, tucked into an edge, always there.
 ///
-/// Nothing in here is drawn in `draw(_:)`. The disc, the ring of unlit ticks,
-/// the ring of lit ones and the arc that decides which of them show are all
-/// layers built once; turning the dial changes one number on one of them
-/// (`strokeEnd`) and the render server does the rest, so a drag costs no
-/// redraw at all. The ticks are one `CAReplicatorLayer` each rather than sixty
-/// layers — one tick, replicated round the circle by a rotation — which is
-/// how a clock face is drawn cheaply, and the lit ring is the same replicator
-/// again in the accent colour, masked by the arc.
+/// It is a second face of the recorder, never a second recorder: it says what
+/// the app's own state is and asks for what the menu asks for, through the
+/// same calls, so the two can never disagree about which microphone is chosen
+/// or whether the tape is rolling.
 ///
-/// A drag adds the *shortest signed turn* since the last event to the value,
-/// never the pointer's absolute angle: a value taken straight from the angle
-/// snaps from two hours to two minutes the instant a drag crosses twelve
-/// o'clock, which is the one thing a dial must never do.
-final class DialView: NSView, NSAccessibilitySlider {
-    static let ticks = 60
-    static let step = 2
-    static let shortest = step
-    static var longest: Int { ticks * step }
+/// Dark and solid, the island's own colour, for the island's own reasons. The
+/// frames are set by hand and nothing in here changes size: a window that
+/// grows when a device with a longer name is picked is a window that moved
+/// under the pointer.
+final class RecorderPuckView: NSView, Dockable {
+    static let bodyWidth: CGFloat = 300
+    static let inset: CGFloat = 24
+    static let corner: CGFloat = 16
 
-    /// The disc, and the air kept round it for its own shadow: the panel it sits
-    /// in casts none, because a window shadow on a transparent window is worked
-    /// out from the pixels and worked out again every time they change.
-    static let disc: CGFloat = 220
-    static let margin: CGFloat = 28
-    static var side: CGFloat { disc + margin * 2 }
-
-    /// The same warm near-black as the recording island, so the two read as one
-    /// app's windows, and a hairline of white at the rim so the disc has an edge
-    /// against a dark desktop.
     private static let ground = NSColor(srgbRed: 30 / 255, green: 30 / 255, blue: 33 / 255, alpha: 1)
     private static let rim = NSColor.white.withAlphaComponent(0.09)
-    private static let unlit = NSColor.white.withAlphaComponent(0.2)
-    private static let lit = NSColor.systemGreen
+    private static let rollingRim = NSColor.systemRed.withAlphaComponent(0.7)
 
-    private static let tickLength: CGFloat = 11
-    private static let tickWidth: CGFloat = 3
-    private static let ringInset: CGFloat = 16
-    private static let centreDiameter: CGFloat = 96
+    private static let padding: CGFloat = 16
+    private static let buttonColumn: CGFloat = 72
+    private static let rowHeight: CGFloat = 22
+    private static let rowGap: CGFloat = 9
+    private static let captionWidth: CGFloat = 88
+    private static let captionGap: CGFloat = 6
 
-    /// How far a scroll wheel travels for one tick. A notched wheel sends about
-    /// ten points a notch, so this is one notch, one tick, one pulse.
-    private static let scrollPerTick: CGFloat = 10
+    static var bodyHeight: CGFloat { padding * 2 + rowHeight * 3 + rowGap * 2 }
+    static var width: CGFloat { bodyWidth + inset * 2 }
+    static var height: CGFloat { bodyHeight + inset * 2 }
 
-    private let disc = CAShapeLayer()
-    private let unlitTicks = CAReplicatorLayer()
-    private let litTicks = CAReplicatorLayer()
-    private let litArc = CAShapeLayer()
-    private let centre = DialCentreButton()
-
-    /// What the dial is set to, and the unrounded turn underneath it. The
-    /// turn is what a drag moves; the minutes are the turn rounded to a tick,
-    /// and only the minutes ever reach the layers or the person.
-    private(set) var minutes: Int
-    private var turn: CGFloat
-    private var lastAngle: CGFloat?
-    private var scrolled: CGFloat = 0
+    private let body = CAShapeLayer()
+    private let record = RecordButton()
+    private let recordCaption = RecorderPuckView.caption("Record")
+    private let projectPicker = RecorderPuckView.picker()
+    private let inputPicker = RecorderPuckView.picker()
+    private let outputPicker = RecorderPuckView.picker()
     private let reduceMotion: Bool
 
-    var onStart: ((Int) -> Void)?
-    var onChange: ((Int) -> Void)?
-
-    /// A press on the dial's ground — inside the ring, or the air around the
-    /// disc — is a hand on the window rather than on the control, and this is
-    /// how the view says so, in screen points, from the press to the release.
-    /// What a grip *does* is not the view's business.
-    enum Grip {
-        case began(NSPoint)
-        case moved(NSPoint)
-        case ended(NSPoint)
-    }
-
-    var onGrip: ((Grip) -> Void)?
-
-    /// The pointer crossing the dial's edge, in or out. One tracking area,
-    /// entered and exited only: mouse-moved events flood the queue and are
-    /// not asked for, and nothing here needs to know where the pointer is
-    /// between one crossing and the next.
+    var onGrip: ((Dock.Grip) -> Void)?
     var onHover: ((Bool) -> Void)?
+    var onRecord: (() -> Void)?
+    var onStop: (() -> Void)?
+    var onProject: ((String) -> Void)?
+    var onInput: ((AudioDevice?) -> Void)?
+    var onOutput: ((AudioDevice?) -> Void)?
 
     private var gripping = false
     private var pointer: NSTrackingArea?
+    private var state = RecorderState.idle
 
-    init(minutes: Int, reduceMotion: Bool) {
-        self.minutes = DialView.clamped(minutes)
-        self.turn = CGFloat(self.minutes)
+    init(reduceMotion: Bool) {
         self.reduceMotion = reduceMotion
-        super.init(frame: NSRect(x: 0, y: 0, width: DialView.side, height: DialView.side))
+        super.init(frame: NSRect(
+            x: 0, y: 0, width: RecorderPuckView.width, height: RecorderPuckView.height
+        ))
         appearance = NSAppearance(named: .darkAqua)
         wantsLayer = true
-        // nothing here is drawn by this view, so nothing here wants redrawing
-        // when the window resizes — and a policy that redrew anyway would be
-        // work done for pixels that never change
         layerContentsRedrawPolicy = .onSetNeedsDisplay
-        buildLayers()
-        centre.frame = NSRect(
-            x: bounds.midX - DialView.centreDiameter / 2,
-            y: bounds.midY - DialView.centreDiameter / 2,
-            width: DialView.centreDiameter, height: DialView.centreDiameter
-        )
-        centre.target = self
-        centre.action = #selector(start)
-        addSubview(centre)
-        setAccessibilityLabel("Recording length")
-        show(animated: false)
+        buildBody()
+        layOut()
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("Recorder")
+        show(state: .idle, elapsed: "")
     }
 
     /// This view is only ever built in code; there is no nib in this app for
     /// one to be loaded from.
     required init?(coder: NSCoder) {
-        fatalError("DialView is built in code, not loaded from a nib")
+        fatalError("RecorderPuckView is built in code, not loaded from a nib")
     }
 
-    // --- the layers ----------------------------------------------------------
-
-    private var discRect: NSRect {
-        NSRect(x: DialView.margin, y: DialView.margin, width: DialView.disc, height: DialView.disc)
+    private var bodyRect: NSRect {
+        NSRect(
+            x: RecorderPuckView.inset, y: RecorderPuckView.inset,
+            width: RecorderPuckView.bodyWidth, height: RecorderPuckView.bodyHeight
+        )
     }
 
-    private func buildLayers() {
+    /// The rounded slab and its shadow, one layer. The shadow's shape is given
+    /// rather than read off the pixels — the window casts none, and a shape
+    /// that never changes is a shape worked out once.
+    private func buildBody() {
         guard let layer else { return }
-        let round = CGPath(ellipseIn: discRect.insetBy(dx: 0.5, dy: 0.5), transform: nil)
-        disc.path = round
-        disc.fillColor = DialView.ground.cgColor
-        disc.strokeColor = DialView.rim.cgColor
-        disc.lineWidth = 1
-        // the shadow's shape given rather than found: a layer whose shadow is
-        // read off its pixels has it read again on every change, and this one
-        // never changes shape
-        disc.shadowPath = round
-        disc.shadowColor = NSColor.black.cgColor
-        disc.shadowOpacity = 0.55
-        disc.shadowRadius = 14
-        disc.shadowOffset = CGSize(width: 0, height: -5)
-        layer.addSublayer(disc)
+        let round = CGPath(
+            roundedRect: bodyRect.insetBy(dx: 0.5, dy: 0.5),
+            cornerWidth: RecorderPuckView.corner, cornerHeight: RecorderPuckView.corner, transform: nil
+        )
+        body.path = round
+        body.fillColor = RecorderPuckView.ground.cgColor
+        body.strokeColor = RecorderPuckView.rim.cgColor
+        body.lineWidth = 1
+        body.shadowPath = round
+        body.shadowColor = NSColor.black.cgColor
+        body.shadowOpacity = 0.55
+        body.shadowRadius = 14
+        body.shadowOffset = CGSize(width: 0, height: -5)
+        layer.addSublayer(body)
+    }
 
-        for (ring, colour, glowing) in [
-            (unlitTicks, DialView.unlit, false), (litTicks, DialView.lit, true),
+    private func layOut() {
+        let body = bodyRect
+        let column = NSRect(
+            x: body.minX + RecorderPuckView.padding, y: body.minY,
+            width: RecorderPuckView.buttonColumn, height: body.height
+        )
+        let side = RecordButton.side
+        let stack = side + 4 + 14
+        record.frame = NSRect(
+            x: column.midX - side / 2, y: column.midY - stack / 2 + 4 + 14, width: side, height: side
+        )
+        record.target = self
+        record.action = #selector(pressed)
+        recordCaption.frame = NSRect(x: column.minX - 8, y: column.midY - stack / 2, width: column.width + 16, height: 14)
+        recordCaption.alignment = .center
+        addSubview(record)
+        addSubview(recordCaption)
+
+        var top = body.maxY - RecorderPuckView.padding
+        let left = column.maxX + RecorderPuckView.padding
+        let right = body.maxX - RecorderPuckView.padding
+        for (title, picker) in [
+            ("Project", projectPicker), ("Microphone", inputPicker), ("Sound source", outputPicker),
         ] {
-            ring.frame = discRect
-            ring.instanceCount = DialView.ticks
-            // a negative turn is clockwise on a Mac's unflipped y axis, which is
-            // the way a dial and a clock both go
-            ring.instanceTransform = CATransform3DMakeRotation(
-                -2 * .pi / CGFloat(DialView.ticks), 0, 0, 1
+            let caption = RecorderPuckView.caption(title)
+            caption.frame = NSRect(
+                x: left, y: top - RecorderPuckView.rowHeight + 3,
+                width: RecorderPuckView.captionWidth, height: 16
             )
-            ring.addSublayer(DialView.tick(colour, glowing: glowing))
-            layer.addSublayer(ring)
-        }
-
-        // the arc that decides which ticks are lit: a stroke round the ring,
-        // as wide as a tick and its glow, run from twelve o'clock clockwise.
-        // The path is a polyline made once — its own points say which way
-        // round it goes, where an arc primitive says so in terms of a
-        // coordinate system somebody has to remember is upside down
-        litArc.frame = CGRect(origin: .zero, size: discRect.size)
-        litArc.path = DialView.ringPath(
-            centre: CGPoint(x: DialView.disc / 2, y: DialView.disc / 2),
-            radius: DialView.disc / 2 - DialView.ringInset - DialView.tickLength / 2
-        )
-        litArc.fillColor = nil
-        litArc.strokeColor = NSColor.black.cgColor
-        litArc.lineWidth = DialView.tickLength + 14
-        litArc.lineCap = .butt
-        litArc.strokeStart = 0
-        litTicks.mask = litArc
-    }
-
-    /// One tick, standing at twelve o'clock; the replicator turns it round the
-    /// rest of the face. A lit one glows, and the glow's shape is its own
-    /// rounded rectangle given outright, for the same reason the disc's
-    /// shadow is: one tick, once, then replicated.
-    private static func tick(_ colour: NSColor, glowing: Bool) -> CALayer {
-        let tick = CALayer()
-        tick.frame = CGRect(
-            x: disc / 2 - tickWidth / 2, y: disc - ringInset - tickLength,
-            width: tickWidth, height: tickLength
-        )
-        tick.cornerRadius = tickWidth / 2
-        tick.backgroundColor = colour.cgColor
-        if glowing {
-            tick.shadowPath = CGPath(
-                roundedRect: tick.bounds, cornerWidth: tickWidth / 2, cornerHeight: tickWidth / 2,
-                transform: nil
+            picker.frame = NSRect(
+                x: left + RecorderPuckView.captionWidth + RecorderPuckView.captionGap,
+                y: top - RecorderPuckView.rowHeight,
+                width: right - left - RecorderPuckView.captionWidth - RecorderPuckView.captionGap,
+                height: RecorderPuckView.rowHeight
             )
-            tick.shadowColor = colour.cgColor
-            tick.shadowOpacity = 0.9
-            tick.shadowRadius = 4
-            tick.shadowOffset = .zero
+            picker.target = self
+            picker.action = #selector(picked(_:))
+            addSubview(caption)
+            addSubview(picker)
+            top -= RecorderPuckView.rowHeight + RecorderPuckView.rowGap
         }
-        return tick
     }
 
-    /// A circle as a polyline that starts at the top and goes clockwise, so
-    /// that `strokeEnd` at a quarter is a quarter past.
-    private static func ringPath(centre: CGPoint, radius: CGFloat) -> CGPath {
-        let path = CGMutablePath()
-        let points = 240
-        for i in 0...points {
-            let angle = 2 * CGFloat.pi * CGFloat(i) / CGFloat(points)
-            let point = CGPoint(x: centre.x + radius * sin(angle), y: centre.y + radius * cos(angle))
-            if i == 0 { path.move(to: point) } else { path.addLine(to: point) }
+    // --- what it says ---------------------------------------------------------------
+
+    /// The recorder's state, put on the button and its caption. The pickers go
+    /// quiet from the moment the tape is being started: they say what this
+    /// recording is being made with, and a choice made now would be a choice
+    /// for the next one, which is not what a picker beside a rolling tape
+    /// looks like it offers.
+    func show(state: RecorderState, elapsed: String) {
+        self.state = state
+        let idle = state == .idle
+        record.rolling = state == .recording
+        record.isEnabled = idle || state == .recording
+        for picker in [projectPicker, inputPicker, outputPicker] {
+            picker.isEnabled = idle
         }
-        return path
+        switch state {
+        case .idle:
+            recordCaption.stringValue = "Record"
+            recordCaption.font = NSFont.systemFont(ofSize: 11)
+            record.setAccessibilityLabel("Start recording")
+        case .starting:
+            recordCaption.stringValue = "Starting …"
+            recordCaption.font = NSFont.systemFont(ofSize: 11)
+            record.setAccessibilityLabel("Starting")
+        case .recording:
+            recordCaption.stringValue = elapsed
+            recordCaption.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            record.setAccessibilityLabel("Stop recording, \(elapsed) so far")
+        case .processing:
+            recordCaption.stringValue = "Processing …"
+            recordCaption.font = NSFont.systemFont(ofSize: 11)
+            record.setAccessibilityLabel("Processing")
+        }
+        // the rim goes red for the length of the tape, so that a puck tucked
+        // into an edge still says from its sliver that a meeting is being taped
+        body.strokeColor = (state == .recording ? RecorderPuckView.rollingRim : RecorderPuckView.rim).cgColor
+        body.lineWidth = state == .recording ? 1.5 : 1
     }
 
-    // --- the value ------------------------------------------------------------
-
-    private static func clamped(_ minutes: Int) -> Int {
-        min(max(minutes, shortest), longest)
+    /// Every project a memo has been filed under, the chosen one ticked, or a
+    /// single grey "loading …" until the list has arrived — the same lines the
+    /// menu shows, for the same reasons.
+    func showProjects(_ projects: [(name: String, count: Int)]?, chosen: String) {
+        guard let projects else {
+            RecorderPuckView.loading(projectPicker)
+            return
+        }
+        projectPicker.removeAllItems()
+        for project in projects {
+            projectPicker.addItem(withTitle: "\(project.name) (\(project.count))")
+            projectPicker.lastItem?.representedObject = project.name
+        }
+        if !projects.contains(where: { $0.name == chosen }) {
+            projectPicker.addItem(withTitle: chosen)
+            projectPicker.lastItem?.representedObject = chosen
+        }
+        projectPicker.selectItem(at: projectPicker.itemArray.firstIndex {
+            $0.representedObject as? String == chosen
+        } ?? 0)
+        projectPicker.isEnabled = state == .idle
     }
 
-    /// The layers and the readout brought up to the value. The arc moves with
-    /// the render server's own quarter second when the change was a click, a
-    /// scroll or a key — a jump that eases is a jump that can be followed — and
-    /// with none at all under a drag, where the pointer is the animation and a
-    /// ring lagging a quarter second behind it would feel like rubber.
-    private func show(animated: Bool) {
-        let index = minutes / DialView.step
-        let fraction = min(1, (CGFloat(index) + 0.5) / CGFloat(DialView.ticks))
-        CATransaction.begin()
-        CATransaction.setDisableActions(!animated || reduceMotion)
-        litArc.strokeEnd = fraction
-        CATransaction.commit()
-        centre.show(minutes: minutes)
-        setAccessibilityValue("\(minutes) minutes")
+    func showInputs(_ devices: [AudioDevice]?, chosen: AudioDevice?) {
+        RecorderPuckView.fill(inputPicker, devices, "Default microphone", chosen)
+        inputPicker.isEnabled = state == .idle
     }
 
-    /// One new value, from wherever it came. The pulse fires only when the tick
-    /// the dial rests on has actually changed — a drag sends dozens of events a
-    /// second, and a pulse on each would be a buzz rather than a detent.
-    private func settle(_ exact: CGFloat, animated: Bool) {
-        turn = min(max(exact, CGFloat(DialView.shortest)), CGFloat(DialView.longest))
-        let stepped = DialView.clamped(Int((turn / CGFloat(DialView.step)).rounded()) * DialView.step)
-        guard stepped != minutes else { return }
-        minutes = stepped
-        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .drawCompleted)
-        show(animated: animated)
-        onChange?(minutes)
+    func showOutputs(_ devices: [AudioDevice]?, chosen: AudioDevice?) {
+        RecorderPuckView.fill(outputPicker, devices, "System mix (everything)", chosen)
+        outputPicker.isEnabled = state == .idle
     }
 
-    private func step(by ticks: Int) {
-        // from the tick the dial rests on, not from the turn underneath it, so
-        // that a key press after a drag moves exactly one tick
-        turn = CGFloat(minutes)
-        settle(turn + CGFloat(ticks * DialView.step), animated: true)
+    /// One direction of audio: the line that leaves it to the recorder first,
+    /// then every device, and a remembered device that is not plugged in
+    /// shown anyway and named as missing, so it can be seen and changed.
+    private static func fill(
+        _ picker: NSPopUpButton, _ listed: [AudioDevice]?, _ anything: String, _ chosen: AudioDevice?
+    ) {
+        guard let listed else {
+            loading(picker)
+            return
+        }
+        picker.removeAllItems()
+        picker.addItem(withTitle: anything)
+        for device in listed {
+            picker.addItem(withTitle: device.name)
+            picker.lastItem?.representedObject = device
+        }
+        if let chosen, !listed.contains(where: { $0.uid == chosen.uid }) {
+            picker.addItem(withTitle: "\(chosen.name) (not connected)")
+            picker.lastItem?.representedObject = chosen
+        }
+        picker.selectItem(at: picker.itemArray.firstIndex {
+            ($0.representedObject as? AudioDevice)?.uid == chosen?.uid
+        } ?? 0)
     }
 
-    @objc private func start() {
-        onStart?(minutes)
+    private static func loading(_ picker: NSPopUpButton) {
+        picker.removeAllItems()
+        picker.addItem(withTitle: "loading …")
+        picker.isEnabled = false
     }
 
-    // --- the pointer ------------------------------------------------------------
+    // --- what is done to it -----------------------------------------------------------
 
-    /// Clockwise from twelve o'clock, in radians, for a point in this view.
-    private func angle(of point: NSPoint) -> CGFloat {
-        let dx = point.x - bounds.midX
-        let dy = point.y - bounds.midY
-        var angle = atan2(dx, dy)
-        if angle < 0 { angle += 2 * .pi }
-        return angle
+    @objc private func pressed() {
+        switch state {
+        case .idle: onRecord?()
+        case .recording: onStop?()
+        case .starting, .processing: break
+        }
     }
 
-    /// The shorter way round from one angle to the next, signed: clockwise is
-    /// positive. This is the whole of what keeps the seam at twelve o'clock
-    /// from being a cliff.
-    private static func turn(from old: CGFloat, to new: CGFloat) -> CGFloat {
-        var delta = new - old
-        if delta > .pi { delta -= 2 * .pi } else if delta < -.pi { delta += 2 * .pi }
-        return delta
+    @objc private func picked(_ sender: NSPopUpButton) {
+        let value = sender.selectedItem?.representedObject
+        if sender === projectPicker, let name = value as? String {
+            onProject?(name)
+        } else if sender === inputPicker {
+            onInput?(value as? AudioDevice)
+        } else if sender === outputPicker {
+            onOutput?(value as? AudioDevice)
+        }
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    /// Where the ring is, as a band of reach from the centre: a press in it
-    /// turns the dial, a press anywhere else on the disc or in the air around
-    /// it takes hold of the window.
-    private static var ringBand: ClosedRange<CGFloat> {
-        (disc / 2 - ringInset - tickLength - 10)...(disc / 2 + 4)
-    }
-
-    /// A press on the ring sets the dial to where it was pressed and the drag
-    /// that follows turns it from there; a press on the ground is a grip.
+    /// A press that reached this view landed on no control — the button and
+    /// the pickers take their own — so it is a hand on the window.
     override func mouseDown(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        let reach = hypot(point.x - bounds.midX, point.y - bounds.midY)
-        guard DialView.ringBand.contains(reach) else {
-            gripping = true
-            onGrip?(.began(NSEvent.mouseLocation))
-            return
-        }
-        let angle = angle(of: point)
-        let ticks = (angle / (2 * .pi) * CGFloat(DialView.ticks)).rounded()
-        settle(ticks * CGFloat(DialView.step), animated: true)
-        lastAngle = angle
+        gripping = true
+        onGrip?(.began(NSEvent.mouseLocation))
     }
 
     override func mouseDragged(with event: NSEvent) {
-        if gripping {
-            onGrip?(.moved(NSEvent.mouseLocation))
-            return
-        }
-        guard let lastAngle else { return }
-        let angle = angle(of: convert(event.locationInWindow, from: nil))
-        let delta = DialView.turn(from: lastAngle, to: angle)
-        self.lastAngle = angle
-        settle(turn + delta / (2 * .pi) * CGFloat(DialView.longest), animated: false)
+        guard gripping else { return }
+        onGrip?(.moved(NSEvent.mouseLocation))
     }
 
     override func mouseUp(with event: NSEvent) {
-        lastAngle = nil
-        if gripping {
-            gripping = false
-            onGrip?(.ended(NSEvent.mouseLocation))
-        }
+        guard gripping else { return }
+        gripping = false
+        onGrip?(.ended(NSEvent.mouseLocation))
     }
 
     /// `.activeAlways`, because this window never becomes key and the app it
     /// belongs to is never the active one: any narrower scope would report no
-    /// crossing at all. The whole view is the area — the margin round the disc
-    /// is the slack that keeps a pointer just off the rim from counting as
-    /// gone.
+    /// crossing at all. The whole view is the area — the margin round the slab
+    /// is the slack that keeps a pointer just off the rim from counting as gone.
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let pointer {
@@ -3067,41 +2952,8 @@ final class DialView: NSView, NSAccessibilitySlider {
         onHover?(false)
     }
 
-    /// A wheel or a two-finger scroll turns the dial too, a tick a notch.
-    override func scrollWheel(with event: NSEvent) {
-        scrolled += event.scrollingDeltaY
-        let ticks = Int(scrolled / DialView.scrollPerTick)
-        guard ticks != 0 else { return }
-        scrolled -= CGFloat(ticks) * DialView.scrollPerTick
-        step(by: -ticks)
-    }
-
-    // --- the keyboard and the screen reader ----------------------------------
-
-    override var acceptsFirstResponder: Bool { true }
-
-    override func keyDown(with event: NSEvent) {
-        switch event.keyCode {
-        case 126, 124: step(by: 1)      // up, right
-        case 125, 123: step(by: -1)     // down, left
-        case 36, 76: start()            // return, enter
-        default: super.keyDown(with: event)
-        }
-    }
-
-    override func accessibilityPerformIncrement() -> Bool {
-        step(by: 1)
-        return true
-    }
-
-    override func accessibilityPerformDecrement() -> Bool {
-        step(by: -1)
-        return true
-    }
-
-    /// The disc grown into place out of the status item above it, the way the
-    /// recording island arrives, and for the same reason: it says where the
-    /// window came from.
+    /// The slab grown into place out of the status item above it, the way the
+    /// island arrives, and for the same reason: it says where the window came from.
     func appear() {
         guard !reduceMotion, let layer else { return }
         let growing = CABasicAnimation(keyPath: "transform")
@@ -3111,99 +2963,100 @@ final class DialView: NSView, NSAccessibilitySlider {
         growing.timingFunction = RecordingPanelView.easing
         layer.add(growing, forKey: "appear")
     }
+
+    private static func caption(_ text: String) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = NSFont.systemFont(ofSize: 11)
+        field.textColor = .secondaryLabelColor
+        field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byTruncatingTail
+        return field
+    }
+
+    private static func picker() -> NSPopUpButton {
+        let picker = NSPopUpButton(frame: .zero, pullsDown: false)
+        picker.controlSize = .small
+        picker.font = NSFont.systemFont(ofSize: 11)
+        picker.lineBreakMode = .byTruncatingTail
+        return picker
+    }
 }
 
-/// The middle of the dial: what it is set to, and the one thing to do about
-/// it. It is a button because that is what the middle of this dial is for —
-/// turn the ring, press the middle, the tape rolls — and the readout lives on
-/// it so there is nothing on the disc that is not either turned or pressed.
-final class DialCentreButton: NSButton {
-    private static let face = NSColor.white.withAlphaComponent(0.06)
-    private static let pressed = NSColor.white.withAlphaComponent(0.12)
-    private static let rim = NSColor.white.withAlphaComponent(0.1)
+/// The one button: a red disc that starts the tape, a red square that stops
+/// it. Drawn rather than pictured, so the pressed and disabled states are the
+/// same shape a shade different and not a second image.
+final class RecordButton: NSButton {
+    static let side: CGFloat = 52
+    private static let ring = NSColor.white.withAlphaComponent(0.14)
 
-    private var number = ""
-    private var unit = ""
+    /// Whether the tape is rolling, which is what decides the shape.
+    var rolling = false {
+        didSet { needsDisplay = true }
+    }
 
     init() {
         super.init(frame: .zero)
         isBordered = false
         setButtonType(.momentaryChange)
         title = ""
+        setAccessibilityRole(.button)
     }
 
     /// This view is only ever built in code; there is no nib in this app for
     /// one to be loaded from.
     required init?(coder: NSCoder) {
-        fatalError("DialCentreButton is built in code, not loaded from a nib")
-    }
-
-    /// Minutes up to the hour, hours and minutes past it — "48 MIN", "1:30 HR" —
-    /// which is how a meeting's length is said aloud.
-    func show(minutes: Int) {
-        if minutes < 60 {
-            number = "\(minutes)"
-            unit = "MIN"
-        } else {
-            number = String(format: "%d:%02d", minutes / 60, minutes % 60)
-            unit = "HR"
-        }
-        setAccessibilityLabel("Start recording for \(minutes) minutes")
-        needsDisplay = true
+        fatalError("RecordButton is built in code, not loaded from a nib")
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let face = NSBezierPath(ovalIn: bounds.insetBy(dx: 0.5, dy: 0.5))
-        (isHighlighted ? DialCentreButton.pressed : DialCentreButton.face).setFill()
-        face.fill()
-        DialCentreButton.rim.setStroke()
-        face.lineWidth = 1
-        face.stroke()
-
-        let centred = NSMutableParagraphStyle()
-        centred.alignment = .center
-        let big = NSAttributedString(string: number, attributes: [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 30, weight: .semibold),
-            .foregroundColor: NSColor.white,
-            .paragraphStyle: centred,
-        ])
-        let small = NSAttributedString(string: unit, attributes: [
-            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
-            .foregroundColor: NSColor.white.withAlphaComponent(0.55),
-            .kern: 1.5,
-            .paragraphStyle: centred,
-        ])
-        let bigHeight = big.size().height
-        let smallHeight = small.size().height
-        let gap: CGFloat = 1
-        let top = bounds.midY + (bigHeight + gap + smallHeight) / 2
-        big.draw(in: NSRect(x: 0, y: top - bigHeight, width: bounds.width, height: bigHeight))
-        small.draw(in: NSRect(
-            x: 0, y: top - bigHeight - gap - smallHeight, width: bounds.width, height: smallHeight
-        ))
+        let ring = NSBezierPath(ovalIn: bounds.insetBy(dx: 1, dy: 1))
+        RecordButton.ring.setStroke()
+        ring.lineWidth = 2
+        ring.stroke()
+        var red = NSColor.systemRed
+        if !isEnabled {
+            red = red.withAlphaComponent(0.35)
+        } else if isHighlighted {
+            red = red.withAlphaComponent(0.7)
+        }
+        red.setFill()
+        if rolling {
+            let square = bounds.insetBy(dx: bounds.width * 0.3, dy: bounds.height * 0.3)
+            NSBezierPath(roundedRect: square, xRadius: 4, yRadius: 4).fill()
+        } else {
+            NSBezierPath(ovalIn: bounds.insetBy(dx: 7, dy: 7)).fill()
+        }
     }
 }
 
-// MARK: - where the dial lives
+// MARK: - where a floating window lives
 
 /// A window that may hang off the edge of the screen. AppKit pulls a window
-/// back on screen whenever it is placed or resized — that is what a tucked dial
-/// must not have happen to it — and this is the one override that stops it.
-final class DialPanel: NSPanel {
+/// back on screen whenever it is placed or resized — that is what a tucked
+/// window must not have happen to it — and this is the one override that stops it.
+
+/// What a view has to report for the dock to place its window: a hand on its
+/// ground, and the pointer crossing its edge. The view knows nothing of what
+/// either means.
+protocol Dockable: NSView {
+    var onGrip: ((Dock.Grip) -> Void)? { get set }
+    var onHover: ((Bool) -> Void)? { get set }
+}
+final class DockPanel: NSPanel {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         frameRect
     }
 }
 
-/// Where the dial was left, as a thing that can be written down and read back.
-/// A free dial is a fraction of its screen rather than a point, so a display
+/// Where a window was left, as a thing that can be written down and read back.
+/// A free one is a fraction of its screen rather than a point, so a display
 /// that changes resolution keeps it in the same place; a tucked one is an edge
 /// and how far along it. The screen is named by its display number, and a
-/// display that is no longer attached puts the dial back under the menu bar.
-enum DialPlace: Equatable {
+/// display that is no longer attached puts the window back under the menu bar.
+enum DockPlace: Equatable {
     case hanging
     case free(display: UInt32, x: CGFloat, y: CGFloat)
-    case tucked(DialDock.Edge, display: UInt32, along: CGFloat)
+    case tucked(Dock.Edge, display: UInt32, along: CGFloat)
 
     var encoded: String {
         switch self {
@@ -3226,7 +3079,7 @@ enum DialPlace: Equatable {
                   let x = Double(parts[2]), let y = Double(parts[3]) else { return nil }
             self = .free(display: display, x: x, y: y)
         case "tucked":
-            guard parts.count == 4, let edge = DialDock.Edge(rawValue: parts[1]),
+            guard parts.count == 4, let edge = Dock.Edge(rawValue: parts[1]),
                   let display = UInt32(parts[2]), let along = Double(parts[3]) else { return nil }
             self = .tucked(edge, display: display, along: along)
         default:
@@ -3235,24 +3088,35 @@ enum DialPlace: Equatable {
     }
 }
 
-/// The dial's window and the four places it can be: hanging under the status
+/// A floating window and the four places it can be: hanging under the status
 /// item like a menu, free anywhere on the screen, tucked into an edge with a
 /// sliver showing, or peeking back out of that edge for as long as the pointer
 /// is on it. The view inside knows nothing of this — it reports a grip on its
 /// ground and the pointer crossing its edge, and this decides what those mean.
 ///
+/// The view's drawn body sits `inset` points in from the window's edge on every
+/// side — the air its shadow is cast into — and that air is not counted when
+/// the window is put against an edge or pushed through one.
+///
 /// Moving is done by hand, event by event, rather than handed to the window
-/// server: the release is what decides whether the dial tucks, and a release
+/// server: the release is what decides whether the window tucks, and a release
 /// this object never hears about is a decision it cannot make.
 ///
 /// Tucked, it costs nothing: no timer, no monitor, one tracking area waiting
 /// for a crossing. The dwell and the grace are timers that exist only between
 /// a crossing and its re-check — and both re-check, because a pointer that
 /// skimmed the sliver on its way somewhere else is not a pointer asking for
-/// the dial.
-final class DialDock {
+/// the window.
+final class Dock {
     enum Edge: String {
         case left, right, top, bottom
+    }
+
+    /// A press on the view's ground, in screen points, from press to release.
+    enum Grip {
+        case began(NSPoint)
+        case moved(NSPoint)
+        case ended(NSPoint)
     }
 
     enum State {
@@ -3267,12 +3131,12 @@ final class DialDock {
         }
     }
 
-    /// How much of the disc stays on screen when tucked: the rim and the first
-    /// few ticks, enough to be a tab and to be hovered. Never less than a few
+    /// How much of the body stays on screen when tucked: a rim's worth,
+    /// enough to be a tab and to be hovered. Never less than a few
     /// points — a window with nothing on screen gets no events at all.
     static let peek: CGFloat = 22
 
-    /// How near the pointer must be let go to an edge for the dial to tuck.
+    /// How near the pointer must be let go to an edge for the window to tuck.
     static let snap: CGFloat = 8
 
     /// The dwell before a hover reveals, and the grace after the pointer leaves
@@ -3288,39 +3152,41 @@ final class DialDock {
     static let sliding: TimeInterval = 0.22
     static let tuckedAlpha: CGFloat = 0.6
 
-    /// The air between a revealed disc and the edge it came out of.
+    /// The air between a revealed body and the edge it came out of.
     static let clearance: CGFloat = 6
 
     let panel: NSPanel
-    let view: DialView
+    let view: Dockable
+    private let inset: CGFloat
     private let reduceMotion: Bool
     private(set) var state: State = .hanging
 
-    /// How far along its edge a tucked dial sits, as a fraction, kept so that
+    /// How far along its edge a tucked window sits, as a fraction, kept so that
     /// peeking out and tucking back land on the same spot.
     private var along: CGFloat = 0.5
 
-    /// The pointer's offset from the window's origin while the dial is being
+    /// The pointer's offset from the window's origin while the window is being
     /// moved, and nothing at any other time.
     private var grab: NSPoint?
     private var pending: Timer?
     private var screensChanged: Any?
 
-    /// Told once, when the dial stops hanging: whoever hung it there closes it
-    /// on a click elsewhere and lights the button it hangs from, and a dial that
+    /// Told once, when the window stops hanging: whoever hung it there closes it
+    /// on a click elsewhere and lights the button it hangs from, and a window that
     /// has been carried off is neither of those things any more.
     var onLeftHanging: (() -> Void)?
 
-    /// Told whenever where the dial lives changes, with the place to remember.
-    var onPlaced: ((DialPlace) -> Void)?
+    /// Told whenever where the window lives changes, with the place to remember.
+    var onPlaced: ((DockPlace) -> Void)?
 
-    init(panel: NSPanel, view: DialView, reduceMotion: Bool) {
+    init(panel: NSPanel, view: Dockable, inset: CGFloat, reduceMotion: Bool) {
         self.panel = panel
         self.view = view
+        self.inset = inset
         self.reduceMotion = reduceMotion
         view.onGrip = { [weak self] grip in self?.gripped(grip) }
         view.onHover = { [weak self] inside in self?.hovered(inside) }
-        // a display arriving or leaving moves every edge; a tucked dial is put
+        // a display arriving or leaving moves every edge; a tucked window is put
         // back against the edge it was tucked into, on whatever is there now
         screensChanged = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil,
@@ -3337,36 +3203,38 @@ final class DialDock {
 
     // --- putting it back where it was ---------------------------------------------
 
-    /// The dial put back where it was left, or nothing — and then the caller
+    /// The window put back where it was left, or nothing — and then the caller
     /// hangs it under the status item — when that place is gone.
-    func restore(_ place: DialPlace) -> Bool {
+    func restore(_ place: DockPlace) -> Bool {
         switch place {
         case .hanging:
             return false
         case let .free(display, x, y):
-            guard let screen = DialDock.screen(numbered: display) else { return false }
+            guard let screen = Dock.screen(numbered: display) else { return false }
             let area = screen.visibleFrame
             let origin = NSPoint(
                 x: area.minX + x * area.width - panel.frame.width / 2,
                 y: area.minY + y * area.height - panel.frame.height / 2
             )
-            panel.setFrameOrigin(DialDock.clamped(origin, size: panel.frame.size, within: area))
+            panel.setFrameOrigin(Dock.clamped(
+                origin, size: panel.frame.size, within: area.insetBy(dx: -inset, dy: -inset)
+            ))
             state = .free
             panel.alphaValue = 1
             panel.orderFrontRegardless()
             return true
         case let .tucked(edge, display, along):
-            guard let screen = DialDock.screen(numbered: display) else { return false }
+            guard let screen = Dock.screen(numbered: display) else { return false }
             self.along = along
             state = .tucked(edge)
             panel.setFrame(tuckedFrame(edge, on: screen), display: false)
-            panel.alphaValue = DialDock.tuckedAlpha
+            panel.alphaValue = Dock.tuckedAlpha
             panel.orderFrontRegardless()
             return true
         }
     }
 
-    /// The dial brought to where it can be used: out of its edge, or to the
+    /// The window brought to where it can be used: out of its edge, or to the
     /// front. This is the way in that needs no pointer.
     func reveal() {
         pending?.invalidate()
@@ -3376,9 +3244,9 @@ final class DialDock {
         panel.orderFrontRegardless()
     }
 
-    private var place: DialPlace {
-        let screen = DialDock.screen(under: panel.frame) ?? NSScreen.main
-        guard let screen, let display = DialDock.number(of: screen) else { return .hanging }
+    private var place: DockPlace {
+        let screen = Dock.screen(under: panel.frame) ?? NSScreen.main
+        guard let screen, let display = Dock.number(of: screen) else { return .hanging }
         switch state {
         case .hanging:
             return .hanging
@@ -3396,7 +3264,7 @@ final class DialDock {
 
     // --- being moved ------------------------------------------------------------
 
-    private func gripped(_ grip: DialView.Grip) {
+    private func gripped(_ grip: Grip) {
         switch grip {
         case let .began(point):
             pending?.invalidate()
@@ -3414,7 +3282,7 @@ final class DialDock {
         }
     }
 
-    /// The first movement of a grip: a hanging dial stops hanging, a tucked or
+    /// The first movement of a grip: a hanging window stops hanging, a tucked or
     /// peeking one is just a window again, and either way it is fully lit.
     private func leaveWherever() {
         switch state {
@@ -3432,13 +3300,13 @@ final class DialDock {
     /// Let go: within a few points of an edge it tucks into that edge, at the
     /// spot along it where it was dropped; anywhere else it stays.
     private func release(at point: NSPoint) {
-        guard let screen = DialDock.screen(containing: point) else {
+        guard let screen = Dock.screen(containing: point) else {
             state = .free
             onPlaced?(place)
             return
         }
-        if let edge = DialDock.edge(near: point, of: screen) {
-            along = DialDock.along(edge, of: panel.frame, on: screen)
+        if let edge = Dock.edge(near: point, of: screen) {
+            along = Dock.along(edge, of: panel.frame, on: screen)
             tuck(edge, on: screen)
         } else {
             state = .free
@@ -3448,8 +3316,8 @@ final class DialDock {
 
     // --- being hovered --------------------------------------------------------------
 
-    /// The pointer crossing the dial's edge, in or out. A crossing sets a timer
-    /// and the timer asks again: what reveals a tucked dial is a pointer still
+    /// The pointer crossing the window's edge, in or out. A crossing sets a timer
+    /// and the timer asks again: what reveals a tucked window is a pointer still
     /// on it a fifth of a second later, and what hides a peeking one is a
     /// pointer still gone after the grace — and never one that is holding it.
     private func hovered(_ inside: Bool) {
@@ -3457,14 +3325,14 @@ final class DialDock {
         pending = nil
         switch (state, inside) {
         case let (.tucked(edge), true):
-            wait(DialDock.dwell) { [weak self] in
-                guard let self, self.pointerIsOnTheDial else { return }
+            wait(Dock.dwell) { [weak self] in
+                guard let self, self.pointerIsOnTheWindow else { return }
                 self.peek(edge)
             }
         case let (.peeking(edge), false):
-            wait(DialDock.grace) { [weak self] in
-                guard let self, self.grab == nil, !self.pointerIsOnTheDial else { return }
-                guard let screen = DialDock.screen(under: self.panel.frame) else { return }
+            wait(Dock.grace) { [weak self] in
+                guard let self, self.grab == nil, !self.pointerIsOnTheWindow else { return }
+                guard let screen = Dock.screen(under: self.panel.frame) else { return }
                 self.tuck(edge, on: screen)
             }
         default:
@@ -3482,7 +3350,7 @@ final class DialDock {
         pending = timer
     }
 
-    private var pointerIsOnTheDial: Bool {
+    private var pointerIsOnTheWindow: Bool {
         panel.frame.contains(NSEvent.mouseLocation)
     }
 
@@ -3490,28 +3358,28 @@ final class DialDock {
 
     private func tuck(_ edge: Edge, on screen: NSScreen) {
         state = .tucked(edge)
-        slide(to: tuckedFrame(edge, on: screen), alpha: DialDock.tuckedAlpha)
+        slide(to: tuckedFrame(edge, on: screen), alpha: Dock.tuckedAlpha)
         onPlaced?(place)
     }
 
     private func peek(_ edge: Edge) {
-        guard let screen = DialDock.screen(under: panel.frame) ?? NSScreen.main else { return }
+        guard let screen = Dock.screen(under: panel.frame) ?? NSScreen.main else { return }
         state = .peeking(edge)
         slide(to: revealedFrame(edge, on: screen), alpha: 1)
     }
 
-    /// A tucked or peeking dial put back against its edge after the screens
+    /// A tucked or peeking window put back against its edge after the screens
     /// changed under it — on the screen it is now nearest, which may be a
     /// different one from the one it was tucked into.
     private func reanchor() {
-        guard let screen = DialDock.screen(under: panel.frame) ?? NSScreen.main else { return }
+        guard let screen = Dock.screen(under: panel.frame) ?? NSScreen.main else { return }
         switch state {
         case let .tucked(edge):
             panel.setFrame(tuckedFrame(edge, on: screen), display: true)
         case let .peeking(edge):
             panel.setFrame(revealedFrame(edge, on: screen), display: true)
         case .free:
-            panel.setFrameOrigin(DialDock.clamped(
+            panel.setFrameOrigin(Dock.clamped(
                 panel.frame.origin, size: panel.frame.size, within: screen.visibleFrame
             ))
         case .hanging:
@@ -3520,7 +3388,7 @@ final class DialDock {
     }
 
     /// The window moved and dimmed in one fixed-length ease-out, or at once
-    /// under Reduce Motion: a disc sliding two hundred points is the large
+    /// under Reduce Motion: a window sliding two hundred points is the large
     /// movement that setting asks not to see.
     private func slide(to frame: NSRect, alpha: CGFloat) {
         guard !reduceMotion else {
@@ -3529,48 +3397,50 @@ final class DialDock {
             return
         }
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = DialDock.sliding
+            context.duration = Dock.sliding
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             panel.animator().setFrame(frame, display: true)
             panel.animator().alphaValue = alpha
         }
     }
 
-    /// The whole disc just inside the edge, at `along` of the way across it.
+    /// The whole body just inside the edge, at `along` of the way across it.
     private func revealedFrame(_ edge: Edge, on screen: NSScreen) -> NSRect {
         let area = screen.visibleFrame
         let size = panel.frame.size
-        let disc = DialView.disc
-        let margin = DialView.margin
-        let gap = DialDock.clearance
+        let body = NSSize(width: size.width - inset * 2, height: size.height - inset * 2)
+        let gap = Dock.clearance
         var origin = NSPoint.zero
         switch edge {
         case .left:
-            origin.x = area.minX + gap - margin
+            origin.x = area.minX + gap - inset
             origin.y = area.minY + along * area.height - size.height / 2
         case .right:
-            origin.x = area.maxX - gap - disc - margin
+            origin.x = area.maxX - gap - body.width - inset
             origin.y = area.minY + along * area.height - size.height / 2
         case .top:
-            origin.y = area.maxY - gap - disc - margin
+            origin.y = area.maxY - gap - body.height - inset
             origin.x = area.minX + along * area.width - size.width / 2
         case .bottom:
-            origin.y = area.minY + gap - margin
+            origin.y = area.minY + gap - inset
             origin.x = area.minX + along * area.width - size.width / 2
         }
-        return NSRect(origin: DialDock.clamped(origin, size: size, within: area), size: size)
+        // clamped to the screen with the air taken off, or a window in a corner
+        // would be held a shadow's width short of it
+        let room = area.insetBy(dx: -inset, dy: -inset)
+        return NSRect(origin: Dock.clamped(origin, size: size, within: room), size: size)
     }
 
     /// The revealed frame pushed out through its edge until `peek` points of
-    /// the disc are left. The window keeps its size; only where it is moves.
+    /// the body are left. The window keeps its size; only where it is moves.
     private func tuckedFrame(_ edge: Edge, on screen: NSScreen) -> NSRect {
         var frame = revealedFrame(edge, on: screen)
-        let out = DialView.disc - DialDock.peek + DialDock.clearance
+        let body = NSSize(width: frame.width - inset * 2, height: frame.height - inset * 2)
         switch edge {
-        case .left: frame.origin.x -= out
-        case .right: frame.origin.x += out
-        case .top: frame.origin.y += out
-        case .bottom: frame.origin.y -= out
+        case .left: frame.origin.x -= body.width - Dock.peek + Dock.clearance
+        case .right: frame.origin.x += body.width - Dock.peek + Dock.clearance
+        case .top: frame.origin.y += body.height - Dock.peek + Dock.clearance
+        case .bottom: frame.origin.y -= body.height - Dock.peek + Dock.clearance
         }
         return frame
     }
@@ -3579,7 +3449,7 @@ final class DialDock {
 
     /// The nearest edge within reach of a point, or nothing. Tested against the
     /// screen's whole frame rather than the part the menu bar and Dock leave,
-    /// because a dial dropped under either of them was dropped at the edge.
+    /// because a window dropped under either of them was dropped at the edge.
     static func edge(near point: NSPoint, of screen: NSScreen) -> Edge? {
         let frame = screen.frame
         let distances: [(Edge, CGFloat)] = [
