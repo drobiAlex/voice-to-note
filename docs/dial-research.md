@@ -1,4 +1,12 @@
-# The dial: how it will be built, and the code that proves each choice
+# The floating recorder: how it is built, and the code that proves each choice
+
+> **Where this stands.** Part one designed a radial timer dial; it shipped, and was
+> then replaced by the recorder puck — a record/stop button with the Microphone,
+> Sound source and Project pickers — because a control kept in a corner should be the
+> recorder, not a timer. Part one's window, drawing and energy decisions (1, 2, 5–8)
+> carry over to the puck unchanged; its dial-specific ones (3, 4) are history. Part two
+> — carrying the window anywhere and tucking it into an edge — is what the puck rides
+> on today, verbatim.
 
 The target is the floating radial timer seen hanging off the menu bar: a borderless disc
 under the status item, a ring of ticks, a lit arc that grows as the pointer is dragged
