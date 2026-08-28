@@ -139,6 +139,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var panel: NSPanel?
     private var panelView: RecordingPanelView?
 
+    /// The dial the length of the next recording is set on, and the view in
+    /// it. A second floating window rather than a face of the first: the
+    /// island is a thing watched during a recording and the dial is a thing
+    /// turned before one, and the two are never on screen at once.
+    private var dial: NSPanel?
+    private var dialView: DialView?
+
+    /// How long the recording under way was asked to run, or nothing for one
+    /// that runs until it is stopped, and the one timer that stops it. Set the
+    /// moment the tape actually rolls rather than when the recorder is
+    /// launched, so the length is measured in tape and not in start-up.
+    private var timedMinutes: Int?
+    private var deadline: Date?
+    private var stopAt: Timer?
+
     /// How long a panel that opened itself stays up: long enough to read the
     /// header and watch both meters move, and over before it is in the way of
     /// anything. What it is for is a moment's confirmation that the tape is
@@ -257,7 +272,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.toolTip = spoken
         statusItem.button?.setAccessibilityLabel(spoken)
         panelView?.showElapsed(elapsed())
+        panelView?.showHeading(heading(now: now))
         panelView?.showFooter(system: systemLevels, microphone: microphoneLevels, now: now)
+    }
+
+    /// What the island calls the recording: plain "Recording", or with how long
+    /// it has left to run when it was given a length. Minutes rather than
+    /// seconds — a countdown in seconds is a thing stared at, and the point
+    /// of a tape that stops itself is that nobody has to.
+    private func heading(now: Date = Date()) -> String {
+        guard let deadline else { return "Recording" }
+        let left = Int((deadline.timeIntervalSince(now) / 60).rounded(.up))
+        if left <= 1 {
+            return "Recording · stops in a minute"
+        }
+        return "Recording · \(left) min left"
     }
 
     /// Everything the meters were made of, dropped. The panel goes with the
@@ -296,6 +325,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func startTicking() {
         let ticker = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.show() }
+        // a tenth of a second's slack, which is what lets the system fire this
+        // alongside whatever else is due rather than waking for it alone
+        ticker.tolerance = 0.1
         // the common modes, or the clock would freeze for as long as a menu is
         // held open — which is exactly when somebody is looking at it
         RunLoop.main.add(ticker, forMode: .common)
@@ -360,6 +392,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch state {
         case .idle:
             menu.addItem(action("Start Recording", #selector(startRecording), key: "r"))
+            menu.addItem(action("Record for…", #selector(openDialFromMenu), key: "t"))
             menu.addItem(.separator())
             menu.addItem(.sectionHeader(title: "Next Recording"))
             menu.addItem(picker("Project", projectItems()))
@@ -379,7 +412,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // both streams are live, and a menu already on screen has to say
             // something true rather than the state it was opened in
             menu.addItem(action("Stop Recording", #selector(stopRecording), key: "r"))
-            menu.addItem(note(state == .recording ? "Recording \(elapsed())" : "Starting …"))
+            menu.addItem(note(state == .recording ? "\(heading()) — \(elapsed())" : "Starting …"))
         case .processing:
             menu.addItem(note("Processing memo …"))
         }
@@ -476,6 +509,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         view.show(system: systemLevels, microphone: microphoneLevels)
         view.showElapsed(elapsed())
         view.showFooter(system: systemLevels, microphone: microphoneLevels)
+        let panel = floating(view, shadow: true)
+        self.panel = panel
+        self.panelView = view
+        place(panel)
+        arrive(panel, reduceMotion: reduceMotion) { view.appear() }
+        // the button stays lit for as long as the panel is up, which is the only
+        // thing tying the window under the menu bar to the item it came out of
+        statusItem.button?.highlight(true)
+        watchForClicks()
+    }
+
+    /// A window for a view to float in under the menu bar, built the same way
+    /// for the island and for the dial: borderless, never activating, at the
+    /// status bar's own level, on every space. The island asks the window for
+    /// its shadow; the dial draws its own, because a shadow a window works out
+    /// from transparent pixels is worked out again every time they change.
+    private func floating(_ view: NSView, shadow: Bool) -> NSPanel {
         let panel = NSPanel(
             contentRect: view.frame, styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered, defer: false
@@ -484,18 +534,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.level = .statusBar
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        panel.hasShadow = shadow
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        self.panel = panel
-        self.panelView = view
-        place(panel)
-        arrive(panel, view, reduceMotion: reduceMotion)
-        // the button stays lit for as long as the panel is up, which is the only
-        // thing tying the window under the menu bar to the item it came out of
-        statusItem.button?.highlight(true)
-        watchForClicks()
+        return panel
     }
 
     /// The panel put on screen as the status item growing downwards rather than
@@ -509,14 +552,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Reduce Motion gets the panel and none of this. The opening itself still
     /// happens either way: a window saying the tape is rolling is information,
     /// and it is only the way it arrives that is decoration.
-    private func arrive(_ panel: NSPanel, _ view: RecordingPanelView, reduceMotion: Bool) {
+    private func arrive(_ panel: NSPanel, reduceMotion: Bool, appear: () -> Void) {
         guard !reduceMotion else {
             panel.orderFrontRegardless()
             return
         }
         panel.alphaValue = 0
         panel.orderFrontRegardless()
-        view.appear()
+        appear()
         NSAnimationContext.runAnimationGroup { context in
             context.duration = RecordingPanelView.fadingUp
             context.timingFunction = RecordingPanelView.easing
@@ -536,6 +579,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// rather than a half-faded one caught and turned round.
     private func closePanel() {
         stopGlancing()
+        let closing = panel
+        panel = nil
+        panelView = nil
+        stopWatchingClicks()
+        vanish(closing)
+    }
+
+    /// The monitors taken down once nothing is left for them to close, and the
+    /// button's light with them: it is lit for whichever window is up, and goes
+    /// out with the last of them.
+    private func stopWatchingClicks() {
+        guard panel == nil, dial == nil else { return }
         if let clicksElsewhere {
             NSEvent.removeMonitor(clicksElsewhere)
         }
@@ -545,10 +600,83 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         clicksElsewhere = nil
         clicksHere = nil
         statusItem.button?.highlight(false)
-        let closing = panel
-        panel = nil
-        panelView = nil
+    }
+
+    /// Whichever floating window is up, closed. What a click somewhere else
+    /// means is the same for both.
+    private func closeFloating() {
+        closePanel()
+        closeDial()
+    }
+
+    // --- the dial ---------------------------------------------------------------
+
+    /// The dial opened from the menu, over an idle recorder only: it sets the
+    /// length of the *next* recording, and there is no next one while a tape
+    /// is rolling.
+    @objc private func openDialFromMenu() {
+        guard state == .idle else { return }
+        openDial()
+    }
+
+    /// The dial put on screen under the status item, set to whatever it was
+    /// left at last time. Pressing its middle closes it and starts the tape for
+    /// that long; turning it is remembered as it turns, so a dial dismissed by
+    /// a click elsewhere still leaves the length it was turned to.
+    private func openDial() {
+        guard dial == nil else { return }
+        closePanel()
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let view = DialView(minutes: chosenMinutes, reduceMotion: reduceMotion)
+        view.onChange = { minutes in
+            UserDefaults.standard.set(minutes, forKey: Key.minutes)
+        }
+        view.onStart = { [weak self] minutes in
+            guard let self else { return }
+            self.closeDial()
+            self.startTimedRecording(minutes)
+        }
+        let panel = floating(view, shadow: false)
+        self.dial = panel
+        self.dialView = view
+        place(panel)
+        arrive(panel, reduceMotion: reduceMotion) { view.appear() }
+        statusItem.button?.highlight(true)
+        watchForClicks()
+    }
+
+    private func closeDial() {
+        let closing = dial
+        dial = nil
+        dialView = nil
+        stopWatchingClicks()
         vanish(closing)
+    }
+
+    /// The tape stopped at the length it was asked for, by one timer set for
+    /// that moment. A second's slack, because a recording that runs a second
+    /// long is still the meeting and a wake-up of its own for the exact second
+    /// is not worth having.
+    private func scheduleStop() {
+        stopAt?.invalidate()
+        stopAt = nil
+        deadline = nil
+        guard let timedMinutes else { return }
+        let deadline = Date().addingTimeInterval(TimeInterval(timedMinutes * 60))
+        self.deadline = deadline
+        let stop = Timer(timeInterval: deadline.timeIntervalSinceNow, repeats: false) { [weak self] _ in
+            self?.stopRecording()
+        }
+        stop.tolerance = 1
+        RunLoop.main.add(stop, forMode: .common)
+        stopAt = stop
+    }
+
+    private func forgetDeadline() {
+        stopAt?.invalidate()
+        stopAt = nil
+        deadline = nil
+        timedMinutes = nil
     }
 
     /// The window taken off screen, faded first wherever anything is allowed to
@@ -635,15 +763,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// item's own window through, or clicking the button a second time would
     /// close the panel a moment before the button's action reopened it.
     private func watchForClicks() {
+        guard clicksElsewhere == nil, clicksHere == nil else { return }
         let elsewhere: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
         clicksElsewhere = NSEvent.addGlobalMonitorForEvents(matching: elsewhere) { [weak self] _ in
-            self?.closePanel()
+            self?.closeFloating()
         }
         clicksHere = NSEvent.addLocalMonitorForEvents(matching: elsewhere) { [weak self] event in
             guard let self else { return event }
-            let ours = [self.panel, self.statusItem.button?.window]
+            let ours = [self.panel, self.dial, self.statusItem.button?.window]
             if !ours.contains(where: { $0 === event.window }) {
-                self.closePanel()
+                self.closeFloating()
             }
             return event
         }
@@ -724,6 +853,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         static let outputName = "outputDeviceName"
         static let inputUID = "inputDeviceUID"
         static let inputName = "inputDeviceName"
+        static let minutes = "recordMinutes"
+    }
+
+    /// Half an hour until the dial has been turned: the length a meeting is
+    /// booked for when nobody thought about it.
+    private var chosenMinutes: Int {
+        let stored = UserDefaults.standard.integer(forKey: Key.minutes)
+        return stored == 0 ? 30 : stored
     }
 
     private var chosenProject: String {
@@ -854,7 +991,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // --- driving the recorder ------------------------------------------------
 
+    /// A recording that runs until it is stopped.
     @objc private func startRecording() {
+        timedMinutes = nil
+        launchRecorder()
+    }
+
+    /// A recording that stops itself after this many minutes of tape.
+    private func startTimedRecording(_ minutes: Int) {
+        timedMinutes = minutes
+        launchRecorder()
+    }
+
+    private func launchRecorder() {
         // nothing in a preview's menu offers this, and this guard is what keeps
         // that from being the only thing standing between a preview and a real
         // tape of whatever is being said in the room
@@ -924,6 +1073,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // which is why stopping the tape is not the end of the session
         recorder.interrupt()
         stopTicking()
+        forgetDeadline()
         state = .processing
         show()
     }
@@ -959,6 +1109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 startedAt = Date()
                 state = .recording
                 startTicking()
+                scheduleStop()
                 show()
             }
         }
@@ -994,6 +1145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         recorder = nil
         startedAt = nil
         stopTicking()
+        forgetDeadline()
         state = .idle
         show()
         refresh()
@@ -1045,6 +1197,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// arrange for it to go wrong.
     private enum Scenario: CaseIterable {
         case idle
+        case dial
         case starting
         case voices
         case microphoneDead
@@ -1054,6 +1207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var title: String {
             switch self {
             case .idle: return "Idle"
+            case .dial: return "Idle — dial open"
             case .starting: return "Starting"
             case .voices: return "Recording — voices"
             case .microphoneDead: return "Recording — microphone dead"
@@ -1069,7 +1223,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         /// than a picture of one.
         var state: RecorderState {
             switch self {
-            case .idle: return .idle
+            case .idle, .dial: return .idle
             case .starting: return .starting
             case .voices, .microphoneDead, .bothSilent: return .recording
             case .processing: return .processing
@@ -1085,7 +1239,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .voices: return (.talking(seed: 7), .talking(seed: 31))
             case .microphoneDead: return (.talking(seed: 7), .quiet(seed: 5))
             case .bothSilent: return (.quiet(seed: 11), .quiet(seed: 5))
-            case .idle, .starting, .processing: return nil
+            case .idle, .dial, .starting, .processing: return nil
             }
         }
     }
@@ -1136,6 +1290,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let sides = scenario.sides else {
             state = scenario.state
             show()
+            // the dial by the door it is opened from, and its middle wired to
+            // nothing but closing it: a preview starts no tape
+            if scenario == .dial {
+                openDial()
+                dialView?.onStart = { [weak self] _ in self?.closeDial() }
+            }
             return
         }
         // through `.starting` on the way rather than straight to `.recording`,
@@ -2312,7 +2472,7 @@ final class RecordingPanelView: NSView {
     ///
     /// This view is unflipped, so the top edge is half the height above the
     /// middle the transform turns about.
-    private static func scaled(_ scale: CGFloat, about bounds: CGRect) -> CATransform3D {
+    static func scaled(_ scale: CGFloat, about bounds: CGRect) -> CATransform3D {
         var transform = CATransform3DIdentity
         transform = CATransform3DTranslate(transform, 0, bounds.height / 2, 0)
         transform = CATransform3DScale(transform, scale, scale, 1)
@@ -2360,6 +2520,12 @@ final class RecordingPanelView: NSView {
     /// reader: the loudness of each side is already spoken on the status item,
     /// and what this window adds is that a recording is running and how long it
     /// has been.
+    func showHeading(_ text: String) {
+        if title.stringValue != text {
+            title.stringValue = text
+        }
+    }
+
     func showElapsed(_ text: String) {
         timer.stringValue = text
         setAccessibilityLabel("Recording, \(text)")
@@ -2410,6 +2576,409 @@ final class RecordingPanelView: NSView {
         field.maximumNumberOfLines = 1
         field.lineBreakMode = .byTruncatingTail
         return field
+    }
+}
+
+// MARK: - the dial
+
+/// How long the next recording is to run, as a ring turned rather than a number
+/// typed. A meeting has a length before it starts — the invitation says so —
+/// and a tape that stops itself at that length is one nobody has to remember
+/// to stop with a call still up on the screen. Sixty ticks, two minutes each:
+/// as fine as a meeting is ever booked, and as far round as two hours.
+///
+/// Nothing in here is drawn in `draw(_:)`. The disc, the ring of unlit ticks,
+/// the ring of lit ones and the arc that decides which of them show are all
+/// layers built once; turning the dial changes one number on one of them
+/// (`strokeEnd`) and the render server does the rest, so a drag costs no
+/// redraw at all. The ticks are one `CAReplicatorLayer` each rather than sixty
+/// layers — one tick, replicated round the circle by a rotation — which is
+/// how a clock face is drawn cheaply, and the lit ring is the same replicator
+/// again in the accent colour, masked by the arc.
+///
+/// A drag adds the *shortest signed turn* since the last event to the value,
+/// never the pointer's absolute angle: a value taken straight from the angle
+/// snaps from two hours to two minutes the instant a drag crosses twelve
+/// o'clock, which is the one thing a dial must never do.
+final class DialView: NSView, NSAccessibilitySlider {
+    static let ticks = 60
+    static let step = 2
+    static let shortest = step
+    static var longest: Int { ticks * step }
+
+    /// The disc, and the air kept round it for its own shadow: the panel it sits
+    /// in casts none, because a window shadow on a transparent window is worked
+    /// out from the pixels and worked out again every time they change.
+    static let disc: CGFloat = 220
+    static let margin: CGFloat = 28
+    static var side: CGFloat { disc + margin * 2 }
+
+    /// The same warm near-black as the recording island, so the two read as one
+    /// app's windows, and a hairline of white at the rim so the disc has an edge
+    /// against a dark desktop.
+    private static let ground = NSColor(srgbRed: 30 / 255, green: 30 / 255, blue: 33 / 255, alpha: 1)
+    private static let rim = NSColor.white.withAlphaComponent(0.09)
+    private static let unlit = NSColor.white.withAlphaComponent(0.2)
+    private static let lit = NSColor.systemGreen
+
+    private static let tickLength: CGFloat = 11
+    private static let tickWidth: CGFloat = 3
+    private static let ringInset: CGFloat = 16
+    private static let centreDiameter: CGFloat = 96
+
+    /// How far a scroll wheel travels for one tick. A notched wheel sends about
+    /// ten points a notch, so this is one notch, one tick, one pulse.
+    private static let scrollPerTick: CGFloat = 10
+
+    private let disc = CAShapeLayer()
+    private let unlitTicks = CAReplicatorLayer()
+    private let litTicks = CAReplicatorLayer()
+    private let litArc = CAShapeLayer()
+    private let centre = DialCentreButton()
+
+    /// What the dial is set to, and the unrounded turn underneath it. The
+    /// turn is what a drag moves; the minutes are the turn rounded to a tick,
+    /// and only the minutes ever reach the layers or the person.
+    private(set) var minutes: Int
+    private var turn: CGFloat
+    private var lastAngle: CGFloat?
+    private var scrolled: CGFloat = 0
+    private let reduceMotion: Bool
+
+    var onStart: ((Int) -> Void)?
+    var onChange: ((Int) -> Void)?
+
+    init(minutes: Int, reduceMotion: Bool) {
+        self.minutes = DialView.clamped(minutes)
+        self.turn = CGFloat(self.minutes)
+        self.reduceMotion = reduceMotion
+        super.init(frame: NSRect(x: 0, y: 0, width: DialView.side, height: DialView.side))
+        appearance = NSAppearance(named: .darkAqua)
+        wantsLayer = true
+        // nothing here is drawn by this view, so nothing here wants redrawing
+        // when the window resizes — and a policy that redrew anyway would be
+        // work done for pixels that never change
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
+        buildLayers()
+        centre.frame = NSRect(
+            x: bounds.midX - DialView.centreDiameter / 2,
+            y: bounds.midY - DialView.centreDiameter / 2,
+            width: DialView.centreDiameter, height: DialView.centreDiameter
+        )
+        centre.target = self
+        centre.action = #selector(start)
+        addSubview(centre)
+        setAccessibilityLabel("Recording length")
+        show(animated: false)
+    }
+
+    /// This view is only ever built in code; there is no nib in this app for
+    /// one to be loaded from.
+    required init?(coder: NSCoder) {
+        fatalError("DialView is built in code, not loaded from a nib")
+    }
+
+    // --- the layers ----------------------------------------------------------
+
+    private var discRect: NSRect {
+        NSRect(x: DialView.margin, y: DialView.margin, width: DialView.disc, height: DialView.disc)
+    }
+
+    private func buildLayers() {
+        guard let layer else { return }
+        let round = CGPath(ellipseIn: discRect.insetBy(dx: 0.5, dy: 0.5), transform: nil)
+        disc.path = round
+        disc.fillColor = DialView.ground.cgColor
+        disc.strokeColor = DialView.rim.cgColor
+        disc.lineWidth = 1
+        // the shadow's shape given rather than found: a layer whose shadow is
+        // read off its pixels has it read again on every change, and this one
+        // never changes shape
+        disc.shadowPath = round
+        disc.shadowColor = NSColor.black.cgColor
+        disc.shadowOpacity = 0.55
+        disc.shadowRadius = 14
+        disc.shadowOffset = CGSize(width: 0, height: -5)
+        layer.addSublayer(disc)
+
+        for (ring, colour, glowing) in [
+            (unlitTicks, DialView.unlit, false), (litTicks, DialView.lit, true),
+        ] {
+            ring.frame = discRect
+            ring.instanceCount = DialView.ticks
+            // a negative turn is clockwise on a Mac's unflipped y axis, which is
+            // the way a dial and a clock both go
+            ring.instanceTransform = CATransform3DMakeRotation(
+                -2 * .pi / CGFloat(DialView.ticks), 0, 0, 1
+            )
+            ring.addSublayer(DialView.tick(colour, glowing: glowing))
+            layer.addSublayer(ring)
+        }
+
+        // the arc that decides which ticks are lit: a stroke round the ring,
+        // as wide as a tick and its glow, run from twelve o'clock clockwise.
+        // The path is a polyline made once — its own points say which way
+        // round it goes, where an arc primitive says so in terms of a
+        // coordinate system somebody has to remember is upside down
+        litArc.frame = CGRect(origin: .zero, size: discRect.size)
+        litArc.path = DialView.ringPath(
+            centre: CGPoint(x: DialView.disc / 2, y: DialView.disc / 2),
+            radius: DialView.disc / 2 - DialView.ringInset - DialView.tickLength / 2
+        )
+        litArc.fillColor = nil
+        litArc.strokeColor = NSColor.black.cgColor
+        litArc.lineWidth = DialView.tickLength + 14
+        litArc.lineCap = .butt
+        litArc.strokeStart = 0
+        litTicks.mask = litArc
+    }
+
+    /// One tick, standing at twelve o'clock; the replicator turns it round the
+    /// rest of the face. A lit one glows, and the glow's shape is its own
+    /// rounded rectangle given outright, for the same reason the disc's
+    /// shadow is: one tick, once, then replicated.
+    private static func tick(_ colour: NSColor, glowing: Bool) -> CALayer {
+        let tick = CALayer()
+        tick.frame = CGRect(
+            x: disc / 2 - tickWidth / 2, y: disc - ringInset - tickLength,
+            width: tickWidth, height: tickLength
+        )
+        tick.cornerRadius = tickWidth / 2
+        tick.backgroundColor = colour.cgColor
+        if glowing {
+            tick.shadowPath = CGPath(
+                roundedRect: tick.bounds, cornerWidth: tickWidth / 2, cornerHeight: tickWidth / 2,
+                transform: nil
+            )
+            tick.shadowColor = colour.cgColor
+            tick.shadowOpacity = 0.9
+            tick.shadowRadius = 4
+            tick.shadowOffset = .zero
+        }
+        return tick
+    }
+
+    /// A circle as a polyline that starts at the top and goes clockwise, so
+    /// that `strokeEnd` at a quarter is a quarter past.
+    private static func ringPath(centre: CGPoint, radius: CGFloat) -> CGPath {
+        let path = CGMutablePath()
+        let points = 240
+        for i in 0...points {
+            let angle = 2 * CGFloat.pi * CGFloat(i) / CGFloat(points)
+            let point = CGPoint(x: centre.x + radius * sin(angle), y: centre.y + radius * cos(angle))
+            if i == 0 { path.move(to: point) } else { path.addLine(to: point) }
+        }
+        return path
+    }
+
+    // --- the value ------------------------------------------------------------
+
+    private static func clamped(_ minutes: Int) -> Int {
+        min(max(minutes, shortest), longest)
+    }
+
+    /// The layers and the readout brought up to the value. The arc moves with
+    /// the render server's own quarter second when the change was a click, a
+    /// scroll or a key — a jump that eases is a jump that can be followed — and
+    /// with none at all under a drag, where the pointer is the animation and a
+    /// ring lagging a quarter second behind it would feel like rubber.
+    private func show(animated: Bool) {
+        let index = minutes / DialView.step
+        let fraction = min(1, (CGFloat(index) + 0.5) / CGFloat(DialView.ticks))
+        CATransaction.begin()
+        CATransaction.setDisableActions(!animated || reduceMotion)
+        litArc.strokeEnd = fraction
+        CATransaction.commit()
+        centre.show(minutes: minutes)
+        setAccessibilityValue("\(minutes) minutes")
+    }
+
+    /// One new value, from wherever it came. The pulse fires only when the tick
+    /// the dial rests on has actually changed — a drag sends dozens of events a
+    /// second, and a pulse on each would be a buzz rather than a detent.
+    private func settle(_ exact: CGFloat, animated: Bool) {
+        turn = min(max(exact, CGFloat(DialView.shortest)), CGFloat(DialView.longest))
+        let stepped = DialView.clamped(Int((turn / CGFloat(DialView.step)).rounded()) * DialView.step)
+        guard stepped != minutes else { return }
+        minutes = stepped
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .drawCompleted)
+        show(animated: animated)
+        onChange?(minutes)
+    }
+
+    private func step(by ticks: Int) {
+        // from the tick the dial rests on, not from the turn underneath it, so
+        // that a key press after a drag moves exactly one tick
+        turn = CGFloat(minutes)
+        settle(turn + CGFloat(ticks * DialView.step), animated: true)
+    }
+
+    @objc private func start() {
+        onStart?(minutes)
+    }
+
+    // --- the pointer ------------------------------------------------------------
+
+    /// Clockwise from twelve o'clock, in radians, for a point in this view.
+    private func angle(of point: NSPoint) -> CGFloat {
+        let dx = point.x - bounds.midX
+        let dy = point.y - bounds.midY
+        var angle = atan2(dx, dy)
+        if angle < 0 { angle += 2 * .pi }
+        return angle
+    }
+
+    /// The shorter way round from one angle to the next, signed: clockwise is
+    /// positive. This is the whole of what keeps the seam at twelve o'clock
+    /// from being a cliff.
+    private static func turn(from old: CGFloat, to new: CGFloat) -> CGFloat {
+        var delta = new - old
+        if delta > .pi { delta -= 2 * .pi } else if delta < -.pi { delta += 2 * .pi }
+        return delta
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// A press on the ring sets the dial to where it was pressed, and a press
+    /// anywhere else on the disc only picks the dial up; either way the drag
+    /// that follows is measured from here.
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let angle = angle(of: point)
+        let reach = hypot(point.x - bounds.midX, point.y - bounds.midY)
+        if reach > DialView.centreDiameter / 2 + 8 {
+            let ticks = (angle / (2 * .pi) * CGFloat(DialView.ticks)).rounded()
+            settle(ticks * CGFloat(DialView.step), animated: true)
+        }
+        lastAngle = angle
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let lastAngle else { return }
+        let angle = angle(of: convert(event.locationInWindow, from: nil))
+        let delta = DialView.turn(from: lastAngle, to: angle)
+        self.lastAngle = angle
+        settle(turn + delta / (2 * .pi) * CGFloat(DialView.longest), animated: false)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        lastAngle = nil
+    }
+
+    /// A wheel or a two-finger scroll turns the dial too, a tick a notch.
+    override func scrollWheel(with event: NSEvent) {
+        scrolled += event.scrollingDeltaY
+        let ticks = Int(scrolled / DialView.scrollPerTick)
+        guard ticks != 0 else { return }
+        scrolled -= CGFloat(ticks) * DialView.scrollPerTick
+        step(by: -ticks)
+    }
+
+    // --- the keyboard and the screen reader ----------------------------------
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 126, 124: step(by: 1)      // up, right
+        case 125, 123: step(by: -1)     // down, left
+        case 36, 76: start()            // return, enter
+        default: super.keyDown(with: event)
+        }
+    }
+
+    override func accessibilityPerformIncrement() -> Bool {
+        step(by: 1)
+        return true
+    }
+
+    override func accessibilityPerformDecrement() -> Bool {
+        step(by: -1)
+        return true
+    }
+
+    /// The disc grown into place out of the status item above it, the way the
+    /// recording island arrives, and for the same reason: it says where the
+    /// window came from.
+    func appear() {
+        guard !reduceMotion, let layer else { return }
+        let growing = CABasicAnimation(keyPath: "transform")
+        growing.fromValue = NSValue(caTransform3D: RecordingPanelView.scaled(0.92, about: layer.bounds))
+        growing.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+        growing.duration = RecordingPanelView.appearing
+        growing.timingFunction = RecordingPanelView.easing
+        layer.add(growing, forKey: "appear")
+    }
+}
+
+/// The middle of the dial: what it is set to, and the one thing to do about
+/// it. It is a button because that is what the middle of this dial is for —
+/// turn the ring, press the middle, the tape rolls — and the readout lives on
+/// it so there is nothing on the disc that is not either turned or pressed.
+final class DialCentreButton: NSButton {
+    private static let face = NSColor.white.withAlphaComponent(0.06)
+    private static let pressed = NSColor.white.withAlphaComponent(0.12)
+    private static let rim = NSColor.white.withAlphaComponent(0.1)
+
+    private var number = ""
+    private var unit = ""
+
+    init() {
+        super.init(frame: .zero)
+        isBordered = false
+        setButtonType(.momentaryChange)
+        title = ""
+    }
+
+    /// This view is only ever built in code; there is no nib in this app for
+    /// one to be loaded from.
+    required init?(coder: NSCoder) {
+        fatalError("DialCentreButton is built in code, not loaded from a nib")
+    }
+
+    /// Minutes up to the hour, hours and minutes past it — "48 MIN", "1:30 HR" —
+    /// which is how a meeting's length is said aloud.
+    func show(minutes: Int) {
+        if minutes < 60 {
+            number = "\(minutes)"
+            unit = "MIN"
+        } else {
+            number = String(format: "%d:%02d", minutes / 60, minutes % 60)
+            unit = "HR"
+        }
+        setAccessibilityLabel("Start recording for \(minutes) minutes")
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let face = NSBezierPath(ovalIn: bounds.insetBy(dx: 0.5, dy: 0.5))
+        (isHighlighted ? DialCentreButton.pressed : DialCentreButton.face).setFill()
+        face.fill()
+        DialCentreButton.rim.setStroke()
+        face.lineWidth = 1
+        face.stroke()
+
+        let centred = NSMutableParagraphStyle()
+        centred.alignment = .center
+        let big = NSAttributedString(string: number, attributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 30, weight: .semibold),
+            .foregroundColor: NSColor.white,
+            .paragraphStyle: centred,
+        ])
+        let small = NSAttributedString(string: unit, attributes: [
+            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.55),
+            .kern: 1.5,
+            .paragraphStyle: centred,
+        ])
+        let bigHeight = big.size().height
+        let smallHeight = small.size().height
+        let gap: CGFloat = 1
+        let top = bounds.midY + (bigHeight + gap + smallHeight) / 2
+        big.draw(in: NSRect(x: 0, y: top - bigHeight, width: bounds.width, height: bigHeight))
+        small.draw(in: NSRect(
+            x: 0, y: top - bigHeight - gap - smallHeight, width: bounds.width, height: smallHeight
+        ))
     }
 }
 
