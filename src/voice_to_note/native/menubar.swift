@@ -193,6 +193,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !previewing {
             askToNotify()
             refresh()
+            // a puck left in a corner is there again at the next launch; one
+            // never moved is not opened unasked under the status item
+            if floatingRecorder, rememberedPlace != .hanging {
+                openPuck()
+            }
         }
     }
 
@@ -400,11 +405,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(note("Processing memo …"))
         }
         menu.addItem(.separator())
-        // the puck is offered in every state, since it shows every state; the
-        // way back is offered only once it has somewhere to come back from
-        menu.addItem(action("Show Recorder", #selector(openPuckFromMenu), key: "t"))
-        if rememberedPlace != .hanging || puckDock?.state.isHanging == false {
-            menu.addItem(action("Return Recorder to Menu Bar", #selector(returnPuck)))
+        // the switch is offered in every state; the puck's own lines only when
+        // it is switched on, and the way back only once it has somewhere to
+        // come back from
+        let floating = action("Floating Recorder", #selector(toggleFloating))
+        floating.state = floatingRecorder ? .on : .off
+        menu.addItem(floating)
+        if floatingRecorder {
+            menu.addItem(action("Show Recorder", #selector(openPuckFromMenu), key: "t"))
+            if rememberedPlace != .hanging || puckDock?.state.isHanging == false {
+                menu.addItem(action("Return Recorder to Menu Bar", #selector(returnPuck)))
+            }
         }
         menu.addItem(.separator())
         menu.addItem(action("Quit", #selector(quit), key: "q"))
@@ -620,11 +631,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// where it can be used: out of its edge, or to the front. This is the way
     /// in that needs no pointer.
     @objc private func openPuckFromMenu() {
+        guard floatingRecorder else { return }
         if let puckDock {
             puckDock.reveal()
             return
         }
         openPuck()
+    }
+
+    /// The floating recorder switched on or off. Off takes the puck down and
+    /// the menu is the one it was; on opens the puck where it was last left,
+    /// or under the status item for a first time.
+    @objc private func toggleFloating() {
+        let wanted = !floatingRecorder
+        UserDefaults.standard.set(wanted, forKey: Key.floating)
+        if wanted {
+            openPuck()
+        } else {
+            closePuck()
+        }
     }
 
     /// The puck's place forgotten and the puck, if it is up, hung under the
@@ -893,6 +918,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         static let inputUID = "inputDeviceUID"
         static let inputName = "inputDeviceName"
         static let puckPlace = "recorderPlace"
+        static let floating = "floatingRecorder"
+    }
+
+    /// Whether the floating recorder is wanted at all. Off — the default — and
+    /// this app is the menu bar item it always was; on, and the puck opens at
+    /// launch wherever it was left, and the menu offers to show it.
+    private var floatingRecorder: Bool {
+        UserDefaults.standard.bool(forKey: Key.floating)
     }
 
     /// Where the puck was last left. Under the status item until somebody
@@ -2635,48 +2668,44 @@ final class RecordingPanelView: NSView {
 
 // MARK: - the recorder puck
 
-/// The recorder as a small window of its own: one button that starts the tape
-/// and stops it, and beside it the three things a recording is made of — the
-/// project it is filed under, the microphone, the sound it takes from the Mac.
-/// It exists because the menu closes on the first click and lives under one
-/// status item, and a control somebody uses at the start of every call wants
-/// to be where they left it: in a corner, tucked into an edge, always there.
+/// The recorder as a small disc of its own: the button that starts the tape
+/// and stops it in the middle, and along the lower rim three small buttons for
+/// the things a recording is made of — the microphone, the project it is filed
+/// under, the sound it takes from the Mac — each opening a menu of what there
+/// is to choose. It exists because the menu closes on the first click and lives
+/// under one status item, and a control somebody uses at the start of every
+/// call wants to be where they left it: in a corner, tucked into an edge,
+/// always there.
 ///
 /// It is a second face of the recorder, never a second recorder: it says what
 /// the app's own state is and asks for what the menu asks for, through the
 /// same calls, so the two can never disagree about which microphone is chosen
 /// or whether the tape is rolling.
 ///
-/// Dark and solid, the island's own colour, for the island's own reasons. The
-/// frames are set by hand and nothing in here changes size: a window that
-/// grows when a device with a longer name is picked is a window that moved
-/// under the pointer.
+/// A disc rather than a slab because a disc has no orientation: tucked into
+/// any of the four edges, the same round rim shows, and a round window in a
+/// corner reads as a thing placed there rather than a dialog that wandered.
+/// Dark and solid, the island's own colour, for the island's own reasons.
 final class RecorderPuckView: NSView, Dockable {
-    static let bodyWidth: CGFloat = 300
+    static let disc: CGFloat = 200
     static let inset: CGFloat = 24
-    static let corner: CGFloat = 16
+    static var side: CGFloat { disc + inset * 2 }
 
     private static let ground = NSColor(srgbRed: 30 / 255, green: 30 / 255, blue: 33 / 255, alpha: 1)
     private static let rim = NSColor.white.withAlphaComponent(0.09)
     private static let rollingRim = NSColor.systemRed.withAlphaComponent(0.7)
 
-    private static let padding: CGFloat = 16
-    private static let buttonColumn: CGFloat = 72
-    private static let rowHeight: CGFloat = 22
-    private static let rowGap: CGFloat = 9
-    private static let captionWidth: CGFloat = 88
-    private static let captionGap: CGFloat = 6
-
-    static var bodyHeight: CGFloat { padding * 2 + rowHeight * 3 + rowGap * 2 }
-    static var width: CGFloat { bodyWidth + inset * 2 }
-    static var height: CGFloat { bodyHeight + inset * 2 }
+    /// Where the three small buttons sit: on an arc below the middle, at
+    /// clockwise-from-twelve angles, far enough out to clear the caption.
+    private static let arcRadius: CGFloat = 72
+    private static let arcAngles: [CGFloat] = [212, 270, 328]
 
     private let body = CAShapeLayer()
     private let record = RecordButton()
-    private let recordCaption = RecorderPuckView.caption("Record")
-    private let projectPicker = RecorderPuckView.picker()
-    private let inputPicker = RecorderPuckView.picker()
-    private let outputPicker = RecorderPuckView.picker()
+    private let caption = RecorderPuckView.label("Record")
+    private let inputButton = ChoiceButton(symbol: "mic", label: "Microphone")
+    private let projectButton = ChoiceButton(symbol: "folder", label: "Project")
+    private let outputButton = ChoiceButton(symbol: "speaker.wave.2", label: "Sound source")
     private let reduceMotion: Bool
 
     var onGrip: ((Dock.Grip) -> Void)?
@@ -2687,15 +2716,23 @@ final class RecorderPuckView: NSView, Dockable {
     var onInput: ((AudioDevice?) -> Void)?
     var onOutput: ((AudioDevice?) -> Void)?
 
+    /// What the menus are built from when a button is pressed: the lists as
+    /// last handed over, and the choices as remembered. Nothing is built until
+    /// then — a menu made for every refresh would be a menu nobody opened.
+    private var projects: [(name: String, count: Int)]?
+    private var chosenProject = "other"
+    private var inputs: [AudioDevice]?
+    private var chosenInput: AudioDevice?
+    private var outputs: [AudioDevice]?
+    private var chosenOutput: AudioDevice?
+
     private var gripping = false
     private var pointer: NSTrackingArea?
     private var state = RecorderState.idle
 
     init(reduceMotion: Bool) {
         self.reduceMotion = reduceMotion
-        super.init(frame: NSRect(
-            x: 0, y: 0, width: RecorderPuckView.width, height: RecorderPuckView.height
-        ))
+        super.init(frame: NSRect(x: 0, y: 0, width: RecorderPuckView.side, height: RecorderPuckView.side))
         appearance = NSAppearance(named: .darkAqua)
         wantsLayer = true
         layerContentsRedrawPolicy = .onSetNeedsDisplay
@@ -2712,22 +2749,19 @@ final class RecorderPuckView: NSView, Dockable {
         fatalError("RecorderPuckView is built in code, not loaded from a nib")
     }
 
-    private var bodyRect: NSRect {
+    private var discRect: NSRect {
         NSRect(
             x: RecorderPuckView.inset, y: RecorderPuckView.inset,
-            width: RecorderPuckView.bodyWidth, height: RecorderPuckView.bodyHeight
+            width: RecorderPuckView.disc, height: RecorderPuckView.disc
         )
     }
 
-    /// The rounded slab and its shadow, one layer. The shadow's shape is given
-    /// rather than read off the pixels — the window casts none, and a shape
-    /// that never changes is a shape worked out once.
+    /// The disc and its shadow, one layer. The shadow's shape is given rather
+    /// than read off the pixels — the window casts none, and a shape that
+    /// never changes is a shape worked out once.
     private func buildBody() {
         guard let layer else { return }
-        let round = CGPath(
-            roundedRect: bodyRect.insetBy(dx: 0.5, dy: 0.5),
-            cornerWidth: RecorderPuckView.corner, cornerHeight: RecorderPuckView.corner, transform: nil
-        )
+        let round = CGPath(ellipseIn: discRect.insetBy(dx: 0.5, dy: 0.5), transform: nil)
         body.path = round
         body.fillColor = RecorderPuckView.ground.cgColor
         body.strokeColor = RecorderPuckView.rim.cgColor
@@ -2741,79 +2775,64 @@ final class RecorderPuckView: NSView, Dockable {
     }
 
     private func layOut() {
-        let body = bodyRect
-        let column = NSRect(
-            x: body.minX + RecorderPuckView.padding, y: body.minY,
-            width: RecorderPuckView.buttonColumn, height: body.height
-        )
+        let centre = NSPoint(x: bounds.midX, y: bounds.midY + 10)
         let side = RecordButton.side
-        let stack = side + 4 + 14
-        record.frame = NSRect(
-            x: column.midX - side / 2, y: column.midY - stack / 2 + 4 + 14, width: side, height: side
-        )
+        record.frame = NSRect(x: centre.x - side / 2, y: centre.y - side / 2, width: side, height: side)
         record.target = self
         record.action = #selector(pressed)
-        recordCaption.frame = NSRect(x: column.minX - 8, y: column.midY - stack / 2, width: column.width + 16, height: 14)
-        recordCaption.alignment = .center
         addSubview(record)
-        addSubview(recordCaption)
 
-        var top = body.maxY - RecorderPuckView.padding
-        let left = column.maxX + RecorderPuckView.padding
-        let right = body.maxX - RecorderPuckView.padding
-        for (title, picker) in [
-            ("Project", projectPicker), ("Microphone", inputPicker), ("Sound source", outputPicker),
-        ] {
-            let caption = RecorderPuckView.caption(title)
-            caption.frame = NSRect(
-                x: left, y: top - RecorderPuckView.rowHeight + 3,
-                width: RecorderPuckView.captionWidth, height: 16
+        caption.frame = NSRect(x: centre.x - 60, y: centre.y - side / 2 - 19, width: 120, height: 14)
+        caption.alignment = .center
+        addSubview(caption)
+
+        for (button, degrees) in zip(
+            [inputButton, projectButton, outputButton], RecorderPuckView.arcAngles
+        ) {
+            let angle = degrees * .pi / 180
+            let at = NSPoint(
+                x: bounds.midX + RecorderPuckView.arcRadius * sin(angle),
+                y: bounds.midY + RecorderPuckView.arcRadius * cos(angle)
             )
-            picker.frame = NSRect(
-                x: left + RecorderPuckView.captionWidth + RecorderPuckView.captionGap,
-                y: top - RecorderPuckView.rowHeight,
-                width: right - left - RecorderPuckView.captionWidth - RecorderPuckView.captionGap,
-                height: RecorderPuckView.rowHeight
-            )
-            picker.target = self
-            picker.action = #selector(picked(_:))
-            addSubview(caption)
-            addSubview(picker)
-            top -= RecorderPuckView.rowHeight + RecorderPuckView.rowGap
+            let small = ChoiceButton.side
+            button.frame = NSRect(x: at.x - small / 2, y: at.y - small / 2, width: small, height: small)
+            button.target = self
+            button.action = #selector(choose(_:))
+            addSubview(button)
         }
     }
 
     // --- what it says ---------------------------------------------------------------
 
-    /// The recorder's state, put on the button and its caption. The pickers go
+    /// The recorder's state, put on the button and its caption. The choosers go
     /// quiet from the moment the tape is being started: they say what this
     /// recording is being made with, and a choice made now would be a choice
-    /// for the next one, which is not what a picker beside a rolling tape
+    /// for the next one, which is not what a button beside a rolling tape
     /// looks like it offers.
     func show(state: RecorderState, elapsed: String) {
         self.state = state
         let idle = state == .idle
         record.rolling = state == .recording
         record.isEnabled = idle || state == .recording
-        for picker in [projectPicker, inputPicker, outputPicker] {
-            picker.isEnabled = idle
+        for button in [inputButton, projectButton, outputButton] {
+            button.isEnabled = idle
         }
         switch state {
         case .idle:
-            recordCaption.stringValue = "Record"
-            recordCaption.font = NSFont.systemFont(ofSize: 11)
+            caption.stringValue = "Record"
+            caption.font = NSFont.systemFont(ofSize: 11)
             record.setAccessibilityLabel("Start recording")
         case .starting:
-            recordCaption.stringValue = "Starting …"
-            recordCaption.font = NSFont.systemFont(ofSize: 11)
+            caption.stringValue = "Starting …"
+            caption.font = NSFont.systemFont(ofSize: 11)
             record.setAccessibilityLabel("Starting")
         case .recording:
-            recordCaption.stringValue = elapsed
-            recordCaption.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            caption.stringValue = elapsed
+            caption.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
             record.setAccessibilityLabel("Stop recording, \(elapsed) so far")
         case .processing:
-            recordCaption.stringValue = "Processing …"
-            recordCaption.font = NSFont.systemFont(ofSize: 11)
+            caption.stringValue = "Processing …"
+            caption.font = NSFont.systemFont(ofSize: 11)
             record.setAccessibilityLabel("Processing")
         }
         // the rim goes red for the length of the tape, so that a puck tucked
@@ -2822,68 +2841,24 @@ final class RecorderPuckView: NSView, Dockable {
         body.lineWidth = state == .recording ? 1.5 : 1
     }
 
-    /// Every project a memo has been filed under, the chosen one ticked, or a
-    /// single grey "loading …" until the list has arrived — the same lines the
-    /// menu shows, for the same reasons.
+    /// The lists and the choices, kept for the menus and said on each button's
+    /// tooltip and to a screen reader, or "loading …" until they have arrived.
     func showProjects(_ projects: [(name: String, count: Int)]?, chosen: String) {
-        guard let projects else {
-            RecorderPuckView.loading(projectPicker)
-            return
-        }
-        projectPicker.removeAllItems()
-        for project in projects {
-            projectPicker.addItem(withTitle: "\(project.name) (\(project.count))")
-            projectPicker.lastItem?.representedObject = project.name
-        }
-        if !projects.contains(where: { $0.name == chosen }) {
-            projectPicker.addItem(withTitle: chosen)
-            projectPicker.lastItem?.representedObject = chosen
-        }
-        projectPicker.selectItem(at: projectPicker.itemArray.firstIndex {
-            $0.representedObject as? String == chosen
-        } ?? 0)
-        projectPicker.isEnabled = state == .idle
+        self.projects = projects
+        chosenProject = chosen
+        projectButton.say(projects == nil ? "loading …" : chosen)
     }
 
     func showInputs(_ devices: [AudioDevice]?, chosen: AudioDevice?) {
-        RecorderPuckView.fill(inputPicker, devices, "Default microphone", chosen)
-        inputPicker.isEnabled = state == .idle
+        inputs = devices
+        chosenInput = chosen
+        inputButton.say(devices == nil ? "loading …" : (chosen?.name ?? "Default microphone"))
     }
 
     func showOutputs(_ devices: [AudioDevice]?, chosen: AudioDevice?) {
-        RecorderPuckView.fill(outputPicker, devices, "System mix (everything)", chosen)
-        outputPicker.isEnabled = state == .idle
-    }
-
-    /// One direction of audio: the line that leaves it to the recorder first,
-    /// then every device, and a remembered device that is not plugged in
-    /// shown anyway and named as missing, so it can be seen and changed.
-    private static func fill(
-        _ picker: NSPopUpButton, _ listed: [AudioDevice]?, _ anything: String, _ chosen: AudioDevice?
-    ) {
-        guard let listed else {
-            loading(picker)
-            return
-        }
-        picker.removeAllItems()
-        picker.addItem(withTitle: anything)
-        for device in listed {
-            picker.addItem(withTitle: device.name)
-            picker.lastItem?.representedObject = device
-        }
-        if let chosen, !listed.contains(where: { $0.uid == chosen.uid }) {
-            picker.addItem(withTitle: "\(chosen.name) (not connected)")
-            picker.lastItem?.representedObject = chosen
-        }
-        picker.selectItem(at: picker.itemArray.firstIndex {
-            ($0.representedObject as? AudioDevice)?.uid == chosen?.uid
-        } ?? 0)
-    }
-
-    private static func loading(_ picker: NSPopUpButton) {
-        picker.removeAllItems()
-        picker.addItem(withTitle: "loading …")
-        picker.isEnabled = false
+        outputs = devices
+        chosenOutput = chosen
+        outputButton.say(devices == nil ? "loading …" : (chosen?.name ?? "System mix (everything)"))
     }
 
     // --- what is done to it -----------------------------------------------------------
@@ -2896,21 +2871,81 @@ final class RecorderPuckView: NSView, Dockable {
         }
     }
 
-    @objc private func picked(_ sender: NSPopUpButton) {
-        let value = sender.selectedItem?.representedObject
-        if sender === projectPicker, let name = value as? String {
-            onProject?(name)
-        } else if sender === inputPicker {
-            onInput?(value as? AudioDevice)
-        } else if sender === outputPicker {
-            onOutput?(value as? AudioDevice)
+    /// A chooser pressed: its menu, built now from the lists as they stand,
+    /// dropped from the button the way a pop-up's would be. The chosen line is
+    /// ticked; a remembered device that is not plugged in is shown anyway and
+    /// named as missing, so it can be seen and changed.
+    @objc private func choose(_ sender: ChoiceButton) {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        if sender === projectButton {
+            guard let projects else { return sender.drop(RecorderPuckView.loading()) }
+            for project in projects {
+                menu.addItem(entry(
+                    "\(project.name) (\(project.count))", project.name == chosenProject,
+                    #selector(pickedProject(_:)), project.name
+                ))
+            }
+            if !projects.contains(where: { $0.name == chosenProject }) {
+                menu.addItem(entry(chosenProject, true, #selector(pickedProject(_:)), chosenProject))
+            }
+        } else if sender === inputButton {
+            guard let inputs else { return sender.drop(RecorderPuckView.loading()) }
+            fill(menu, inputs, "Default microphone", chosenInput, #selector(pickedInput(_:)))
+        } else {
+            guard let outputs else { return sender.drop(RecorderPuckView.loading()) }
+            fill(menu, outputs, "System mix (everything)", chosenOutput, #selector(pickedOutput(_:)))
         }
+        sender.drop(menu)
+    }
+
+    private func fill(
+        _ menu: NSMenu, _ listed: [AudioDevice], _ anything: String, _ chosen: AudioDevice?,
+        _ selector: Selector
+    ) {
+        menu.addItem(entry(anything, chosen == nil, selector, nil))
+        for device in listed {
+            menu.addItem(entry(device.name, device.uid == chosen?.uid, selector, device))
+        }
+        if let chosen, !listed.contains(where: { $0.uid == chosen.uid }) {
+            menu.addItem(entry("\(chosen.name) (not connected)", true, selector, chosen))
+        }
+    }
+
+    private func entry(_ title: String, _ chosen: Bool, _ selector: Selector, _ value: Any?) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: selector, keyEquivalent: "")
+        item.target = self
+        item.state = chosen ? .on : .off
+        item.representedObject = value
+        return item
+    }
+
+    private static func loading() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let item = NSMenuItem(title: "loading …", action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        menu.addItem(item)
+        return menu
+    }
+
+    @objc private func pickedProject(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        onProject?(name)
+    }
+
+    @objc private func pickedInput(_ sender: NSMenuItem) {
+        onInput?(sender.representedObject as? AudioDevice)
+    }
+
+    @objc private func pickedOutput(_ sender: NSMenuItem) {
+        onOutput?(sender.representedObject as? AudioDevice)
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    /// A press that reached this view landed on no control — the button and
-    /// the pickers take their own — so it is a hand on the window.
+    /// A press that reached this view landed on no button — they take their
+    /// own — so it is a hand on the window.
     override func mouseDown(with event: NSEvent) {
         gripping = true
         onGrip?(.began(NSEvent.mouseLocation))
@@ -2929,7 +2964,7 @@ final class RecorderPuckView: NSView, Dockable {
 
     /// `.activeAlways`, because this window never becomes key and the app it
     /// belongs to is never the active one: any narrower scope would report no
-    /// crossing at all. The whole view is the area — the margin round the slab
+    /// crossing at all. The whole view is the area — the margin round the disc
     /// is the slack that keeps a pointer just off the rim from counting as gone.
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -2952,7 +2987,7 @@ final class RecorderPuckView: NSView, Dockable {
         onHover?(false)
     }
 
-    /// The slab grown into place out of the status item above it, the way the
+    /// The disc grown into place out of the status item above it, the way the
     /// island arrives, and for the same reason: it says where the window came from.
     func appear() {
         guard !reduceMotion, let layer else { return }
@@ -2964,7 +2999,7 @@ final class RecorderPuckView: NSView, Dockable {
         layer.add(growing, forKey: "appear")
     }
 
-    private static func caption(_ text: String) -> NSTextField {
+    private static func label(_ text: String) -> NSTextField {
         let field = NSTextField(labelWithString: text)
         field.font = NSFont.systemFont(ofSize: 11)
         field.textColor = .secondaryLabelColor
@@ -2972,21 +3007,13 @@ final class RecorderPuckView: NSView, Dockable {
         field.lineBreakMode = .byTruncatingTail
         return field
     }
-
-    private static func picker() -> NSPopUpButton {
-        let picker = NSPopUpButton(frame: .zero, pullsDown: false)
-        picker.controlSize = .small
-        picker.font = NSFont.systemFont(ofSize: 11)
-        picker.lineBreakMode = .byTruncatingTail
-        return picker
-    }
 }
 
 /// The one button: a red disc that starts the tape, a red square that stops
-/// it. Drawn rather than pictured, so the pressed and disabled states are the
-/// same shape a shade different and not a second image.
+/// it, inside a faint ring. Drawn rather than pictured, so the pressed and
+/// disabled states are the same shape a shade different and not a second image.
 final class RecordButton: NSButton {
-    static let side: CGFloat = 52
+    static let side: CGFloat = 72
     private static let ring = NSColor.white.withAlphaComponent(0.14)
 
     /// Whether the tape is rolling, which is what decides the shape.
@@ -3009,7 +3036,7 @@ final class RecordButton: NSButton {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let ring = NSBezierPath(ovalIn: bounds.insetBy(dx: 1, dy: 1))
+        let ring = NSBezierPath(ovalIn: bounds.insetBy(dx: 1.5, dy: 1.5))
         RecordButton.ring.setStroke()
         ring.lineWidth = 2
         ring.stroke()
@@ -3021,11 +3048,79 @@ final class RecordButton: NSButton {
         }
         red.setFill()
         if rolling {
-            let square = bounds.insetBy(dx: bounds.width * 0.3, dy: bounds.height * 0.3)
-            NSBezierPath(roundedRect: square, xRadius: 4, yRadius: 4).fill()
+            let square = bounds.insetBy(dx: bounds.width * 0.31, dy: bounds.height * 0.31)
+            NSBezierPath(roundedRect: square, xRadius: 5, yRadius: 5).fill()
         } else {
-            NSBezierPath(ovalIn: bounds.insetBy(dx: 7, dy: 7)).fill()
+            NSBezierPath(ovalIn: bounds.insetBy(dx: 9, dy: 9)).fill()
         }
+    }
+}
+
+/// A small round button with a symbol on it, for one of the things a recording
+/// is made of. What it is set to is on its tooltip and in its spoken name — a
+/// disc has no room for three device names, and the menu it drops says the
+/// same thing with a tick.
+final class ChoiceButton: NSButton {
+    static let side: CGFloat = 34
+    private static let face = NSColor.white.withAlphaComponent(0.06)
+    private static let pressed = NSColor.white.withAlphaComponent(0.13)
+    private static let rim = NSColor.white.withAlphaComponent(0.1)
+
+    private let label: String
+    private let symbol: NSImage?
+    private let faint: NSImage?
+
+    /// The symbol in two colours rather than one image tinted at draw time: a
+    /// symbol is a template, and a template drawn is drawn black.
+    init(symbol name: String, label: String) {
+        self.label = label
+        let base = NSImage(systemSymbolName: name, accessibilityDescription: label)
+        let size = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+        symbol = base?.withSymbolConfiguration(
+            size.applying(.init(paletteColors: [NSColor.white.withAlphaComponent(0.85)]))
+        )
+        faint = base?.withSymbolConfiguration(
+            size.applying(.init(paletteColors: [NSColor.white.withAlphaComponent(0.3)]))
+        )
+        super.init(frame: .zero)
+        isBordered = false
+        setButtonType(.momentaryChange)
+        title = ""
+        setAccessibilityRole(.popUpButton)
+        say("")
+    }
+
+    /// This view is only ever built in code; there is no nib in this app for
+    /// one to be loaded from.
+    required init?(coder: NSCoder) {
+        fatalError("ChoiceButton is built in code, not loaded from a nib")
+    }
+
+    /// What the choice currently is, for the tooltip and the screen reader.
+    func say(_ choice: String) {
+        toolTip = choice.isEmpty ? label : "\(label): \(choice)"
+        setAccessibilityLabel(label)
+        setAccessibilityValue(choice)
+    }
+
+    /// The menu dropped from under this button, the way a pop-up's is.
+    func drop(_ menu: NSMenu) {
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: -4), in: self)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let face = NSBezierPath(ovalIn: bounds.insetBy(dx: 0.5, dy: 0.5))
+        (isHighlighted ? ChoiceButton.pressed : ChoiceButton.face).setFill()
+        face.fill()
+        ChoiceButton.rim.setStroke()
+        face.lineWidth = 1
+        face.stroke()
+        guard let image = isEnabled ? symbol : faint else { return }
+        let size = image.size
+        image.draw(in: NSRect(
+            x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2,
+            width: size.width, height: size.height
+        ))
     }
 }
 
