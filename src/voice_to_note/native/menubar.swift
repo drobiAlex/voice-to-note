@@ -146,6 +146,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var dial: NSPanel?
     private var dialView: DialView?
 
+    /// Where the dial lives and how it moves between places; it owns nothing
+    /// the two above do not, and goes when they go.
+    private var dialDock: DialDock?
+
     /// How long the recording under way was asked to run, or nothing for one
     /// that runs until it is stopped, and the one timer that stops it. Set the
     /// moment the tape actually rolls rather than when the recorder is
@@ -393,6 +397,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .idle:
             menu.addItem(action("Start Recording", #selector(startRecording), key: "r"))
             menu.addItem(action("Record for…", #selector(openDialFromMenu), key: "t"))
+            // offered only once the dial has somewhere to come back from, so
+            // that a dial nobody has moved is not followed by a line about it
+            if rememberedPlace != .hanging || dialDock?.state.isHanging == false {
+                menu.addItem(action("Return Dial to Menu Bar", #selector(returnDial)))
+            }
             menu.addItem(.separator())
             menu.addItem(.sectionHeader(title: "Next Recording"))
             menu.addItem(picker("Project", projectItems()))
@@ -525,11 +534,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// status bar's own level, on every space. The island asks the window for
     /// its shadow; the dial draws its own, because a shadow a window works out
     /// from transparent pixels is worked out again every time they change.
-    private func floating(_ view: NSView, shadow: Bool) -> NSPanel {
-        let panel = NSPanel(
-            contentRect: view.frame, styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered, defer: false
-        )
+    private func floating(_ view: NSView, shadow: Bool, offscreen: Bool = false) -> NSPanel {
+        let panel: NSPanel
+        if offscreen {
+            panel = DialPanel(
+                contentRect: view.frame, styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered, defer: false
+            )
+            // this window slides on its own account; AppKit's guess at an
+            // animation for it would only be something for that slide to fight
+            panel.animationBehavior = .none
+        } else {
+            panel = NSPanel(
+                contentRect: view.frame, styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered, defer: false
+            )
+        }
         panel.contentView = view
         panel.level = .statusBar
         panel.isOpaque = false
@@ -590,7 +610,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// button's light with them: it is lit for whichever window is up, and goes
     /// out with the last of them.
     private func stopWatchingClicks() {
-        guard panel == nil, dial == nil else { return }
+        guard panel == nil, dialDock?.state.isHanging != true else { return }
         if let clicksElsewhere {
             NSEvent.removeMonitor(clicksElsewhere)
         }
@@ -606,7 +626,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// means is the same for both.
     private func closeFloating() {
         closePanel()
-        closeDial()
+        // only a hanging dial goes on a click elsewhere: one that has been put
+        // somewhere is a window somebody expects to find there
+        if dialDock?.state.isHanging == true {
+            closeDial()
+        }
     }
 
     // --- the dial ---------------------------------------------------------------
@@ -616,6 +640,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// is rolling.
     @objc private func openDialFromMenu() {
         guard state == .idle else { return }
+        // the way in that needs no pointer: a dial tucked into an edge comes
+        // out, one somewhere on the screen comes to the front
+        if let dialDock {
+            dialDock.reveal()
+            return
+        }
+        openDial()
+    }
+
+    /// The dial's place forgotten and the dial, if it is up, hung under the
+    /// status item again — the way back for a window carried somewhere that
+    /// turned out not to suit.
+    @objc private func returnDial() {
+        UserDefaults.standard.removeObject(forKey: Key.dialPlace)
+        guard dial != nil else { return }
+        closeDial()
         openDial()
     }
 
@@ -623,7 +663,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// left at last time. Pressing its middle closes it and starts the tape for
     /// that long; turning it is remembered as it turns, so a dial dismissed by
     /// a click elsewhere still leaves the length it was turned to.
-    private func openDial(at minutes: Int? = nil, remembering: Bool = true) {
+    private func openDial(at minutes: Int? = nil, remembering: Bool = true, place: DialPlace? = nil) {
         guard dial == nil else { return }
         closePanel()
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -640,10 +680,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.closeDial()
             self.startTimedRecording(minutes)
         }
-        let panel = floating(view, shadow: false)
+        let panel = floating(view, shadow: false, offscreen: true)
         self.dial = panel
         self.dialView = view
-        place(panel)
+        let dock = DialDock(panel: panel, view: view, reduceMotion: reduceMotion)
+        // carried off, the dial is no longer the menu-like thing a click
+        // elsewhere dismisses, and the button it hung from lets go of it
+        dock.onLeftHanging = { [weak self] in
+            self?.stopWatchingClicks()
+        }
+        if remembering {
+            dock.onPlaced = { place in
+                UserDefaults.standard.set(place.encoded, forKey: Key.dialPlace)
+            }
+        }
+        self.dialDock = dock
+        // back where it was, or — for a dial that has never been moved, and
+        // for one whose display is gone — under the status item like a menu
+        if dock.restore(place ?? (remembering ? rememberedPlace : .hanging)) {
+            return
+        }
+        self.place(panel)
         arrive(panel, reduceMotion: reduceMotion) { view.appear() }
         statusItem.button?.highlight(true)
         watchForClicks()
@@ -653,6 +710,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let closing = dial
         dial = nil
         dialView = nil
+        dialDock = nil
         stopWatchingClicks()
         vanish(closing)
     }
@@ -876,6 +934,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         static let inputUID = "inputDeviceUID"
         static let inputName = "inputDeviceName"
         static let minutes = "recordMinutes"
+        static let dialPlace = "dialPlace"
+    }
+
+    /// Where the dial was last left. Under the status item until somebody
+    /// carries it somewhere, and there ever after — a window put in a corner is
+    /// a window expected to be in that corner next time.
+    private var rememberedPlace: DialPlace {
+        DialPlace(encoded: UserDefaults.standard.string(forKey: Key.dialPlace) ?? "") ?? .hanging
     }
 
     /// Half an hour until the dial has been turned: the length a meeting is
@@ -1221,6 +1287,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case idle
         case dial
         case dialFull
+        case dialTucked
         case starting
         case voices
         case timed
@@ -1234,6 +1301,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .idle: return "Idle"
             case .dial: return "Idle — dial open"
             case .dialFull: return "Idle — dial at two hours"
+            case .dialTucked: return "Idle — dial tucked into the right edge"
             case .starting: return "Starting"
             case .voices: return "Recording — voices"
             case .timed: return "Recording — timed, 20 min left"
@@ -1251,7 +1319,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         /// than a picture of one.
         var state: RecorderState {
             switch self {
-            case .idle, .dial, .dialFull: return .idle
+            case .idle, .dial, .dialFull, .dialTucked: return .idle
             case .starting: return .starting
             case .voices, .timed, .timedEnding, .microphoneDead, .bothSilent: return .recording
             case .processing: return .processing
@@ -1267,7 +1335,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .voices, .timed, .timedEnding: return (.talking(seed: 7), .talking(seed: 31))
             case .microphoneDead: return (.talking(seed: 7), .quiet(seed: 5))
             case .bothSilent: return (.quiet(seed: 11), .quiet(seed: 5))
-            case .idle, .dial, .dialFull, .starting, .processing: return nil
+            case .idle, .dial, .dialFull, .dialTucked, .starting, .processing: return nil
             }
         }
 
@@ -1286,10 +1354,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         /// The dial's setting where the scenario is a dial, or nothing.
         var dialMinutes: Int? {
             switch self {
-            case .dial: return nil
             case .dialFull: return DialView.longest
             default: return nil
             }
+        }
+
+        var isDial: Bool {
+            switch self {
+            case .dial, .dialFull, .dialTucked: return true
+            default: return false
+            }
+        }
+
+        /// Where the scenario's dial is put, on the main screen: tucked into
+        /// an edge to be hovered out of it, or hanging like any other.
+        var dialPlace: DialPlace {
+            guard self == .dialTucked, let main = NSScreen.main,
+                  let display = DialDock.number(of: main) else { return .hanging }
+            return .tucked(.right, display: display, along: 0.5)
         }
     }
 
@@ -1342,8 +1424,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             show()
             // the dial by the door it is opened from, and its middle wired to
             // nothing but closing it: a preview starts no tape
-            if scenario == .dial || scenario == .dialFull {
-                openDial(at: scenario.dialMinutes, remembering: false)
+            if scenario.isDial {
+                openDial(at: scenario.dialMinutes, remembering: false, place: scenario.dialPlace)
                 dialView?.onStart = { [weak self] _ in self?.closeDial() }
             }
             return
@@ -2704,6 +2786,27 @@ final class DialView: NSView, NSAccessibilitySlider {
     var onStart: ((Int) -> Void)?
     var onChange: ((Int) -> Void)?
 
+    /// A press on the dial's ground — inside the ring, or the air around the
+    /// disc — is a hand on the window rather than on the control, and this is
+    /// how the view says so, in screen points, from the press to the release.
+    /// What a grip *does* is not the view's business.
+    enum Grip {
+        case began(NSPoint)
+        case moved(NSPoint)
+        case ended(NSPoint)
+    }
+
+    var onGrip: ((Grip) -> Void)?
+
+    /// The pointer crossing the dial's edge, in or out. One tracking area,
+    /// entered and exited only: mouse-moved events flood the queue and are
+    /// not asked for, and nothing here needs to know where the pointer is
+    /// between one crossing and the next.
+    var onHover: ((Bool) -> Void)?
+
+    private var gripping = false
+    private var pointer: NSTrackingArea?
+
     init(minutes: Int, reduceMotion: Bool) {
         self.minutes = DialView.clamped(minutes)
         self.turn = CGFloat(self.minutes)
@@ -2895,21 +2998,34 @@ final class DialView: NSView, NSAccessibilitySlider {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    /// A press on the ring sets the dial to where it was pressed, and a press
-    /// anywhere else on the disc only picks the dial up; either way the drag
-    /// that follows is measured from here.
+    /// Where the ring is, as a band of reach from the centre: a press in it
+    /// turns the dial, a press anywhere else on the disc or in the air around
+    /// it takes hold of the window.
+    private static var ringBand: ClosedRange<CGFloat> {
+        (disc / 2 - ringInset - tickLength - 10)...(disc / 2 + 4)
+    }
+
+    /// A press on the ring sets the dial to where it was pressed and the drag
+    /// that follows turns it from there; a press on the ground is a grip.
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        let angle = angle(of: point)
         let reach = hypot(point.x - bounds.midX, point.y - bounds.midY)
-        if reach > DialView.centreDiameter / 2 + 8 {
-            let ticks = (angle / (2 * .pi) * CGFloat(DialView.ticks)).rounded()
-            settle(ticks * CGFloat(DialView.step), animated: true)
+        guard DialView.ringBand.contains(reach) else {
+            gripping = true
+            onGrip?(.began(NSEvent.mouseLocation))
+            return
         }
+        let angle = angle(of: point)
+        let ticks = (angle / (2 * .pi) * CGFloat(DialView.ticks)).rounded()
+        settle(ticks * CGFloat(DialView.step), animated: true)
         lastAngle = angle
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if gripping {
+            onGrip?(.moved(NSEvent.mouseLocation))
+            return
+        }
         guard let lastAngle else { return }
         let angle = angle(of: convert(event.locationInWindow, from: nil))
         let delta = DialView.turn(from: lastAngle, to: angle)
@@ -2919,6 +3035,36 @@ final class DialView: NSView, NSAccessibilitySlider {
 
     override func mouseUp(with event: NSEvent) {
         lastAngle = nil
+        if gripping {
+            gripping = false
+            onGrip?(.ended(NSEvent.mouseLocation))
+        }
+    }
+
+    /// `.activeAlways`, because this window never becomes key and the app it
+    /// belongs to is never the active one: any narrower scope would report no
+    /// crossing at all. The whole view is the area — the margin round the disc
+    /// is the slack that keeps a pointer just off the rim from counting as
+    /// gone.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let pointer {
+            removeTrackingArea(pointer)
+        }
+        let area = NSTrackingArea(
+            rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self, userInfo: nil
+        )
+        addTrackingArea(area)
+        pointer = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        onHover?(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onHover?(false)
     }
 
     /// A wheel or a two-finger scroll turns the dial too, a tick a notch.
@@ -3036,6 +3182,456 @@ final class DialCentreButton: NSButton {
             x: 0, y: top - bigHeight - gap - smallHeight, width: bounds.width, height: smallHeight
         ))
     }
+}
+
+// MARK: - where the dial lives
+
+/// A window that may hang off the edge of the screen. AppKit pulls a window
+/// back on screen whenever it is placed or resized — that is what a tucked dial
+/// must not have happen to it — and this is the one override that stops it.
+final class DialPanel: NSPanel {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
+    }
+}
+
+/// Where the dial was left, as a thing that can be written down and read back.
+/// A free dial is a fraction of its screen rather than a point, so a display
+/// that changes resolution keeps it in the same place; a tucked one is an edge
+/// and how far along it. The screen is named by its display number, and a
+/// display that is no longer attached puts the dial back under the menu bar.
+enum DialPlace: Equatable {
+    case hanging
+    case free(display: UInt32, x: CGFloat, y: CGFloat)
+    case tucked(DialDock.Edge, display: UInt32, along: CGFloat)
+
+    var encoded: String {
+        switch self {
+        case .hanging:
+            return "hanging"
+        case let .free(display, x, y):
+            return "free|\(display)|\(x)|\(y)"
+        case let .tucked(edge, display, along):
+            return "tucked|\(edge.rawValue)|\(display)|\(along)"
+        }
+    }
+
+    init?(encoded: String) {
+        let parts = encoded.split(separator: "|").map(String.init)
+        switch parts.first {
+        case "hanging":
+            self = .hanging
+        case "free":
+            guard parts.count == 4, let display = UInt32(parts[1]),
+                  let x = Double(parts[2]), let y = Double(parts[3]) else { return nil }
+            self = .free(display: display, x: x, y: y)
+        case "tucked":
+            guard parts.count == 4, let edge = DialDock.Edge(rawValue: parts[1]),
+                  let display = UInt32(parts[2]), let along = Double(parts[3]) else { return nil }
+            self = .tucked(edge, display: display, along: along)
+        default:
+            return nil
+        }
+    }
+}
+
+/// The dial's window and the four places it can be: hanging under the status
+/// item like a menu, free anywhere on the screen, tucked into an edge with a
+/// sliver showing, or peeking back out of that edge for as long as the pointer
+/// is on it. The view inside knows nothing of this — it reports a grip on its
+/// ground and the pointer crossing its edge, and this decides what those mean.
+///
+/// Moving is done by hand, event by event, rather than handed to the window
+/// server: the release is what decides whether the dial tucks, and a release
+/// this object never hears about is a decision it cannot make.
+///
+/// Tucked, it costs nothing: no timer, no monitor, one tracking area waiting
+/// for a crossing. The dwell and the grace are timers that exist only between
+/// a crossing and its re-check — and both re-check, because a pointer that
+/// skimmed the sliver on its way somewhere else is not a pointer asking for
+/// the dial.
+final class DialDock {
+    enum Edge: String {
+        case left, right, top, bottom
+    }
+
+    enum State {
+        case hanging
+        case free
+        case tucked(Edge)
+        case peeking(Edge)
+
+        var isHanging: Bool {
+            if case .hanging = self { return true }
+            return false
+        }
+    }
+
+    /// How much of the disc stays on screen when tucked: the rim and the first
+    /// few ticks, enough to be a tab and to be hovered. Never less than a few
+    /// points — a window with nothing on screen gets no events at all.
+    static let peek: CGFloat = 22
+
+    /// How near the pointer must be let go to an edge for the dial to tuck.
+    static let snap: CGFloat = 8
+
+    /// The dwell before a hover reveals, and the grace after the pointer leaves
+    /// before it hides again — each re-checked when it fires. A fifth of a
+    /// second is what the Dock waits; the grace is longer because coming back
+    /// for something is more common than leaving for good.
+    static let dwell: TimeInterval = 0.2
+    static let grace: TimeInterval = 0.4
+
+    /// The slide, the same length from every edge: a window that took longer
+    /// from farther away would be a window that felt heavier at the bottom of
+    /// the screen than at the side.
+    static let sliding: TimeInterval = 0.22
+    static let tuckedAlpha: CGFloat = 0.6
+
+    /// The air between a revealed disc and the edge it came out of.
+    static let clearance: CGFloat = 6
+
+    let panel: NSPanel
+    let view: DialView
+    private let reduceMotion: Bool
+    private(set) var state: State = .hanging
+
+    /// How far along its edge a tucked dial sits, as a fraction, kept so that
+    /// peeking out and tucking back land on the same spot.
+    private var along: CGFloat = 0.5
+
+    /// The pointer's offset from the window's origin while the dial is being
+    /// moved, and nothing at any other time.
+    private var grab: NSPoint?
+    private var pending: Timer?
+    private var screensChanged: Any?
+
+    /// Told once, when the dial stops hanging: whoever hung it there closes it
+    /// on a click elsewhere and lights the button it hangs from, and a dial that
+    /// has been carried off is neither of those things any more.
+    var onLeftHanging: (() -> Void)?
+
+    /// Told whenever where the dial lives changes, with the place to remember.
+    var onPlaced: ((DialPlace) -> Void)?
+
+    init(panel: NSPanel, view: DialView, reduceMotion: Bool) {
+        self.panel = panel
+        self.view = view
+        self.reduceMotion = reduceMotion
+        view.onGrip = { [weak self] grip in self?.gripped(grip) }
+        view.onHover = { [weak self] inside in self?.hovered(inside) }
+        // a display arriving or leaving moves every edge; a tucked dial is put
+        // back against the edge it was tucked into, on whatever is there now
+        screensChanged = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil,
+            queue: .main
+        ) { [weak self] _ in self?.reanchor() }
+    }
+
+    deinit {
+        pending?.invalidate()
+        if let screensChanged {
+            NotificationCenter.default.removeObserver(screensChanged)
+        }
+    }
+
+    // --- putting it back where it was ---------------------------------------------
+
+    /// The dial put back where it was left, or nothing — and then the caller
+    /// hangs it under the status item — when that place is gone.
+    func restore(_ place: DialPlace) -> Bool {
+        switch place {
+        case .hanging:
+            return false
+        case let .free(display, x, y):
+            guard let screen = DialDock.screen(numbered: display) else { return false }
+            let area = screen.visibleFrame
+            let origin = NSPoint(
+                x: area.minX + x * area.width - panel.frame.width / 2,
+                y: area.minY + y * area.height - panel.frame.height / 2
+            )
+            panel.setFrameOrigin(DialDock.clamped(origin, size: panel.frame.size, within: area))
+            state = .free
+            panel.alphaValue = 1
+            panel.orderFrontRegardless()
+            return true
+        case let .tucked(edge, display, along):
+            guard let screen = DialDock.screen(numbered: display) else { return false }
+            self.along = along
+            state = .tucked(edge)
+            panel.setFrame(tuckedFrame(edge, on: screen), display: false)
+            panel.alphaValue = DialDock.tuckedAlpha
+            panel.orderFrontRegardless()
+            return true
+        }
+    }
+
+    /// The dial brought to where it can be used: out of its edge, or to the
+    /// front. This is the way in that needs no pointer.
+    func reveal() {
+        pending?.invalidate()
+        if case let .tucked(edge) = state {
+            peek(edge)
+        }
+        panel.orderFrontRegardless()
+    }
+
+    private var place: DialPlace {
+        let screen = DialDock.screen(under: panel.frame) ?? NSScreen.main
+        guard let screen, let display = DialDock.number(of: screen) else { return .hanging }
+        switch state {
+        case .hanging:
+            return .hanging
+        case .free:
+            let area = screen.visibleFrame
+            return .free(
+                display: display,
+                x: (panel.frame.midX - area.minX) / area.width,
+                y: (panel.frame.midY - area.minY) / area.height
+            )
+        case let .tucked(edge), let .peeking(edge):
+            return .tucked(edge, display: display, along: along)
+        }
+    }
+
+    // --- being moved ------------------------------------------------------------
+
+    private func gripped(_ grip: DialView.Grip) {
+        switch grip {
+        case let .began(point):
+            pending?.invalidate()
+            grab = NSPoint(x: point.x - panel.frame.minX, y: point.y - panel.frame.minY)
+            NSCursor.closedHand.push()
+        case let .moved(point):
+            guard let grab else { return }
+            leaveWherever()
+            panel.setFrameOrigin(NSPoint(x: point.x - grab.x, y: point.y - grab.y))
+        case let .ended(point):
+            NSCursor.pop()
+            guard grab != nil else { return }
+            grab = nil
+            release(at: point)
+        }
+    }
+
+    /// The first movement of a grip: a hanging dial stops hanging, a tucked or
+    /// peeking one is just a window again, and either way it is fully lit.
+    private func leaveWherever() {
+        switch state {
+        case .hanging:
+            state = .free
+            onLeftHanging?()
+        case .tucked, .peeking:
+            state = .free
+        case .free:
+            break
+        }
+        panel.alphaValue = 1
+    }
+
+    /// Let go: within a few points of an edge it tucks into that edge, at the
+    /// spot along it where it was dropped; anywhere else it stays.
+    private func release(at point: NSPoint) {
+        guard let screen = DialDock.screen(containing: point) else {
+            state = .free
+            onPlaced?(place)
+            return
+        }
+        if let edge = DialDock.edge(near: point, of: screen) {
+            along = DialDock.along(edge, of: panel.frame, on: screen)
+            tuck(edge, on: screen)
+        } else {
+            state = .free
+            onPlaced?(place)
+        }
+    }
+
+    // --- being hovered --------------------------------------------------------------
+
+    /// The pointer crossing the dial's edge, in or out. A crossing sets a timer
+    /// and the timer asks again: what reveals a tucked dial is a pointer still
+    /// on it a fifth of a second later, and what hides a peeking one is a
+    /// pointer still gone after the grace — and never one that is holding it.
+    private func hovered(_ inside: Bool) {
+        pending?.invalidate()
+        pending = nil
+        switch (state, inside) {
+        case let (.tucked(edge), true):
+            wait(DialDock.dwell) { [weak self] in
+                guard let self, self.pointerIsOnTheDial else { return }
+                self.peek(edge)
+            }
+        case let (.peeking(edge), false):
+            wait(DialDock.grace) { [weak self] in
+                guard let self, self.grab == nil, !self.pointerIsOnTheDial else { return }
+                guard let screen = DialDock.screen(under: self.panel.frame) else { return }
+                self.tuck(edge, on: screen)
+            }
+        default:
+            break
+        }
+    }
+
+    private func wait(_ seconds: TimeInterval, then act: @escaping () -> Void) {
+        let timer = Timer(timeInterval: seconds, repeats: false) { [weak self] _ in
+            self?.pending = nil
+            act()
+        }
+        timer.tolerance = seconds / 10
+        RunLoop.main.add(timer, forMode: .common)
+        pending = timer
+    }
+
+    private var pointerIsOnTheDial: Bool {
+        panel.frame.contains(NSEvent.mouseLocation)
+    }
+
+    // --- the two positions at an edge ---------------------------------------------------
+
+    private func tuck(_ edge: Edge, on screen: NSScreen) {
+        state = .tucked(edge)
+        slide(to: tuckedFrame(edge, on: screen), alpha: DialDock.tuckedAlpha)
+        onPlaced?(place)
+    }
+
+    private func peek(_ edge: Edge) {
+        guard let screen = DialDock.screen(under: panel.frame) ?? NSScreen.main else { return }
+        state = .peeking(edge)
+        slide(to: revealedFrame(edge, on: screen), alpha: 1)
+    }
+
+    /// A tucked or peeking dial put back against its edge after the screens
+    /// changed under it — on the screen it is now nearest, which may be a
+    /// different one from the one it was tucked into.
+    private func reanchor() {
+        guard let screen = DialDock.screen(under: panel.frame) ?? NSScreen.main else { return }
+        switch state {
+        case let .tucked(edge):
+            panel.setFrame(tuckedFrame(edge, on: screen), display: true)
+        case let .peeking(edge):
+            panel.setFrame(revealedFrame(edge, on: screen), display: true)
+        case .free:
+            panel.setFrameOrigin(DialDock.clamped(
+                panel.frame.origin, size: panel.frame.size, within: screen.visibleFrame
+            ))
+        case .hanging:
+            break
+        }
+    }
+
+    /// The window moved and dimmed in one fixed-length ease-out, or at once
+    /// under Reduce Motion: a disc sliding two hundred points is the large
+    /// movement that setting asks not to see.
+    private func slide(to frame: NSRect, alpha: CGFloat) {
+        guard !reduceMotion else {
+            panel.setFrame(frame, display: true)
+            panel.alphaValue = alpha
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = DialDock.sliding
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().setFrame(frame, display: true)
+            panel.animator().alphaValue = alpha
+        }
+    }
+
+    /// The whole disc just inside the edge, at `along` of the way across it.
+    private func revealedFrame(_ edge: Edge, on screen: NSScreen) -> NSRect {
+        let area = screen.visibleFrame
+        let size = panel.frame.size
+        let disc = DialView.disc
+        let margin = DialView.margin
+        let gap = DialDock.clearance
+        var origin = NSPoint.zero
+        switch edge {
+        case .left:
+            origin.x = area.minX + gap - margin
+            origin.y = area.minY + along * area.height - size.height / 2
+        case .right:
+            origin.x = area.maxX - gap - disc - margin
+            origin.y = area.minY + along * area.height - size.height / 2
+        case .top:
+            origin.y = area.maxY - gap - disc - margin
+            origin.x = area.minX + along * area.width - size.width / 2
+        case .bottom:
+            origin.y = area.minY + gap - margin
+            origin.x = area.minX + along * area.width - size.width / 2
+        }
+        return NSRect(origin: DialDock.clamped(origin, size: size, within: area), size: size)
+    }
+
+    /// The revealed frame pushed out through its edge until `peek` points of
+    /// the disc are left. The window keeps its size; only where it is moves.
+    private func tuckedFrame(_ edge: Edge, on screen: NSScreen) -> NSRect {
+        var frame = revealedFrame(edge, on: screen)
+        let out = DialView.disc - DialDock.peek + DialDock.clearance
+        switch edge {
+        case .left: frame.origin.x -= out
+        case .right: frame.origin.x += out
+        case .top: frame.origin.y += out
+        case .bottom: frame.origin.y -= out
+        }
+        return frame
+    }
+
+    // --- screens ---------------------------------------------------------------------
+
+    /// The nearest edge within reach of a point, or nothing. Tested against the
+    /// screen's whole frame rather than the part the menu bar and Dock leave,
+    /// because a dial dropped under either of them was dropped at the edge.
+    static func edge(near point: NSPoint, of screen: NSScreen) -> Edge? {
+        let frame = screen.frame
+        let distances: [(Edge, CGFloat)] = [
+            (.left, point.x - frame.minX), (.right, frame.maxX - point.x),
+            (.top, frame.maxY - point.y), (.bottom, point.y - frame.minY),
+        ]
+        return distances.filter { $0.1 <= snap }.min { $0.1 < $1.1 }?.0
+    }
+
+    /// How far along an edge a frame's middle sits, as a fraction of the screen.
+    static func along(_ edge: Edge, of frame: NSRect, on screen: NSScreen) -> CGFloat {
+        let area = screen.visibleFrame
+        switch edge {
+        case .left, .right:
+            return min(max((frame.midY - area.minY) / area.height, 0), 1)
+        case .top, .bottom:
+            return min(max((frame.midX - area.minX) / area.width, 0), 1)
+        }
+    }
+
+    /// The screen a point is on, with its far edges counted in: a rectangle's
+    /// `contains` leaves out its own right and top, which is exactly where a
+    /// pointer pushed against an edge sits.
+    static func screen(containing point: NSPoint) -> NSScreen? {
+        NSScreen.screens.first { $0.frame.insetBy(dx: -1, dy: -1).contains(point) }
+    }
+
+    /// The screen a frame is mostly on, by its middle first and any overlap
+    /// second — a tucked window's middle is off every screen.
+    static func screen(under frame: NSRect) -> NSScreen? {
+        screen(containing: NSPoint(x: frame.midX, y: frame.midY))
+            ?? NSScreen.screens.max { $0.frame.intersection(frame).area < $1.frame.intersection(frame).area }
+    }
+
+    static func number(of screen: NSScreen) -> UInt32? {
+        screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32
+    }
+
+    static func screen(numbered display: UInt32) -> NSScreen? {
+        NSScreen.screens.first { number(of: $0) == display }
+    }
+
+    static func clamped(_ origin: NSPoint, size: NSSize, within area: NSRect) -> NSPoint {
+        NSPoint(
+            x: min(max(origin.x, area.minX), max(area.minX, area.maxX - size.width)),
+            y: min(max(origin.y, area.minY), max(area.minY, area.maxY - size.height))
+        )
+    }
+}
+
+extension NSRect {
+    var area: CGFloat { isNull ? 0 : width * height }
 }
 
 // MARK: - end of meters and marks
