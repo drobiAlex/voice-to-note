@@ -56,21 +56,15 @@ whisper.cpp); every later one is two `swiftc` invocations.
 
 ## Why the Mac cannot be told to do anything else
 
-A **second** keypair, separate from finity's, so the two gatekeepers stay independent and
-either can be revoked alone:
+A **second** keypair, `~/.ssh/vtn_mac_ed25519`, separate from finity's, so the two
+gatekeepers stay independent and either can be revoked alone. It is the same Mac and
+the same user, so `remote-build.sh` reuses finity's `mac` host entry and only swaps the
+identity (`VTN_MAC_HOST` / `VTN_MAC_KEY` override both). There is no named git remote:
+pushes go over that same connection to `mac:build/voice-to-note.git`.
 
-```
-# VPS
-ssh-keygen -t ed25519 -f ~/.ssh/vtn_mac_ed25519 -C vps-vtn -N ''
-
-# ~/.ssh/config on the VPS
-Host mac-vtn
-    HostName <tailscale ip of the Mac>
-    User <you>
-    IdentityFile ~/.ssh/vtn_mac_ed25519
-    IdentitiesOnly yes
-    BatchMode yes
-```
+The agent's own permission rules deny raw `ssh`, `scp` and `rsync` and allow-list
+`scripts/remote-build.sh *` — so the script is its only door on this side, just as the
+gatekeeper is on the other.
 
 On the Mac, the key is pinned in `~/.ssh/authorized_keys` to a forced command — one more
 line beside finity's, each key its own gatekeeper:
@@ -103,22 +97,27 @@ reset from whatever the VPS pushes; a gatekeeper living inside it could be rewri
 push and would enforce nothing. The same is *not* true of `scripts/mac-ci.sh`, which does
 live in the checkout — it is the build, and the build is arbitrary code by nature (below).
 
-### Installing (done by a person, at the Mac — the VPS key cannot do this by design)
+### Installing
+
+A person adds the public key to the Mac's `~/.ssh/authorized_keys` as an ordinary,
+unrestricted line. Then, once, from the VPS:
 
 ```bash
-mkdir -p ~/build ~/bin
-git init --bare ~/build/voice-to-note.git
-git clone ~/build/voice-to-note.git ~/build/voice-to-note      # scratch checkout; origin = the bare repo
-cat > ~/bin/vtn-remote < scripts/mac-remote-shell.sh && chmod 700 ~/bin/vtn-remote
-cp ~/.ssh/authorized_keys ~/.ssh/authorized_keys.bak.$(date +%F)   # before editing it
-echo 'restrict,command="/Users/<you>/bin/vtn-remote" ssh-ed25519 AAAA... vps-vtn' >> ~/.ssh/authorized_keys
+scripts/remote-build.sh install
 ```
 
-First push from the VPS: `git remote add mac-vtn mac-vtn:build/voice-to-note.git`, then
-`scripts/remote-build.sh status`. Updating the gatekeeper later is the same `cat >` line,
-run by the person at the Mac, from a reviewed commit.
+which — while the key still has a shell — creates `~/build/voice-to-note.git`, pushes the
+current branch, clones the scratch checkout, installs `~/bin/vtn-remote`, backs up
+`authorized_keys` to `authorized_keys.bak.<timestamp>`, rewrites **only the line holding
+this key** with the `restrict,command=` prefix, and then proves the result: a plain
+command must be refused and `status` must answer before it returns. It is idempotent
+and leaves a line already pinned alone.
 
-Emergency: `cp ~/.ssh/authorized_keys.bak.<date> ~/.ssh/authorized_keys` on the Mac.
+Updating the gatekeeper later means a person at the Mac running
+`cat > ~/bin/vtn-remote < scripts/mac-remote-shell.sh` from a reviewed commit — the
+pinned key cannot, by design.
+
+Emergency: `cp ~/.ssh/authorized_keys.bak.<timestamp> ~/.ssh/authorized_keys` on the Mac.
 
 ### What this does not protect against
 
