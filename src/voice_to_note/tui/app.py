@@ -1,4 +1,4 @@
-from collections.abc import Callable, Hashable, Iterable
+from collections.abc import Callable, Hashable, Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path, PurePath
@@ -32,7 +32,7 @@ from textual.widgets import (
 )
 
 from .. import config, services
-from ..domain import Memo
+from ..domain import Memo, Message
 from ..gateways import GatewayError
 from ..storage.repository import Repository
 
@@ -1379,6 +1379,237 @@ class TodoBoard(ModalScreen[int | None]):
         self.dismiss(None)
 
 
+class ChatScope(ModalScreen[list[int] | None]):
+    """Which memos a new conversation is to be about. A conversation can span
+    several recordings — a week of stand-ups is one subject — and the memo
+    list has no way of pointing at more than one, so the choice is made here,
+    with the memo that was pointed at already ticked."""
+
+    BINDINGS = [
+        Binding("enter", "confirm", "Chat", priority=True),
+        ("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, rows: Sequence[services.MemoRow], preselected: int | None) -> None:
+        """Opens over the memos on the list, with one of them already chosen."""
+        super().__init__()
+        self.rows = rows
+        self.preselected = preselected
+
+    def compose(self) -> ComposeResult:
+        """The memos, each with a box to tick."""
+        yield Static("memos to talk about — space ticks, enter opens the chat", id="scope-help")
+        yield SelectionList[int](
+            *((f"{row.id:>4}  {row.name}", row.id, row.id == self.preselected) for row in self.rows),
+            id="chat-scope",
+        )
+        yield Footer()
+
+    def on_mount(self) -> None:
+        """Puts the cursor on the list."""
+        self.query_one("#chat-scope", SelectionList).focus()
+
+    def action_confirm(self) -> None:
+        """Opens the chat over what is ticked, refusing to open one over nothing."""
+        chosen = list(self.query_one("#chat-scope", SelectionList).selected)
+        if not chosen:
+            self.notify("tick at least one memo", severity="warning")
+            return
+        self.dismiss(chosen)
+
+    def action_cancel(self) -> None:
+        """Opens no chat."""
+        self.dismiss(None)
+
+
+class ChatScreen(ModalScreen[None]):
+    """A conversation about some memos, kept: every turn is stored as it
+    happens, and the screen can be closed mid-answer and reopened from the
+    list of conversations with nothing lost. Opened over memos it has no
+    conversation yet — one is opened when the first question goes off, so
+    that looking and leaving files nothing."""
+
+    BINDINGS = [("escape", "close", "Close")]
+
+    def __init__(
+        self,
+        repo: Repository,
+        memo_ids: Sequence[int] = (),
+        conversation_id: int | None = None,
+    ) -> None:
+        """Opens either over memos to start talking about, or on a conversation
+        already under way."""
+        super().__init__()
+        self.repo = repo
+        self.memo_ids = list(memo_ids)
+        self.conversation_id = conversation_id
+        self.history: list[Message] = []
+        # the question on its way to a backend, shown at the foot of the thread
+        # until its answer arrives — or handed back to the input if none does
+        self.pending: str | None = None
+
+    def compose(self) -> ComposeResult:
+        """What the thread is about, the thread, and the line to add to it."""
+        yield Static(id="chat-about")
+        with VerticalScroll(id="chat-scroll"):
+            yield Markdown(id="chat-log")
+        yield Input(placeholder="ask about these memos", id="chat-input")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        """Reads the thread as it stands and puts the cursor on the input."""
+        if self.conversation_id is not None:
+            convo = services.require_conversation(self.repo, self.conversation_id)
+            self.memo_ids = list(convo.memo_ids)
+            about = f"{convo.title or 'conversation ' + str(convo.id)} — about: {services.chat_scope_text(convo)}"
+            self.history = services.chat_history(self.repo, self.conversation_id)
+        else:
+            about = f"new conversation — about: {services.memo_scope_text(self.repo, self.memo_ids)}"
+        self.query_one("#chat-about", Static).update(about)
+        self._redraw()
+        self.query_one("#chat-input", Input).focus()
+
+    def _redraw(self) -> None:
+        """Redraws the thread, keeping the newest turn in view."""
+        self.query_one("#chat-log", Markdown).update(
+            services.chat_markdown(self.history, self.pending)
+        )
+        self.query_one("#chat-scroll", VerticalScroll).scroll_end(animate=False)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Sends the question off, showing it in the thread straight away. A
+        blank one is refused while the input still holds it, and a second one
+        waits until the first has been answered: turns are a sequence, and two
+        in flight would come back in whichever order the backends chose."""
+        if self.pending is not None:
+            self.notify("still answering the last question", severity="warning")
+            return
+        try:
+            text = services.question(event.value)
+        except services.InvalidInput as refused:
+            self.notify(str(refused), severity="warning")
+            return
+        self.pending = text
+        self.query_one("#chat-input", Input).value = ""
+        self._redraw()
+        self._reply(text)
+
+    @work(thread=True)
+    def _reply(self, text: str) -> None:
+        """Puts the question, off the main thread because it waits on a model.
+        The conversation is opened here, on the first question, so that a
+        screen looked at and left behind files nothing. Only the failures a
+        person can act on are caught, as in the app's own jobs: a bug keeps
+        its traceback."""
+        try:
+            with services.open_repo(self.repo) as worker:
+                if self.conversation_id is None:
+                    self.conversation_id = services.start_chat(worker, self.memo_ids)
+                turn = services.chat(worker, self.conversation_id, text)
+        except (
+            GatewayError, services.ExtractionError, services.InvalidInput, services.NotFound
+        ) as failed:
+            self.app.call_from_thread(self._failed, text, str(failed))
+            return
+        self.app.call_from_thread(self._answered, turn.backend)
+
+    def _answered(self, backend: str) -> None:
+        """Back on the main thread: reads the thread as the database now has
+        it, both turns included, and says who answered."""
+        self.pending = None
+        if self.conversation_id is not None:
+            self.history = services.chat_history(self.repo, self.conversation_id)
+        self._redraw()
+        self.notify(f"answered via {backend}")
+
+    def _failed(self, text: str, message: str) -> None:
+        """Hands the question back to the input rather than losing it: nothing
+        was filed, so nothing shows it was ever asked."""
+        self.pending = None
+        self.query_one("#chat-input", Input).value = text
+        self._redraw()
+        self.notify(message, severity="error")
+
+    def action_close(self) -> None:
+        """Leaves the thread where it is; everything said is already stored."""
+        self.dismiss(None)
+
+
+_NO_CHATS = "no conversations yet — press C on a memo to start one"
+
+
+class ConversationList(ModalScreen[int | None]):
+    """Every conversation had about the memos, latest first, to be reopened
+    or thrown away. Closing it hands back the conversation chosen, if one was,
+    for the app to open."""
+
+    BINDINGS = [
+        Binding("enter", "open_chat", "Open", priority=True),
+        ("delete", "delete_chat", "Delete"),
+        ("escape", "close", "Close"),
+    ]
+
+    def __init__(self, repo: Repository) -> None:
+        """Reads through the database the app is already holding open."""
+        super().__init__()
+        self.repo = repo
+
+    def compose(self) -> ComposeResult:
+        """The list, or the line standing in for it while there is nothing."""
+        yield DataTable(id="chats", cursor_type="row")
+        yield Static(_NO_CHATS, id="no-chats")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        """Lays the columns out once and fills the rows."""
+        table = self.query_one("#chats", DataTable)
+        for label in ("id", "title", "about", "msgs", "last"):
+            table.add_column(label, key=label)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        """Redraws the rows from what is stored now."""
+        table = self.query_one("#chats", DataTable)
+        table.clear()
+        rows = services.chat_rows(self.repo)
+        for row in rows:
+            table.add_row(
+                Text(str(row.id)), Text(row.title), Text(row.about), Text(row.messages),
+                Text(row.last), key=str(row.id),
+            )
+        table.display = bool(rows)
+        self.query_one("#no-chats", Static).display = not rows
+        if rows:
+            table.focus()
+
+    def _chosen(self) -> int | None:
+        """The conversation the cursor is resting on, if any."""
+        table = self.query_one("#chats", DataTable)
+        rows = table.ordered_rows
+        if not 0 <= table.cursor_row < len(rows):
+            return None
+        return int(str(rows[table.cursor_row].key.value))
+
+    def action_open_chat(self) -> None:
+        """Hands the chosen conversation back to be opened."""
+        chosen = self._chosen()
+        if chosen is not None:
+            self.dismiss(chosen)
+
+    def action_delete_chat(self) -> None:
+        """Throws the chosen conversation away, turns and all."""
+        chosen = self._chosen()
+        if chosen is None:
+            return
+        services.delete_chat(self.repo, chosen)
+        self.notify(f"conversation {chosen} deleted")
+        self._refresh()
+
+    def action_close(self) -> None:
+        """Opens nothing."""
+        self.dismiss(None)
+
+
 # every key the main screen answers about the memo being pointed at: the keys
 # that run it, the action they name, and the words for it. Both the lines of the
 # menu and the keys the menu itself answers are built from this, so it cannot
@@ -1398,6 +1629,7 @@ _MENU_ROWS: tuple[tuple[tuple[str, ...], str, str], ...] = (
     (("p",), "repair", "Repair"),
     (("d",), "diarize", "Diarize"),
     (("a",), "ask", "Ask"),
+    (("C",), "chat", "Chat"),
     (("c",), "check_tasks", "Tasks"),
 )
 
@@ -1517,6 +1749,7 @@ MEMO_ACTIONS = frozenset(
         "repair",
         "diarize",
         "ask",
+        "chat",
         "check_tasks",
     }
 )
@@ -1601,6 +1834,8 @@ class MemoApp(App[None]):
     #speakers-row, #steps-row { height: auto; }
     #speakers-count { width: 12; }
     #step-list { height: auto; }
+    #chat-scroll { height: 1fr; }
+    #chat-about, #scope-help { padding: 0 1; background: $panel; }
     """
     BINDINGS = [
         # every key below, laid out as a list to pick from. Space because it is
@@ -1628,6 +1863,9 @@ class MemoApp(App[None]):
         Binding("p", "repair", "Repair", show=False),
         Binding("d", "diarize", "Diarize", show=False),
         Binding("a", "ask", "Ask", show=False),
+        # a conversation kept, where ask is a question thrown away; upper case
+        # because c is the memo's tasks and the chat can span other memos too
+        Binding("C", "chat", "Chat", show=False),
         # the memo's own to-dos, beside the note that states them; the whole
         # board across every memo is upper case T
         Binding("c", "check_tasks", "Tasks", show=False),
@@ -1647,6 +1885,7 @@ class MemoApp(App[None]):
         # lower case key is taken by the raw transcript. Like the settings under
         # S, this opens a screen of its own rather than acting on anything
         ("T", "todo_board", "To-dos"),
+        ("H", "chats", "Chats"),
         ("S", "settings", "Settings"),
         ("escape", "step_back", "Back"),
         ("q", "quit", "Quit"),
@@ -2447,6 +2686,33 @@ class MemoApp(App[None]):
         backend, answer = services.ask(repo, memo_id, asked)
         self.call_from_thread(self.push_screen, Answer(memo_id, asked, answer))
         return f"memo {memo_id} answered via {backend}"
+
+    def action_chat(self) -> None:
+        """Offers a conversation about the memo being pointed at, and any
+        others ticked beside it."""
+        memo_id = self._target_memo()
+        if memo_id is None:
+            return
+        rows = services.memo_rows(self.repo, project=self.project, sort=self.sort)
+        if all(row.id != memo_id for row in rows):
+            # pointed at from a listing the sidebar does not narrow to — a tag
+            # search, the archive — so the choice is the whole library
+            rows = services.memo_rows(self.repo, sort=self.sort)
+        self.push_screen(ChatScope(rows, memo_id), self._chat_scoped)
+
+    def _chat_scoped(self, memo_ids: list[int] | None) -> None:
+        """Opens the chat over what was ticked."""
+        if memo_ids:
+            self.push_screen(ChatScreen(self.repo, memo_ids=memo_ids))
+
+    def action_chats(self) -> None:
+        """Opens every conversation had so far, to reopen one."""
+        self.push_screen(ConversationList(self.repo), self._chat_chosen)
+
+    def _chat_chosen(self, conversation_id: int | None) -> None:
+        """Reopens the conversation picked off the list."""
+        if conversation_id is not None:
+            self.push_screen(ChatScreen(self.repo, conversation_id=conversation_id))
 
     def action_find_tag(self) -> None:
         """Offers to look for a tag across every project at once."""

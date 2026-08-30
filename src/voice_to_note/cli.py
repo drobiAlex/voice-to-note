@@ -516,6 +516,49 @@ def cmd_ask(args: argparse.Namespace) -> None:
     print(answer)
 
 
+def cmd_chat(args: argparse.Namespace) -> None:
+    """Talks about one or several memos, keeping the thread. A comma list of
+    memo ids opens a new conversation; --conversation continues one. With a
+    question the answer is printed and both sides filed; without one the
+    thread so far is printed, so a script can read back what was said. The
+    conversation's id goes to stderr beside the backend's name, where the
+    answer on stdout stays pipeable and the id is still there to continue
+    with."""
+    words = list(args.words)
+    with Repository() as repo:
+        if args.conversation is None:
+            # the ids lead the line, and only when there is no thread to
+            # continue: with one, every word is the question
+            if not words:
+                raise services.InvalidInput("chat needs memo ids (e.g. 3,5) or --conversation")
+            cid = services.start_chat(repo, services.memo_ids(words[0]), title=args.title or "")
+            words = words[1:]
+        else:
+            cid = args.conversation
+        if args.rename is not None:
+            services.rename_chat(repo, cid, args.rename)
+            status(f"conversation {cid} renamed")
+            return
+        if args.delete:
+            services.delete_chat(repo, cid)
+            status(f"conversation {cid} deleted")
+            return
+        if words:
+            turn = services.chat(repo, cid, " ".join(words))
+            status(f"({turn.backend}) conversation {cid}\n")
+            print(turn.answer)
+        else:
+            print(services.chat_json(repo, cid) if args.json else services.chat_text(repo, cid))
+
+
+def cmd_chats(args: argparse.Namespace) -> None:
+    """Lists every conversation, or those one memo is part of."""
+    with Repository() as repo:
+        print(
+            services.chats_json(repo, args.memo) if args.json else services.chats_text(repo, args.memo)
+        )
+
+
 def cmd_config(args: argparse.Namespace) -> None:
     """Lists every setting: the value in effect, where it came from, and what
     it does."""
@@ -803,6 +846,31 @@ def main() -> None:
     sp.add_argument("id", type=int)
     sp.add_argument("question", nargs="+")
     sp.set_defaults(fn=cmd_ask)
+
+    sp = sub.add_parser(
+        "chat",
+        help="talk about memos, keeping the thread: chat <id,id...> <question...>"
+        " or chat -c <conversation> <question...>",
+    )
+    sp.add_argument(
+        "words",
+        nargs="*",
+        help="memo ids to open a new conversation about (e.g. 3,5) unless -c is given,"
+        " then the question; no question prints the thread so far",
+    )
+    sp.add_argument(
+        "-c", "--conversation", type=int, metavar="ID", help="continue an existing conversation"
+    )
+    sp.add_argument("--title", help="name a new conversation; otherwise its first question names it")
+    sp.add_argument("--json", action="store_true", help="print the thread as JSON")
+    sp.add_argument("--rename", metavar="TITLE", help="rename the conversation and stop")
+    sp.add_argument("--delete", action="store_true", help="delete the conversation and stop")
+    sp.set_defaults(fn=cmd_chat)
+
+    sp = sub.add_parser("chats", help="list conversations")
+    sp.add_argument("--memo", type=int, metavar="ID", help="only conversations this memo is in")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(fn=cmd_chats)
 
     sp = sub.add_parser("setup", help="install whisper.cpp and all models (idempotent)")
     sp.add_argument(

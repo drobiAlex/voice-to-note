@@ -9,9 +9,12 @@ import numpy as np
 from .. import config
 from ..domain import (
     ActionItem,
+    Conversation,
+    ConversationListing,
     Extraction,
     Memo,
     MemoListing,
+    Message,
     NotesPayload,
     Segment,
     Speaker,
@@ -69,6 +72,28 @@ CREATE TABLE IF NOT EXISTS todos (
   touched INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS conversations (
+  id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS conversation_memos (
+  conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  memo_id INTEGER NOT NULL REFERENCES memos(id) ON DELETE CASCADE,
+  memo_title TEXT NOT NULL DEFAULT '',
+  position INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (conversation_id, memo_id)
+);
+CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY,
+  conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK (role IN ('user','assistant')),
+  text TEXT NOT NULL,
+  backend TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages(conversation_id, id);
 """
 
 MEMO_COLUMNS = (
@@ -793,6 +818,159 @@ class Repository:
                 tuple(params),
             )
         ]
+
+    # --- conversations ---------------------------------------------------
+
+    def create_conversation(
+        self, memo_ids: Sequence[int], titles: Sequence[str], title: str = ""
+    ) -> int:
+        """Opens a thread over some memos. Each memo's title is copied in
+        beside its id: the memo can be deleted later and the cascade will drop
+        it from the scope, but a history that no longer says what it was about
+        is worse than one carrying a stale name."""
+        with self.con:
+            cur = self.con.execute("INSERT INTO conversations (title) VALUES (?)", (title,))
+            assert cur.lastrowid is not None
+            conversation_id = cur.lastrowid
+            self._write_scope(conversation_id, memo_ids, titles)
+        return conversation_id
+
+    def _write_scope(
+        self, conversation_id: int, memo_ids: Sequence[int], titles: Sequence[str]
+    ) -> None:
+        """One thread's memos, in the order they were given: that is the order
+        the model reads them in, and the caller chose it."""
+        self.con.executemany(
+            "INSERT INTO conversation_memos (conversation_id, memo_id, memo_title, position)"
+            " VALUES (?,?,?,?)",
+            [
+                (conversation_id, memo_id, title, position)
+                for position, (memo_id, title) in enumerate(zip(memo_ids, titles, strict=True))
+            ],
+        )
+
+    def set_conversation_memos(
+        self, conversation_id: int, memo_ids: Sequence[int], titles: Sequence[str]
+    ) -> None:
+        """Rescopes a thread: whatever it was about, it is now about these. The
+        history stays — a question asked over the old scope is still what was
+        asked — which is why the scope is its own table and not a column on the
+        messages."""
+        with self.con:
+            self.con.execute(
+                "DELETE FROM conversation_memos WHERE conversation_id=?", (conversation_id,)
+            )
+            self._write_scope(conversation_id, memo_ids, titles)
+            self._touch_conversation(conversation_id)
+
+    def _touch_conversation(self, conversation_id: int) -> None:
+        """Marks a thread as changed just now, the way `_touch` marks a memo:
+        a list of conversations is ordered by this, so every write a reader
+        would notice calls it."""
+        self.con.execute(
+            "UPDATE conversations SET updated_at=datetime('now') WHERE id=?",
+            (conversation_id,),
+        )
+
+    def _scope(self, conversation_id: int) -> tuple[tuple[int, ...], tuple[str, ...]]:
+        """A thread's memos and their remembered titles, in reading order."""
+        rows = self.con.execute(
+            "SELECT memo_id, memo_title FROM conversation_memos WHERE conversation_id=?"
+            " ORDER BY position",
+            (conversation_id,),
+        ).fetchall()
+        return tuple(r["memo_id"] for r in rows), tuple(r["memo_title"] for r in rows)
+
+    def conversation(self, conversation_id: int) -> Conversation | None:
+        """One thread with its scope, or nothing when that id was never opened."""
+        row = self.con.execute(
+            "SELECT id, title, created_at, updated_at FROM conversations WHERE id=?",
+            (conversation_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        ids, titles = self._scope(conversation_id)
+        return Conversation(
+            row["id"], row["title"], row["created_at"], row["updated_at"], ids, titles
+        )
+
+    def conversation_listings(self, memo_id: int | None = None) -> list[ConversationListing]:
+        """Every thread a list shows, most recently changed first, each one
+        carrying how long it is and when it last moved; narrowed to the threads
+        one memo takes part in when asked. The scope is read per thread after
+        the one listing statement rather than folded into it — a thread has a
+        handful of memos, not thousands, and a GROUP_CONCAT would only have to
+        be split apart again."""
+        clause = ""
+        params: tuple = ()
+        if memo_id is not None:
+            clause = (
+                " WHERE c.id IN (SELECT conversation_id FROM conversation_memos"
+                " WHERE memo_id=?)"
+            )
+            params = (memo_id,)
+        rows = self.con.execute(
+            "SELECT c.id, c.title, c.created_at, c.updated_at,"
+            " (SELECT count(*) FROM messages m WHERE m.conversation_id=c.id) AS n,"
+            " COALESCE(c.updated_at, c.created_at) AS last_at"
+            " FROM conversations c" + clause + " ORDER BY last_at DESC, c.id DESC",
+            params,
+        ).fetchall()
+        listings = []
+        for r in rows:
+            ids, titles = self._scope(r["id"])
+            listings.append(
+                ConversationListing(
+                    Conversation(
+                        r["id"], r["title"], r["created_at"], r["updated_at"], ids, titles
+                    ),
+                    r["n"],
+                    r["last_at"],
+                )
+            )
+        return listings
+
+    def messages(self, conversation_id: int) -> list[Message]:
+        """A thread's turns in the order they were said. Ordered by id, never
+        by the timestamp: both turns of an exchange land in the same second,
+        and sqlite's clock cannot tell them apart."""
+        return [
+            Message(r["role"], r["text"], r["created_at"], r["backend"], r["id"])
+            for r in self.con.execute(
+                "SELECT id, role, text, backend, created_at FROM messages"
+                " WHERE conversation_id=? ORDER BY id",
+                (conversation_id,),
+            )
+        ]
+
+    def add_messages(self, conversation_id: int, turns: Sequence[tuple[str, str, str]]) -> None:
+        """Files turns — (role, text, backend) — onto a thread in one
+        transaction, so a question and its answer are stored together or not
+        at all: a failed call leaves nothing behind, and retrying it cannot
+        leave the question standing twice in the history."""
+        with self.con:
+            self.con.executemany(
+                "INSERT INTO messages (conversation_id, role, text, backend) VALUES (?,?,?,?)",
+                [(conversation_id, role, text, backend) for role, text, backend in turns],
+            )
+            self._touch_conversation(conversation_id)
+
+    def set_conversation_title(self, conversation_id: int, title: str) -> bool:
+        """Names a thread, reporting whether that id was there to name."""
+        with self.con:
+            cur = self.con.execute(
+                "UPDATE conversations SET title=? WHERE id=?", (title, conversation_id)
+            )
+            if cur.rowcount:
+                self._touch_conversation(conversation_id)
+        return bool(cur.rowcount)
+
+    def delete_conversation(self, conversation_id: int) -> bool:
+        """Removes a thread and its turns, reporting whether it was there. One
+        statement, like `delete_memo`: the scope and messages cascade."""
+        with self.con:
+            cur = self.con.execute("DELETE FROM conversations WHERE id=?", (conversation_id,))
+        return bool(cur.rowcount)
 
 
 def _memo(row: sqlite3.Row) -> Memo:

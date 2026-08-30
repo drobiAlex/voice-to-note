@@ -1201,3 +1201,104 @@ def test_checking_a_to_do_off_says_so_and_takes_it_off_the_list(repo, monkeypatc
     with Repository(repo.path) as reopened:
         assert reopened.todos() == []
         assert [t.status for t in reopened.todos(include_done=True)] == ["done"]
+
+
+# --- chat ----------------------------------------------------------------
+
+
+def test_chat_opens_a_conversation_over_the_memos_and_prints_the_answer(monkeypatch, capsys):
+    seen: dict = {}
+    monkeypatch.setattr(
+        services, "start_chat", lambda _r, ids, title="": seen.update(ids=ids, title=title) or 7
+    )
+    monkeypatch.setattr(
+        services,
+        "chat",
+        lambda _r, cid, asked: seen.update(cid=cid, asked=asked)
+        or services.ChatTurn("claude", "Friday."),
+    )
+
+    run(monkeypatch, StubRepo(), "chat", "3,5", "when", "do", "they", "ship?", "--title", "ship")
+
+    out, err = capsys.readouterr()
+    assert seen == {"ids": [3, 5], "title": "ship", "cid": 7, "asked": "when do they ship?"}
+    assert out == "Friday.\n"
+    assert err == "(claude) conversation 7\n\n"
+
+
+def test_chat_continues_a_conversation_by_its_id(monkeypatch, capsys):
+    seen: dict = {}
+    monkeypatch.setattr(
+        services, "start_chat", lambda *a, **k: (_ for _ in ()).throw(AssertionError("opened"))
+    )
+    monkeypatch.setattr(
+        services,
+        "chat",
+        lambda _r, cid, asked: seen.update(cid=cid, asked=asked)
+        or services.ChatTurn("ollama/q", "yes"),
+    )
+
+    run(monkeypatch, StubRepo(), "chat", "-c", "7", "sure?")
+
+    assert seen == {"cid": 7, "asked": "sure?"}
+    assert capsys.readouterr().out == "yes\n"
+
+
+def test_chat_without_a_question_prints_the_thread_as_text_or_json(monkeypatch, capsys):
+    monkeypatch.setattr(services, "chat_text", lambda _r, cid: f"thread {cid}")
+    monkeypatch.setattr(services, "chat_json", lambda _r, cid: f'{{"id": {cid}}}')
+
+    run(monkeypatch, StubRepo(), "chat", "-c", "7")
+    assert capsys.readouterr().out == "thread 7\n"
+
+    run(monkeypatch, StubRepo(), "chat", "-c", "7", "--json")
+    assert capsys.readouterr().out == '{"id": 7}\n'
+
+
+def test_chat_with_nothing_to_go_on_says_what_it_needs(monkeypatch, capsys):
+    with pytest.raises(SystemExit) as err:
+        run(monkeypatch, StubRepo(), "chat")
+    assert "memo ids" in str(err.value.code)
+
+
+def test_chat_refuses_memo_ids_it_cannot_read(monkeypatch, capsys):
+    with pytest.raises(SystemExit) as err:
+        run(monkeypatch, StubRepo(), "chat", "three", "hi")
+    assert "memo ids are numbers" in str(err.value.code)
+
+
+def test_chat_can_rename_or_delete_a_conversation(monkeypatch, capsys):
+    seen: dict = {}
+    monkeypatch.setattr(services, "rename_chat", lambda _r, cid, t: seen.update(renamed=(cid, t)))
+    monkeypatch.setattr(services, "delete_chat", lambda _r, cid: seen.update(deleted=cid))
+
+    run(monkeypatch, StubRepo(), "chat", "-c", "7", "--rename", "pricing")
+    run(monkeypatch, StubRepo(), "chat", "-c", "8", "--delete")
+
+    assert seen == {"renamed": (7, "pricing"), "deleted": 8}
+    assert "conversation 7 renamed" in capsys.readouterr().err
+
+
+def test_chatting_about_a_memo_that_is_not_there_ends_the_command_with_a_message(
+    monkeypatch, capsys
+):
+    def start_chat(_r, ids, title=""):
+        raise services.NotFound("no memo with id 999")
+
+    monkeypatch.setattr(services, "start_chat", start_chat)
+
+    with pytest.raises(SystemExit) as err:
+        run(monkeypatch, StubRepo(), "chat", "999", "hi")
+
+    assert err.value.code == "no memo with id 999"
+
+
+def test_chats_lists_conversations_as_text_or_json_narrowed_to_a_memo(monkeypatch, capsys):
+    monkeypatch.setattr(services, "chats_text", lambda _r, memo_id=None: f"text {memo_id}")
+    monkeypatch.setattr(services, "chats_json", lambda _r, memo_id=None: f"json {memo_id}")
+
+    run(monkeypatch, StubRepo(), "chats")
+    assert capsys.readouterr().out == "text None\n"
+
+    run(monkeypatch, StubRepo(), "chats", "--json", "--memo", "3")
+    assert capsys.readouterr().out == "json 3\n"

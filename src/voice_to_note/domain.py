@@ -159,3 +159,45 @@ class Extraction:
     backend: str
     data: NotesPayload
     created_at: str
+
+
+@dataclass(frozen=True)
+class Message:
+    """One turn in a conversation about memos: who said it, and — for the
+    model's turns — which backend was answering as. The backend is kept per
+    message rather than per conversation because the chain can move a thread
+    from one backend to the next mid-way, and a reader wondering why the tone
+    changed deserves the answer."""
+
+    role: str
+    text: str
+    created_at: str
+    backend: str = ""
+    id: int | None = None
+
+
+@dataclass(frozen=True)
+class Conversation:
+    """A thread about one or several memos, kept so it can be reopened. The
+    memos are the thread's scope: what every question in it is answered
+    from. A memo deleted since drops out of the scope but not out of the
+    thread's history, which is why the titles travel beside the ids."""
+
+    id: int
+    title: str
+    created_at: str
+    updated_at: str | None
+    memo_ids: tuple[int, ...] = ()
+    memo_titles: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ConversationListing:
+    """One conversation as a list of them shows it, the counts travelling
+    with it for the same reason MemoListing's do: a list is drawn all at
+    once, and a query per row for its length would be a query per row on
+    screen."""
+
+    conversation: Conversation
+    messages: int
+    last_at: str

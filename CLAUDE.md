@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```sh
-uv run pytest -q                  # 882 tests, spread over the cores by default
+uv run pytest -q                  # 948 tests, spread over the cores by default
 uv run pytest -m "not ui"         # skip the Textual Pilot tests (tests/test_tui.py)
 uv run pytest tests/test_services.py::test_name   # single test
 uv run mypy src

@@ -1058,3 +1058,102 @@ def test_a_database_from_before_archiving_gains_the_column(tmp_path):
     assert repo.memos() == []
     assert [m.id for m in repo.memos(archived=True)] == [1]
     repo.close()
+
+
+# --- conversations -----------------------------------------------------------
+
+
+def test_a_conversation_remembers_its_memos_in_the_order_they_were_given(repo):
+    a, b = make_memo(repo, filename="a.m4a"), make_memo(repo, filename="b.m4a")
+    cid = repo.create_conversation([b, a], ["B", "A"], title="pricing")
+    convo = repo.conversation(cid)
+    assert (convo.title, convo.memo_ids, convo.memo_titles) == ("pricing", (b, a), ("B", "A"))
+    assert convo.updated_at is None
+
+
+def test_an_unknown_conversation_is_none(repo):
+    assert repo.conversation(99) is None
+
+
+def test_messages_come_back_in_the_order_they_were_said(repo):
+    cid = repo.create_conversation([make_memo(repo)], ["memo"])
+    repo.add_messages(cid, [("user", "when?", ""), ("assistant", "friday", "claude")])
+    repo.add_messages(cid, [("user", "sure?", ""), ("assistant", "yes", "ollama/q")])
+    turns = repo.messages(cid)
+    assert [(m.role, m.text, m.backend) for m in turns] == [
+        ("user", "when?", ""),
+        ("assistant", "friday", "claude"),
+        ("user", "sure?", ""),
+        ("assistant", "yes", "ollama/q"),
+    ]
+    assert all(m.id is not None for m in turns)
+    assert repo.conversation(cid).updated_at is not None
+
+
+def test_a_message_with_a_role_nobody_knows_is_refused(repo):
+    cid = repo.create_conversation([make_memo(repo)], ["memo"])
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.add_messages(cid, [("system", "hi", "")])
+    assert repo.messages(cid) == []
+
+
+def test_deleting_a_memo_drops_it_from_the_scope_but_keeps_the_history(repo):
+    a, b = make_memo(repo, filename="a.m4a"), make_memo(repo, filename="b.m4a")
+    cid = repo.create_conversation([a, b], ["A", "B"])
+    repo.add_messages(cid, [("user", "hi", ""), ("assistant", "hello", "claude")])
+    repo.delete_memo(a)
+    convo = repo.conversation(cid)
+    assert convo.memo_ids == (b,)
+    assert len(repo.messages(cid)) == 2
+
+
+def test_deleting_a_conversation_takes_its_turns_and_scope_with_it(repo):
+    cid = repo.create_conversation([make_memo(repo)], ["memo"])
+    repo.add_messages(cid, [("user", "hi", "")])
+    assert repo.delete_conversation(cid) is True
+    assert repo.delete_conversation(cid) is False
+    assert repo.messages(cid) == []
+    assert repo.con.execute("SELECT count(*) FROM conversation_memos").fetchone()[0] == 0
+
+
+def test_listings_carry_the_length_and_put_the_latest_thread_first(repo):
+    memo = make_memo(repo)
+    first = repo.create_conversation([memo], ["memo"], title="first")
+    second = repo.create_conversation([memo], ["memo"], title="second")
+    # both opened long ago, so the one that has since moved is the one on top
+    repo.con.execute("UPDATE conversations SET created_at='2026-01-01 00:00:00'")
+    repo.add_messages(first, [("user", "a", ""), ("assistant", "b", "claude")])
+    listings = repo.conversation_listings()
+    assert [(row.conversation.id, row.messages) for row in listings] == [(first, 2), (second, 0)]
+    assert listings[0].last_at == listings[0].conversation.updated_at
+    assert listings[1].last_at == listings[1].conversation.created_at
+
+
+def test_listings_can_be_narrowed_to_the_threads_one_memo_is_in(repo):
+    a, b = make_memo(repo, filename="a.m4a"), make_memo(repo, filename="b.m4a")
+    both = repo.create_conversation([a, b], ["A", "B"])
+    only_b = repo.create_conversation([b], ["B"])
+    assert [row.conversation.id for row in repo.conversation_listings(memo_id=a)] == [both]
+    assert {row.conversation.id for row in repo.conversation_listings(memo_id=b)} == {both, only_b}
+
+
+def test_a_conversation_can_be_renamed_and_rescoped(repo):
+    a, b = make_memo(repo, filename="a.m4a"), make_memo(repo, filename="b.m4a")
+    cid = repo.create_conversation([a], ["A"])
+    assert repo.set_conversation_title(cid, "renamed") is True
+    assert repo.set_conversation_title(99, "nope") is False
+    repo.set_conversation_memos(cid, [b, a], ["B", "A"])
+    convo = repo.conversation(cid)
+    assert (convo.title, convo.memo_ids) == ("renamed", (b, a))
+
+
+def test_an_older_database_gains_the_conversation_tables_on_open(tmp_path):
+    path = tmp_path / "old.db"
+    con = sqlite3.connect(path)
+    con.executescript(PRE_ARCHIVE_SCHEMA)
+    con.close()
+    repo = Repository(path)
+    try:
+        assert repo.conversation_listings() == []
+    finally:
+        repo.close()
