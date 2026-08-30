@@ -484,3 +484,76 @@ def test_a_recording_nobody_can_watch_is_not_measured_at_all(monkeypatch):
         run(monkeypatch, StubRepo(), "record")
 
     assert seen["levels"] is None
+
+
+# --- the menu bar recorder's lifecycle, as setup drives it -----------------
+
+
+def test_the_recorder_and_a_recording_are_looked_for_by_their_process_names(monkeypatch):
+    seen: list = []
+
+    def run(cmd, **kwargs):
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, returncode=0)
+
+    monkeypatch.setattr(capture.subprocess, "run", run)
+
+    assert capture.menubar_running() is True
+    assert capture.recording_underway() is True
+    assert seen == [["pgrep", "-x", "vtn-menubar"], ["pgrep", "-x", "vtn-capture"]]
+
+
+def test_a_recorder_that_is_not_there_reads_as_not_running(monkeypatch):
+    monkeypatch.setattr(
+        capture.subprocess,
+        "run",
+        lambda cmd, **k: subprocess.CompletedProcess(cmd, returncode=1),
+    )
+
+    assert capture.menubar_running() is False
+
+
+def test_quitting_the_recorder_waits_until_it_is_actually_gone(monkeypatch):
+    # `open` raises an app that is still up, so relaunching before the old
+    # process died would put the stale binary back wearing the new build's name
+    alive = iter([True, True, False])
+    seen: list = []
+    monkeypatch.setattr(
+        capture.subprocess,
+        "run",
+        lambda cmd, **k: seen.append(cmd) or subprocess.CompletedProcess(cmd, returncode=0),
+    )
+    monkeypatch.setattr(capture, "menubar_running", lambda: next(alive))
+    monkeypatch.setattr(capture.time, "sleep", lambda _s: None)
+
+    capture.quit_menubar()
+
+    assert seen == [["pkill", "-x", "vtn-menubar"]]
+    assert next(alive, "drained") == "drained"
+
+
+def test_a_recorder_that_will_not_die_does_not_hang_the_install(monkeypatch):
+    monkeypatch.setattr(
+        capture.subprocess,
+        "run",
+        lambda cmd, **k: subprocess.CompletedProcess(cmd, returncode=0),
+    )
+    monkeypatch.setattr(capture, "menubar_running", lambda: True)
+    monkeypatch.setattr(capture.time, "sleep", lambda _s: None)
+    clock = iter(range(100))
+    monkeypatch.setattr(capture.time, "monotonic", lambda: float(next(clock)))
+
+    capture.quit_menubar(patience_s=3.0)
+
+
+def test_the_recorder_is_opened_as_the_app_bundle(monkeypatch):
+    seen: dict = {}
+    monkeypatch.setattr(
+        capture.subprocess,
+        "run",
+        lambda cmd, **k: seen.update(cmd=cmd) or subprocess.CompletedProcess(cmd, returncode=0),
+    )
+
+    capture.open_menubar(Path("/x/VTN Recorder.app"))
+
+    assert seen["cmd"] == ["open", "/x/VTN Recorder.app"]

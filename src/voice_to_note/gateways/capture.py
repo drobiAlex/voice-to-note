@@ -1,6 +1,7 @@
 import signal
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -292,3 +293,38 @@ class TrackReader:
     def advance(self, frames: int) -> None:
         """Gives up on ever reading a stretch again, once it has been kept."""
         self._taken += max(0, frames)
+
+
+def menubar_running() -> bool:
+    """Whether the menu bar recorder is up right now. Asked by name rather
+    than by pid file: the app is launched by the Finder and keeps no pid
+    anywhere this code could read."""
+    return subprocess.run(["pgrep", "-x", "vtn-menubar"], capture_output=True).returncode == 0
+
+
+def recording_underway() -> bool:
+    """Whether a meeting is being taped right now, by the one process that
+    only exists while one is. Asked before the recorder is restarted: quitting
+    it mid-meeting would take the capture down with it."""
+    return subprocess.run(["pgrep", "-x", "vtn-capture"], capture_output=True).returncode == 0
+
+
+def quit_menubar(patience_s: float = 5.0) -> None:
+    """Asks the menu bar recorder to quit and waits until it is actually gone.
+    The wait is the point: `open` merely raises an app that is still running,
+    so relaunching before the old process has died would put the stale binary
+    back in the menu bar wearing the new build's name. A recorder that will
+    not die within patience is left to it — setup should not hang an install
+    on a wedged process — and `open` then raises it, which is no worse than
+    not having tried."""
+    subprocess.run(["pkill", "-x", "vtn-menubar"], capture_output=True)
+    deadline = time.monotonic() + patience_s
+    while menubar_running() and time.monotonic() < deadline:
+        time.sleep(0.1)
+
+
+def open_menubar(app: Path) -> None:
+    """Starts the menu bar recorder, handed to the Finder for the same reason
+    `vtn menubar` hands it there: opened as an app it outlives this process,
+    and macOS attributes the recording permissions to the bundle."""
+    subprocess.run(["open", str(app)], check=False)
