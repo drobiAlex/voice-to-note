@@ -410,3 +410,40 @@ L513–558) were then read from the file and stand.
 Not sourceable to Apple, flagged: the Dock's `autohide-delay` 0.2 s / `autohide-time-modifier`
 0.5 (community-measured), current HIG hover wording (the HIG site is client-rendered), and
 "a pure window move is cheaper than a resize" (sound inference, no Apple sentence).
+
+---
+
+# Part three: where the three choosers sit on the disc
+
+The first cut ranged the choosers up the left arc — an angle-convention bug — and even
+corrected, an arc of three needed grounding. Two more researchers; the numbers below are
+theirs, and the shipped layout follows them exactly.
+
+- **One middle, said with scale.** Apple never ranges peer choosers around a record
+  button: QuickTime and ⇧⌘5 put one prominent Record beside one Options pop-up; Voice
+  Memos shows Record alone (Apple support pages, HIG *Buttons*: "keep the number of
+  prominent buttons to one or two"; "use style — not size — to distinguish" among peers,
+  scale to subordinate). The record button grew to 80 pt; the choosers stay one size.
+- **The lower arc, 55° apart, middle straight down.** Blender's pie menus place a third
+  item south ("even with three items, the menu seems to still be 'in order' reading left
+  to right"); Kurtenbach: on-axis directions are hit faster and more surely, so the
+  most-used chooser (project) is at 270°. Three at 120° is rotational symmetry — four
+  peers on a wheel (NN/g: "radial balance leads the eye to the center"), rejected.
+- **38 pt drawn inside a 44 pt hit circle.** HIG: "a button needs a hit region of at
+  least 44×44 pt" — with no exception for a pointer. Drawn-vs-hit decoupling gives the
+  minimum without visual bulk; hit circles keep ~20 pt of air (WCAG 2.5.8's spacing rule
+  and the HIG's 12 pt padding both cleared). Glyphs 18 pt SF Symbols.
+- **State above, options below.** The caption (Record / elapsed / Processing …) moved
+  over the button, leaving the lower hemisphere to the choosers — the grouping is done
+  by proximity, not by borders (HIG *Layout*: group with negative space).
+- Flagged for later: Hopkins found even counts beat odd in radial layouts, and Apple,
+  Teams and Loom all fold microphone + sound source into one "audio" options surface. If
+  a fourth chooser ever arrives, go to the compass (W/E/S, top reserved); if the disc
+  ever feels busy, two satellites (audio · project) at 225°/315° is the researched
+  fallback.
+
+Sources: Callahan/Hopkins/Weiser/Shneiderman CHI '88 · Hopkins DDJ 1991 · Kurtenbach
+1993 · Blender `interface.cc` + manual · MrKai77/Loop `RadialLayout.swift` · Apple AVCam
+`MainToolbar.swift` · HIG Buttons / Accessibility / Layout / Pop-up buttons / Toolbars /
+SF Symbols / Offering help · Apple support: QuickTime, ⇧⌘5, Voice Memos, Camera ·
+NN/g visual-design principles & icon usability · WCAG 2.5.8 · asktog on Fitts.

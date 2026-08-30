@@ -2695,10 +2695,16 @@ final class RecorderPuckView: NSView, Dockable {
     private static let rim = NSColor.white.withAlphaComponent(0.09)
     private static let rollingRim = NSColor.systemRed.withAlphaComponent(0.7)
 
-    /// Where the three small buttons sit: on an arc below the middle, at
-    /// clockwise-from-twelve angles, far enough out to clear the caption.
-    private static let arcRadius: CGFloat = 72
-    private static let arcAngles: [CGFloat] = [212, 270, 328]
+    /// Where the three small buttons sit: on the lower arc, 55 degrees apart
+    /// with the middle one straight down. Down is an axis, and axes are hit
+    /// more surely than the directions between them; 55 degrees is near enough
+    /// for the three to read as one subordinate group, and far enough that
+    /// their hit circles keep twenty points of air between them. Three at 120
+    /// degrees would be rotational symmetry — four peers on a wheel, when the
+    /// point of the widget is that it has one middle. Angles are compass-free:
+    /// zero is east, anticlockwise, the way the mathematics is written.
+    private static let arcRadius: CGFloat = 70
+    private static let arcAngles: [CGFloat] = [215, 270, 325]
 
     private let body = CAShapeLayer()
     private let record = RecordButton()
@@ -2775,14 +2781,17 @@ final class RecorderPuckView: NSView, Dockable {
     }
 
     private func layOut() {
-        let centre = NSPoint(x: bounds.midX, y: bounds.midY + 10)
+        let centre = NSPoint(x: bounds.midX, y: bounds.midY)
         let side = RecordButton.side
         record.frame = NSRect(x: centre.x - side / 2, y: centre.y - side / 2, width: side, height: side)
         record.target = self
         record.action = #selector(pressed)
         addSubview(record)
 
-        caption.frame = NSRect(x: centre.x - 60, y: centre.y - side / 2 - 19, width: 120, height: 14)
+        // the words above the button rather than under it: the lower half of
+        // the disc belongs to the three choosers, and the state is glanced at
+        // where a clock is — up
+        caption.frame = NSRect(x: centre.x - 60, y: centre.y + side / 2 + 7, width: 120, height: 14)
         caption.alignment = .center
         addSubview(caption)
 
@@ -2791,11 +2800,11 @@ final class RecorderPuckView: NSView, Dockable {
         ) {
             let angle = degrees * .pi / 180
             let at = NSPoint(
-                x: bounds.midX + RecorderPuckView.arcRadius * sin(angle),
-                y: bounds.midY + RecorderPuckView.arcRadius * cos(angle)
+                x: bounds.midX + RecorderPuckView.arcRadius * cos(angle),
+                y: bounds.midY + RecorderPuckView.arcRadius * sin(angle)
             )
-            let small = ChoiceButton.side
-            button.frame = NSRect(x: at.x - small / 2, y: at.y - small / 2, width: small, height: small)
+            let hit = ChoiceButton.hit
+            button.frame = NSRect(x: at.x - hit / 2, y: at.y - hit / 2, width: hit, height: hit)
             button.target = self
             button.action = #selector(choose(_:))
             addSubview(button)
@@ -3013,7 +3022,7 @@ final class RecorderPuckView: NSView, Dockable {
 /// it, inside a faint ring. Drawn rather than pictured, so the pressed and
 /// disabled states are the same shape a shade different and not a second image.
 final class RecordButton: NSButton {
-    static let side: CGFloat = 72
+    static let side: CGFloat = 80
     private static let ring = NSColor.white.withAlphaComponent(0.14)
 
     /// Whether the tape is rolling, which is what decides the shape.
@@ -3051,7 +3060,7 @@ final class RecordButton: NSButton {
             let square = bounds.insetBy(dx: bounds.width * 0.31, dy: bounds.height * 0.31)
             NSBezierPath(roundedRect: square, xRadius: 5, yRadius: 5).fill()
         } else {
-            NSBezierPath(ovalIn: bounds.insetBy(dx: 9, dy: 9)).fill()
+            NSBezierPath(ovalIn: bounds.insetBy(dx: 10, dy: 10)).fill()
         }
     }
 }
@@ -3060,8 +3069,14 @@ final class RecordButton: NSButton {
 /// is made of. What it is set to is on its tooltip and in its spoken name — a
 /// disc has no room for three device names, and the menu it drops says the
 /// same thing with a tick.
+///
+/// The circle drawn is smaller than the button that takes the click: what a
+/// pointer must hit is held to the platform's forty-four points, and what the
+/// eye weighs against the record button is thirty-eight — dominance is said
+/// with scale, and a hit region says nothing out loud.
 final class ChoiceButton: NSButton {
-    static let side: CGFloat = 34
+    static let hit: CGFloat = 44
+    static let side: CGFloat = 38
     private static let face = NSColor.white.withAlphaComponent(0.06)
     private static let pressed = NSColor.white.withAlphaComponent(0.13)
     private static let rim = NSColor.white.withAlphaComponent(0.1)
@@ -3075,7 +3090,7 @@ final class ChoiceButton: NSButton {
     init(symbol name: String, label: String) {
         self.label = label
         let base = NSImage(systemSymbolName: name, accessibilityDescription: label)
-        let size = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+        let size = NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)
         symbol = base?.withSymbolConfiguration(
             size.applying(.init(paletteColors: [NSColor.white.withAlphaComponent(0.85)]))
         )
@@ -3109,7 +3124,8 @@ final class ChoiceButton: NSButton {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let face = NSBezierPath(ovalIn: bounds.insetBy(dx: 0.5, dy: 0.5))
+        let drawn = (ChoiceButton.hit - ChoiceButton.side) / 2 + 0.5
+        let face = NSBezierPath(ovalIn: bounds.insetBy(dx: drawn, dy: drawn))
         (isHighlighted ? ChoiceButton.pressed : ChoiceButton.face).setFill()
         face.fill()
         ChoiceButton.rim.setStroke()
