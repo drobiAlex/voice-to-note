@@ -88,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // the same reason the shimmer does. Emptying them on every state
             // that is not recording is also what makes each recording start
             // from silence rather than from whatever the last one ended on
+            puckView?.show(state: state, elapsed: elapsed())
             if state == .recording {
                 // a preview keeps its menu through every state, where a
                 // recording gives it up for the panel: that menu is the only
@@ -139,6 +140,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var panel: NSPanel?
     private var panelView: RecordingPanelView?
 
+    /// The recorder puck — the button and the three pickers as a window that
+    /// can be left anywhere — and the view in it. It lives alongside the island
+    /// rather than instead of it: the island is the meters, watched during a
+    /// recording; the puck is the controls, kept where the hand goes.
+    private var puck: NSPanel?
+    private var puckView: RecorderPuckView?
+
+    /// Where the puck lives and how it moves between places; it owns nothing
+    /// the two above do not, and goes when they go.
+    private var puckDock: Dock?
+
     /// How long a panel that opened itself stays up: long enough to read the
     /// header and watch both meters move, and over before it is in the way of
     /// anything. What it is for is a moment's confirmation that the tape is
@@ -181,6 +193,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !previewing {
             askToNotify()
             refresh()
+            // a puck left in a corner is there again at the next launch; one
+            // never moved is not opened unasked under the status item
+            if floatingRecorder, rememberedPlace != .hanging {
+                openPuck()
+            }
         }
     }
 
@@ -224,6 +241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             button.image = shimmerFrames[shimmerFrame]
             button.attributedTitle = NSAttributedString(string: "")
         }
+        puckView?.show(state: state, elapsed: elapsed())
     }
 
     /// A fresh reading from each side. These are the only clock the waveforms
@@ -296,6 +314,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func startTicking() {
         let ticker = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.show() }
+        // a tenth of a second's slack, which is what lets the system fire this
+        // alongside whatever else is due rather than waking for it alone
+        ticker.tolerance = 0.1
         // the common modes, or the clock would freeze for as long as a menu is
         // held open — which is exactly when somebody is looking at it
         RunLoop.main.add(ticker, forMode: .common)
@@ -382,6 +403,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(note(state == .recording ? "Recording \(elapsed())" : "Starting …"))
         case .processing:
             menu.addItem(note("Processing memo …"))
+        }
+        menu.addItem(.separator())
+        // the switch is offered in every state; the puck's own lines only when
+        // it is switched on, and the way back only once it has somewhere to
+        // come back from
+        let floating = action("Floating Recorder", #selector(toggleFloating))
+        floating.state = floatingRecorder ? .on : .off
+        menu.addItem(floating)
+        if floatingRecorder {
+            menu.addItem(action("Show Recorder", #selector(openPuckFromMenu), key: "t"))
+            if rememberedPlace != .hanging || puckDock?.state.isHanging == false {
+                menu.addItem(action("Return Recorder to Menu Bar", #selector(returnPuck)))
+            }
         }
         menu.addItem(.separator())
         menu.addItem(action("Quit", #selector(quit), key: "q"))
@@ -476,26 +510,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         view.show(system: systemLevels, microphone: microphoneLevels)
         view.showElapsed(elapsed())
         view.showFooter(system: systemLevels, microphone: microphoneLevels)
-        let panel = NSPanel(
-            contentRect: view.frame, styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered, defer: false
-        )
-        panel.contentView = view
-        panel.level = .statusBar
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.isReleasedWhenClosed = false
-        panel.hidesOnDeactivate = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        let panel = floating(view, shadow: true)
         self.panel = panel
         self.panelView = view
         place(panel)
-        arrive(panel, view, reduceMotion: reduceMotion)
+        arrive(panel, reduceMotion: reduceMotion) { view.appear() }
         // the button stays lit for as long as the panel is up, which is the only
         // thing tying the window under the menu bar to the item it came out of
         statusItem.button?.highlight(true)
         watchForClicks()
+    }
+
+    /// A window for a view to float in under the menu bar, built the same way
+    /// for the island and for the puck: borderless, never activating, at the
+    /// status bar's own level, on every space. The island asks the window for
+    /// its shadow; the puck draws its own, because a shadow a window works out
+    /// from transparent pixels is worked out again every time they change.
+    private func floating(_ view: NSView, shadow: Bool, offscreen: Bool = false) -> NSPanel {
+        let panel: NSPanel
+        if offscreen {
+            panel = DockPanel(
+                contentRect: view.frame, styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered, defer: false
+            )
+            // this window slides on its own account; AppKit's guess at an
+            // animation for it would only be something for that slide to fight
+            panel.animationBehavior = .none
+        } else {
+            panel = NSPanel(
+                contentRect: view.frame, styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered, defer: false
+            )
+        }
+        panel.contentView = view
+        panel.level = .statusBar
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = shadow
+        panel.isReleasedWhenClosed = false
+        panel.hidesOnDeactivate = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        return panel
     }
 
     /// The panel put on screen as the status item growing downwards rather than
@@ -509,14 +564,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Reduce Motion gets the panel and none of this. The opening itself still
     /// happens either way: a window saying the tape is rolling is information,
     /// and it is only the way it arrives that is decoration.
-    private func arrive(_ panel: NSPanel, _ view: RecordingPanelView, reduceMotion: Bool) {
+    private func arrive(_ panel: NSPanel, reduceMotion: Bool, appear: () -> Void) {
         guard !reduceMotion else {
             panel.orderFrontRegardless()
             return
         }
         panel.alphaValue = 0
         panel.orderFrontRegardless()
-        view.appear()
+        appear()
         NSAnimationContext.runAnimationGroup { context in
             context.duration = RecordingPanelView.fadingUp
             context.timingFunction = RecordingPanelView.easing
@@ -536,6 +591,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// rather than a half-faded one caught and turned round.
     private func closePanel() {
         stopGlancing()
+        let closing = panel
+        panel = nil
+        panelView = nil
+        stopWatchingClicks()
+        vanish(closing)
+    }
+
+    /// The monitors taken down once nothing is left for them to close, and the
+    /// button's light with them: it is lit for whichever window is up, and goes
+    /// out with the last of them.
+    private func stopWatchingClicks() {
+        guard panel == nil, puckDock?.state.isHanging != true else { return }
         if let clicksElsewhere {
             NSEvent.removeMonitor(clicksElsewhere)
         }
@@ -545,10 +612,133 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         clicksElsewhere = nil
         clicksHere = nil
         statusItem.button?.highlight(false)
-        let closing = panel
-        panel = nil
-        panelView = nil
+    }
+
+    /// Whichever floating window is up, closed. What a click somewhere else
+    /// means is the same for both.
+    private func closeFloating() {
+        closePanel()
+        // only a hanging puck goes on a click elsewhere: one that has been put
+        // somewhere is a window somebody expects to find there
+        if puckDock?.state.isHanging == true {
+            closePuck()
+        }
+    }
+
+    // --- the puck ---------------------------------------------------------------
+
+    /// The puck opened from the menu — or, if it is already up, brought to
+    /// where it can be used: out of its edge, or to the front. This is the way
+    /// in that needs no pointer.
+    @objc private func openPuckFromMenu() {
+        guard floatingRecorder else { return }
+        if let puckDock {
+            puckDock.reveal()
+            return
+        }
+        openPuck()
+    }
+
+    /// The floating recorder switched on or off. Off takes the puck down and
+    /// the menu is the one it was; on opens the puck where it was last left,
+    /// or under the status item for a first time.
+    @objc private func toggleFloating() {
+        let wanted = !floatingRecorder
+        UserDefaults.standard.set(wanted, forKey: Key.floating)
+        if wanted {
+            openPuck()
+        } else {
+            closePuck()
+        }
+    }
+
+    /// The puck's place forgotten and the puck, if it is up, hung under the
+    /// status item again — the way back for a window carried somewhere that
+    /// turned out not to suit.
+    @objc private func returnPuck() {
+        UserDefaults.standard.removeObject(forKey: Key.puckPlace)
+        guard puck != nil else { return }
+        closePuck()
+        openPuck()
+    }
+
+    /// The puck put on screen: back where it was left, or under the status item
+    /// for one that has never been moved. Its button and pickers go through the
+    /// same calls the menu goes through, and a preview's go nowhere at all —
+    /// they move the preview from one scenario to the next, which is what a
+    /// button pressed in a preview should be seen to do.
+    private func openPuck(remembering: Bool = true, place: DockPlace? = nil) {
+        guard puck == nil else { return }
+        closePanel()
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let view = RecorderPuckView(reduceMotion: reduceMotion)
+        view.onRecord = { [weak self] in
+            guard let self else { return }
+            if self.previewing { self.showPreview(.voices) } else { self.startRecording() }
+        }
+        view.onStop = { [weak self] in
+            guard let self else { return }
+            if self.previewing { self.showPreview(.processing) } else { self.stopRecording() }
+        }
+        view.onProject = { [weak self] name in self?.pickProject(name) }
+        view.onInput = { [weak self] device in self?.pickInput(device) }
+        view.onOutput = { [weak self] device in self?.pickOutput(device) }
+        let panel = floating(view, shadow: false, offscreen: true)
+        self.puck = panel
+        self.puckView = view
+        feedPuck()
+        view.show(state: state, elapsed: elapsed())
+        let dock = Dock(panel: panel, view: view, inset: RecorderPuckView.inset, reduceMotion: reduceMotion)
+        // carried off, the puck is no longer the menu-like thing a click
+        // elsewhere dismisses, and the button it hung from lets go of it
+        dock.onLeftHanging = { [weak self] in
+            self?.stopWatchingClicks()
+        }
+        if remembering {
+            dock.onPlaced = { place in
+                UserDefaults.standard.set(place.encoded, forKey: Key.puckPlace)
+            }
+        }
+        self.puckDock = dock
+        if dock.restore(place ?? (remembering ? rememberedPlace : .hanging)) {
+            return
+        }
+        self.place(panel)
+        arrive(panel, reduceMotion: reduceMotion) { view.appear() }
+        statusItem.button?.highlight(true)
+        watchForClicks()
+    }
+
+    private func closePuck() {
+        let closing = puck
+        puck = nil
+        puckView = nil
+        puckDock = nil
+        stopWatchingClicks()
         vanish(closing)
+    }
+
+    /// The pickers given what the menu would be given: the lists fetched last,
+    /// and the choices as remembered. A preview has no recorder to ask, so it
+    /// is handed a made-up Mac — two of everything, so the pickers have
+    /// something to pick between.
+    private func feedPuck() {
+        guard let puckView else { return }
+        if previewing {
+            puckView.showProjects([("work", 12), ("personal", 3), ("other", 41)], chosen: "work")
+            puckView.showInputs([
+                AudioDevice(uid: "mic", name: "MacBook Pro Microphone"),
+                AudioDevice(uid: "pods", name: "AirPods Pro"),
+            ], chosen: nil)
+            puckView.showOutputs([
+                AudioDevice(uid: "spk", name: "MacBook Pro Speakers"),
+                AudioDevice(uid: "disp", name: "Studio Display"),
+            ], chosen: nil)
+            return
+        }
+        puckView.showProjects(projects, chosen: chosenProject)
+        puckView.showInputs(devices?.inputs, chosen: chosenInput)
+        puckView.showOutputs(devices?.outputs, chosen: chosenOutput)
     }
 
     /// The window taken off screen, faded first wherever anything is allowed to
@@ -585,7 +775,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// status item owned a menu until a line ago and a menu opens no panel —
     /// and the guard is what keeps that true of any other way into this.
     private func showBriefly() {
-        guard panel == nil else { return }
+        // nor over a puck already saying the tape is rolling: a second window
+        // opening beside it would be the same news told twice
+        guard panel == nil, puck == nil else { return }
         openPanel()
         guard panel != nil else { return }
         let glance = Timer(timeInterval: AppDelegate.glance, repeats: false) { [weak self] _ in
@@ -635,15 +827,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// item's own window through, or clicking the button a second time would
     /// close the panel a moment before the button's action reopened it.
     private func watchForClicks() {
+        guard clicksElsewhere == nil, clicksHere == nil else { return }
         let elsewhere: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
         clicksElsewhere = NSEvent.addGlobalMonitorForEvents(matching: elsewhere) { [weak self] _ in
-            self?.closePanel()
+            self?.closeFloating()
         }
         clicksHere = NSEvent.addLocalMonitorForEvents(matching: elsewhere) { [weak self] event in
             guard let self else { return event }
-            let ours = [self.panel, self.statusItem.button?.window]
+            let ours = [self.panel, self.puck, self.statusItem.button?.window]
             if !ours.contains(where: { $0 === event.window }) {
-                self.closePanel()
+                self.closeFloating()
             }
             return event
         }
@@ -724,6 +917,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         static let outputName = "outputDeviceName"
         static let inputUID = "inputDeviceUID"
         static let inputName = "inputDeviceName"
+        static let puckPlace = "recorderPlace"
+        static let floating = "floatingRecorder"
+    }
+
+    /// Whether the floating recorder is wanted at all. Off — the default — and
+    /// this app is the menu bar item it always was; on, and the puck opens at
+    /// launch wherever it was left, and the menu offers to show it.
+    private var floatingRecorder: Bool {
+        UserDefaults.standard.bool(forKey: Key.floating)
+    }
+
+    /// Where the puck was last left. Under the status item until somebody
+    /// carries it somewhere, and there ever after — a window put in a corner is
+    /// a window expected to be in that corner next time.
+    private var rememberedPlace: DockPlace {
+        DockPlace(encoded: UserDefaults.standard.string(forKey: Key.puckPlace) ?? "") ?? .hanging
     }
 
     private var chosenProject: String {
@@ -755,15 +964,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func chooseProject(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
-        UserDefaults.standard.set(name, forKey: Key.project)
+        pickProject(name)
     }
 
     @objc private func chooseOutput(_ sender: NSMenuItem) {
-        remember(sender.representedObject as? AudioDevice, Key.outputUID, Key.outputName)
+        pickOutput(sender.representedObject as? AudioDevice)
     }
 
     @objc private func chooseInput(_ sender: NSMenuItem) {
-        remember(sender.representedObject as? AudioDevice, Key.inputUID, Key.inputName)
+        pickInput(sender.representedObject as? AudioDevice)
+    }
+
+    /// The choices themselves, reached from the menu and from the puck alike,
+    /// and each face told about a choice made on the other. A preview's choices
+    /// stop here: its lists are made up, and a made-up microphone remembered as
+    /// somebody's own would be the next real recording dying on the spot.
+    private func pickProject(_ name: String) {
+        guard !previewing else { return }
+        UserDefaults.standard.set(name, forKey: Key.project)
+        feedPuck()
+    }
+
+    private func pickOutput(_ device: AudioDevice?) {
+        guard !previewing else { return }
+        remember(device, Key.outputUID, Key.outputName)
+        feedPuck()
+    }
+
+    private func pickInput(_ device: AudioDevice?) {
+        guard !previewing else { return }
+        remember(device, Key.inputUID, Key.inputName)
+        feedPuck()
     }
 
     // --- keeping the pickers' lists to hand ------------------------------------
@@ -784,6 +1015,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.projects = projects
                 self.devices = devices
                 self.refreshing = false
+                self.feedPuck()
             }
         }
     }
@@ -1045,6 +1277,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// arrange for it to go wrong.
     private enum Scenario: CaseIterable {
         case idle
+        case puck
+        case puckTucked
         case starting
         case voices
         case microphoneDead
@@ -1054,6 +1288,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var title: String {
             switch self {
             case .idle: return "Idle"
+            case .puck: return "Idle — recorder open"
+            case .puckTucked: return "Idle — recorder tucked into the right edge"
             case .starting: return "Starting"
             case .voices: return "Recording — voices"
             case .microphoneDead: return "Recording — microphone dead"
@@ -1069,7 +1305,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         /// than a picture of one.
         var state: RecorderState {
             switch self {
-            case .idle: return .idle
+            case .idle, .puck, .puckTucked: return .idle
             case .starting: return .starting
             case .voices, .microphoneDead, .bothSilent: return .recording
             case .processing: return .processing
@@ -1085,8 +1321,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .voices: return (.talking(seed: 7), .talking(seed: 31))
             case .microphoneDead: return (.talking(seed: 7), .quiet(seed: 5))
             case .bothSilent: return (.quiet(seed: 11), .quiet(seed: 5))
-            case .idle, .starting, .processing: return nil
+            case .idle, .puck, .puckTucked, .starting, .processing: return nil
             }
+        }
+
+        var isPuck: Bool {
+            self == .puck || self == .puckTucked
+        }
+
+        /// Where the scenario's puck is put, on the main screen: tucked into
+        /// an edge to be hovered out of it, or hanging like any other.
+        var puckPlace: DockPlace {
+            guard self == .puckTucked, let main = NSScreen.main,
+                  let display = Dock.number(of: main) else { return .hanging }
+            return .tucked(.right, display: display, along: 0.5)
         }
     }
 
@@ -1136,6 +1384,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let sides = scenario.sides else {
             state = scenario.state
             show()
+            // the puck by the door it is opened from; it stays up through the
+            // scenarios after this one, showing each, the way a real one would
+            if scenario.isPuck {
+                openPuck(remembering: false, place: scenario.puckPlace)
+            }
             return
         }
         // through `.starting` on the way rather than straight to `.recording`,
@@ -2312,7 +2565,7 @@ final class RecordingPanelView: NSView {
     ///
     /// This view is unflipped, so the top edge is half the height above the
     /// middle the transform turns about.
-    private static func scaled(_ scale: CGFloat, about bounds: CGRect) -> CATransform3D {
+    static func scaled(_ scale: CGFloat, about bounds: CGRect) -> CATransform3D {
         var transform = CATransform3DIdentity
         transform = CATransform3DTranslate(transform, 0, bounds.height / 2, 0)
         transform = CATransform3DScale(transform, scale, scale, 1)
@@ -2411,6 +2664,955 @@ final class RecordingPanelView: NSView {
         field.lineBreakMode = .byTruncatingTail
         return field
     }
+}
+
+// MARK: - the recorder puck
+
+/// The recorder as a small disc of its own: the button that starts the tape
+/// and stops it in the middle, and along the lower rim three small buttons for
+/// the things a recording is made of — the microphone, the project it is filed
+/// under, the sound it takes from the Mac — each opening a menu of what there
+/// is to choose. It exists because the menu closes on the first click and lives
+/// under one status item, and a control somebody uses at the start of every
+/// call wants to be where they left it: in a corner, tucked into an edge,
+/// always there.
+///
+/// It is a second face of the recorder, never a second recorder: it says what
+/// the app's own state is and asks for what the menu asks for, through the
+/// same calls, so the two can never disagree about which microphone is chosen
+/// or whether the tape is rolling.
+///
+/// A disc rather than a slab because a disc has no orientation: tucked into
+/// any of the four edges, the same round rim shows, and a round window in a
+/// corner reads as a thing placed there rather than a dialog that wandered.
+/// Dark and solid, the island's own colour, for the island's own reasons.
+final class RecorderPuckView: NSView, Dockable {
+    static let disc: CGFloat = 200
+    static let inset: CGFloat = 24
+    static var side: CGFloat { disc + inset * 2 }
+
+    private static let ground = NSColor(srgbRed: 30 / 255, green: 30 / 255, blue: 33 / 255, alpha: 1)
+    private static let rim = NSColor.white.withAlphaComponent(0.09)
+    private static let rollingRim = NSColor.systemRed.withAlphaComponent(0.7)
+
+    /// Where the three small buttons sit: on the lower arc, 55 degrees apart
+    /// with the middle one straight down. Down is an axis, and axes are hit
+    /// more surely than the directions between them; 55 degrees is near enough
+    /// for the three to read as one subordinate group, and far enough that
+    /// their hit circles keep twenty points of air between them. Three at 120
+    /// degrees would be rotational symmetry — four peers on a wheel, when the
+    /// point of the widget is that it has one middle. Angles are compass-free:
+    /// zero is east, anticlockwise, the way the mathematics is written.
+    private static let arcRadius: CGFloat = 70
+    private static let arcAngles: [CGFloat] = [215, 270, 325]
+
+    private let body = CAShapeLayer()
+    private let record = RecordButton()
+    private let caption = RecorderPuckView.label("Record")
+    private let inputButton = ChoiceButton(symbol: "mic", label: "Microphone")
+    private let projectButton = ChoiceButton(symbol: "folder", label: "Project")
+    private let outputButton = ChoiceButton(symbol: "speaker.wave.2", label: "Sound source")
+    private let reduceMotion: Bool
+
+    var onGrip: ((Dock.Grip) -> Void)?
+    var onHover: ((Bool) -> Void)?
+    var onRecord: (() -> Void)?
+    var onStop: (() -> Void)?
+    var onProject: ((String) -> Void)?
+    var onInput: ((AudioDevice?) -> Void)?
+    var onOutput: ((AudioDevice?) -> Void)?
+
+    /// What the menus are built from when a button is pressed: the lists as
+    /// last handed over, and the choices as remembered. Nothing is built until
+    /// then — a menu made for every refresh would be a menu nobody opened.
+    private var projects: [(name: String, count: Int)]?
+    private var chosenProject = "other"
+    private var inputs: [AudioDevice]?
+    private var chosenInput: AudioDevice?
+    private var outputs: [AudioDevice]?
+    private var chosenOutput: AudioDevice?
+
+    private var gripping = false
+    private var pointer: NSTrackingArea?
+    private var state = RecorderState.idle
+
+    init(reduceMotion: Bool) {
+        self.reduceMotion = reduceMotion
+        super.init(frame: NSRect(x: 0, y: 0, width: RecorderPuckView.side, height: RecorderPuckView.side))
+        appearance = NSAppearance(named: .darkAqua)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
+        buildBody()
+        layOut()
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("Recorder")
+        show(state: .idle, elapsed: "")
+    }
+
+    /// This view is only ever built in code; there is no nib in this app for
+    /// one to be loaded from.
+    required init?(coder: NSCoder) {
+        fatalError("RecorderPuckView is built in code, not loaded from a nib")
+    }
+
+    private var discRect: NSRect {
+        NSRect(
+            x: RecorderPuckView.inset, y: RecorderPuckView.inset,
+            width: RecorderPuckView.disc, height: RecorderPuckView.disc
+        )
+    }
+
+    /// The disc and its shadow, one layer. The shadow's shape is given rather
+    /// than read off the pixels — the window casts none, and a shape that
+    /// never changes is a shape worked out once.
+    private func buildBody() {
+        guard let layer else { return }
+        let round = CGPath(ellipseIn: discRect.insetBy(dx: 0.5, dy: 0.5), transform: nil)
+        body.path = round
+        body.fillColor = RecorderPuckView.ground.cgColor
+        body.strokeColor = RecorderPuckView.rim.cgColor
+        body.lineWidth = 1
+        body.shadowPath = round
+        body.shadowColor = NSColor.black.cgColor
+        body.shadowOpacity = 0.55
+        body.shadowRadius = 14
+        body.shadowOffset = CGSize(width: 0, height: -5)
+        layer.addSublayer(body)
+    }
+
+    private func layOut() {
+        let centre = NSPoint(x: bounds.midX, y: bounds.midY)
+        let side = RecordButton.side
+        record.frame = NSRect(x: centre.x - side / 2, y: centre.y - side / 2, width: side, height: side)
+        record.target = self
+        record.action = #selector(pressed)
+        addSubview(record)
+
+        // the words above the button rather than under it: the lower half of
+        // the disc belongs to the three choosers, and the state is glanced at
+        // where a clock is — up
+        caption.frame = NSRect(x: centre.x - 60, y: centre.y + side / 2 + 7, width: 120, height: 14)
+        caption.alignment = .center
+        addSubview(caption)
+
+        for (button, degrees) in zip(
+            [inputButton, projectButton, outputButton], RecorderPuckView.arcAngles
+        ) {
+            let angle = degrees * .pi / 180
+            let at = NSPoint(
+                x: bounds.midX + RecorderPuckView.arcRadius * cos(angle),
+                y: bounds.midY + RecorderPuckView.arcRadius * sin(angle)
+            )
+            let hit = ChoiceButton.hit
+            button.frame = NSRect(x: at.x - hit / 2, y: at.y - hit / 2, width: hit, height: hit)
+            button.target = self
+            button.action = #selector(choose(_:))
+            addSubview(button)
+        }
+    }
+
+    // --- what it says ---------------------------------------------------------------
+
+    /// The recorder's state, put on the button and its caption. The choosers go
+    /// quiet from the moment the tape is being started: they say what this
+    /// recording is being made with, and a choice made now would be a choice
+    /// for the next one, which is not what a button beside a rolling tape
+    /// looks like it offers.
+    func show(state: RecorderState, elapsed: String) {
+        self.state = state
+        let idle = state == .idle
+        record.rolling = state == .recording
+        record.isEnabled = idle || state == .recording
+        for button in [inputButton, projectButton, outputButton] {
+            button.isEnabled = idle
+        }
+        switch state {
+        case .idle:
+            caption.stringValue = "Record"
+            caption.font = NSFont.systemFont(ofSize: 11)
+            record.setAccessibilityLabel("Start recording")
+        case .starting:
+            caption.stringValue = "Starting …"
+            caption.font = NSFont.systemFont(ofSize: 11)
+            record.setAccessibilityLabel("Starting")
+        case .recording:
+            caption.stringValue = elapsed
+            caption.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            record.setAccessibilityLabel("Stop recording, \(elapsed) so far")
+        case .processing:
+            caption.stringValue = "Processing …"
+            caption.font = NSFont.systemFont(ofSize: 11)
+            record.setAccessibilityLabel("Processing")
+        }
+        // the rim goes red for the length of the tape, so that a puck tucked
+        // into an edge still says from its sliver that a meeting is being taped
+        body.strokeColor = (state == .recording ? RecorderPuckView.rollingRim : RecorderPuckView.rim).cgColor
+        body.lineWidth = state == .recording ? 1.5 : 1
+    }
+
+    /// The lists and the choices, kept for the menus and said on each button's
+    /// tooltip and to a screen reader, or "loading …" until they have arrived.
+    func showProjects(_ projects: [(name: String, count: Int)]?, chosen: String) {
+        self.projects = projects
+        chosenProject = chosen
+        projectButton.say(projects == nil ? "loading …" : chosen)
+    }
+
+    func showInputs(_ devices: [AudioDevice]?, chosen: AudioDevice?) {
+        inputs = devices
+        chosenInput = chosen
+        inputButton.say(devices == nil ? "loading …" : (chosen?.name ?? "Default microphone"))
+    }
+
+    func showOutputs(_ devices: [AudioDevice]?, chosen: AudioDevice?) {
+        outputs = devices
+        chosenOutput = chosen
+        outputButton.say(devices == nil ? "loading …" : (chosen?.name ?? "System mix (everything)"))
+    }
+
+    // --- what is done to it -----------------------------------------------------------
+
+    @objc private func pressed() {
+        switch state {
+        case .idle: onRecord?()
+        case .recording: onStop?()
+        case .starting, .processing: break
+        }
+    }
+
+    /// A chooser pressed: its menu, built now from the lists as they stand,
+    /// dropped from the button the way a pop-up's would be. The chosen line is
+    /// ticked; a remembered device that is not plugged in is shown anyway and
+    /// named as missing, so it can be seen and changed.
+    @objc private func choose(_ sender: ChoiceButton) {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        if sender === projectButton {
+            guard let projects else { return sender.drop(RecorderPuckView.loading()) }
+            for project in projects {
+                menu.addItem(entry(
+                    "\(project.name) (\(project.count))", project.name == chosenProject,
+                    #selector(pickedProject(_:)), project.name
+                ))
+            }
+            if !projects.contains(where: { $0.name == chosenProject }) {
+                menu.addItem(entry(chosenProject, true, #selector(pickedProject(_:)), chosenProject))
+            }
+        } else if sender === inputButton {
+            guard let inputs else { return sender.drop(RecorderPuckView.loading()) }
+            fill(menu, inputs, "Default microphone", chosenInput, #selector(pickedInput(_:)))
+        } else {
+            guard let outputs else { return sender.drop(RecorderPuckView.loading()) }
+            fill(menu, outputs, "System mix (everything)", chosenOutput, #selector(pickedOutput(_:)))
+        }
+        sender.drop(menu)
+    }
+
+    private func fill(
+        _ menu: NSMenu, _ listed: [AudioDevice], _ anything: String, _ chosen: AudioDevice?,
+        _ selector: Selector
+    ) {
+        menu.addItem(entry(anything, chosen == nil, selector, nil))
+        for device in listed {
+            menu.addItem(entry(device.name, device.uid == chosen?.uid, selector, device))
+        }
+        if let chosen, !listed.contains(where: { $0.uid == chosen.uid }) {
+            menu.addItem(entry("\(chosen.name) (not connected)", true, selector, chosen))
+        }
+    }
+
+    private func entry(_ title: String, _ chosen: Bool, _ selector: Selector, _ value: Any?) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: selector, keyEquivalent: "")
+        item.target = self
+        item.state = chosen ? .on : .off
+        item.representedObject = value
+        return item
+    }
+
+    private static func loading() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let item = NSMenuItem(title: "loading …", action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        menu.addItem(item)
+        return menu
+    }
+
+    @objc private func pickedProject(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        onProject?(name)
+    }
+
+    @objc private func pickedInput(_ sender: NSMenuItem) {
+        onInput?(sender.representedObject as? AudioDevice)
+    }
+
+    @objc private func pickedOutput(_ sender: NSMenuItem) {
+        onOutput?(sender.representedObject as? AudioDevice)
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// A press that reached this view landed on no button — they take their
+    /// own — so it is a hand on the window.
+    override func mouseDown(with event: NSEvent) {
+        gripping = true
+        onGrip?(.began(NSEvent.mouseLocation))
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard gripping else { return }
+        onGrip?(.moved(NSEvent.mouseLocation))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard gripping else { return }
+        gripping = false
+        onGrip?(.ended(NSEvent.mouseLocation))
+    }
+
+    /// `.activeAlways`, because this window never becomes key and the app it
+    /// belongs to is never the active one: any narrower scope would report no
+    /// crossing at all. The whole view is the area — the margin round the disc
+    /// is the slack that keeps a pointer just off the rim from counting as gone.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let pointer {
+            removeTrackingArea(pointer)
+        }
+        let area = NSTrackingArea(
+            rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self, userInfo: nil
+        )
+        addTrackingArea(area)
+        pointer = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        onHover?(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onHover?(false)
+    }
+
+    /// The disc grown into place out of the status item above it, the way the
+    /// island arrives, and for the same reason: it says where the window came from.
+    func appear() {
+        guard !reduceMotion, let layer else { return }
+        let growing = CABasicAnimation(keyPath: "transform")
+        growing.fromValue = NSValue(caTransform3D: RecordingPanelView.scaled(0.92, about: layer.bounds))
+        growing.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+        growing.duration = RecordingPanelView.appearing
+        growing.timingFunction = RecordingPanelView.easing
+        layer.add(growing, forKey: "appear")
+    }
+
+    private static func label(_ text: String) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = NSFont.systemFont(ofSize: 11)
+        field.textColor = .secondaryLabelColor
+        field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byTruncatingTail
+        return field
+    }
+}
+
+/// The one button: a red disc that starts the tape, a red square that stops
+/// it, inside a faint ring. Drawn rather than pictured, so the pressed and
+/// disabled states are the same shape a shade different and not a second image.
+final class RecordButton: NSButton {
+    static let side: CGFloat = 80
+    private static let ring = NSColor.white.withAlphaComponent(0.14)
+
+    /// Whether the tape is rolling, which is what decides the shape.
+    var rolling = false {
+        didSet { needsDisplay = true }
+    }
+
+    init() {
+        super.init(frame: .zero)
+        isBordered = false
+        setButtonType(.momentaryChange)
+        title = ""
+        setAccessibilityRole(.button)
+    }
+
+    /// This view is only ever built in code; there is no nib in this app for
+    /// one to be loaded from.
+    required init?(coder: NSCoder) {
+        fatalError("RecordButton is built in code, not loaded from a nib")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let ring = NSBezierPath(ovalIn: bounds.insetBy(dx: 1.5, dy: 1.5))
+        RecordButton.ring.setStroke()
+        ring.lineWidth = 2
+        ring.stroke()
+        var red = NSColor.systemRed
+        if !isEnabled {
+            red = red.withAlphaComponent(0.35)
+        } else if isHighlighted {
+            red = red.withAlphaComponent(0.7)
+        }
+        red.setFill()
+        if rolling {
+            let square = bounds.insetBy(dx: bounds.width * 0.31, dy: bounds.height * 0.31)
+            NSBezierPath(roundedRect: square, xRadius: 5, yRadius: 5).fill()
+        } else {
+            NSBezierPath(ovalIn: bounds.insetBy(dx: 10, dy: 10)).fill()
+        }
+    }
+}
+
+/// A small round button with a symbol on it, for one of the things a recording
+/// is made of. What it is set to is on its tooltip and in its spoken name — a
+/// disc has no room for three device names, and the menu it drops says the
+/// same thing with a tick.
+///
+/// The circle drawn is smaller than the button that takes the click: what a
+/// pointer must hit is held to the platform's forty-four points, and what the
+/// eye weighs against the record button is thirty-eight — dominance is said
+/// with scale, and a hit region says nothing out loud.
+final class ChoiceButton: NSButton {
+    static let hit: CGFloat = 44
+    static let side: CGFloat = 38
+    private static let face = NSColor.white.withAlphaComponent(0.06)
+    private static let pressed = NSColor.white.withAlphaComponent(0.13)
+    private static let rim = NSColor.white.withAlphaComponent(0.1)
+
+    private let label: String
+    private let symbol: NSImage?
+    private let faint: NSImage?
+
+    /// The symbol in two colours rather than one image tinted at draw time: a
+    /// symbol is a template, and a template drawn is drawn black.
+    init(symbol name: String, label: String) {
+        self.label = label
+        let base = NSImage(systemSymbolName: name, accessibilityDescription: label)
+        let size = NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)
+        symbol = base?.withSymbolConfiguration(
+            size.applying(.init(paletteColors: [NSColor.white.withAlphaComponent(0.85)]))
+        )
+        faint = base?.withSymbolConfiguration(
+            size.applying(.init(paletteColors: [NSColor.white.withAlphaComponent(0.3)]))
+        )
+        super.init(frame: .zero)
+        isBordered = false
+        setButtonType(.momentaryChange)
+        title = ""
+        setAccessibilityRole(.popUpButton)
+        say("")
+    }
+
+    /// This view is only ever built in code; there is no nib in this app for
+    /// one to be loaded from.
+    required init?(coder: NSCoder) {
+        fatalError("ChoiceButton is built in code, not loaded from a nib")
+    }
+
+    /// What the choice currently is, for the tooltip and the screen reader.
+    func say(_ choice: String) {
+        toolTip = choice.isEmpty ? label : "\(label): \(choice)"
+        setAccessibilityLabel(label)
+        setAccessibilityValue(choice)
+    }
+
+    /// The menu dropped from under this button, the way a pop-up's is.
+    func drop(_ menu: NSMenu) {
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: -4), in: self)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let drawn = (ChoiceButton.hit - ChoiceButton.side) / 2 + 0.5
+        let face = NSBezierPath(ovalIn: bounds.insetBy(dx: drawn, dy: drawn))
+        (isHighlighted ? ChoiceButton.pressed : ChoiceButton.face).setFill()
+        face.fill()
+        ChoiceButton.rim.setStroke()
+        face.lineWidth = 1
+        face.stroke()
+        guard let image = isEnabled ? symbol : faint else { return }
+        let size = image.size
+        image.draw(in: NSRect(
+            x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2,
+            width: size.width, height: size.height
+        ))
+    }
+}
+
+// MARK: - where a floating window lives
+
+/// A window that may hang off the edge of the screen. AppKit pulls a window
+/// back on screen whenever it is placed or resized — that is what a tucked
+/// window must not have happen to it — and this is the one override that stops it.
+
+/// What a view has to report for the dock to place its window: a hand on its
+/// ground, and the pointer crossing its edge. The view knows nothing of what
+/// either means.
+protocol Dockable: NSView {
+    var onGrip: ((Dock.Grip) -> Void)? { get set }
+    var onHover: ((Bool) -> Void)? { get set }
+}
+final class DockPanel: NSPanel {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
+    }
+}
+
+/// Where a window was left, as a thing that can be written down and read back.
+/// A free one is a fraction of its screen rather than a point, so a display
+/// that changes resolution keeps it in the same place; a tucked one is an edge
+/// and how far along it. The screen is named by its display number, and a
+/// display that is no longer attached puts the window back under the menu bar.
+enum DockPlace: Equatable {
+    case hanging
+    case free(display: UInt32, x: CGFloat, y: CGFloat)
+    case tucked(Dock.Edge, display: UInt32, along: CGFloat)
+
+    var encoded: String {
+        switch self {
+        case .hanging:
+            return "hanging"
+        case let .free(display, x, y):
+            return "free|\(display)|\(x)|\(y)"
+        case let .tucked(edge, display, along):
+            return "tucked|\(edge.rawValue)|\(display)|\(along)"
+        }
+    }
+
+    init?(encoded: String) {
+        let parts = encoded.split(separator: "|").map(String.init)
+        switch parts.first {
+        case "hanging":
+            self = .hanging
+        case "free":
+            guard parts.count == 4, let display = UInt32(parts[1]),
+                  let x = Double(parts[2]), let y = Double(parts[3]) else { return nil }
+            self = .free(display: display, x: x, y: y)
+        case "tucked":
+            guard parts.count == 4, let edge = Dock.Edge(rawValue: parts[1]),
+                  let display = UInt32(parts[2]), let along = Double(parts[3]) else { return nil }
+            self = .tucked(edge, display: display, along: along)
+        default:
+            return nil
+        }
+    }
+}
+
+/// A floating window and the four places it can be: hanging under the status
+/// item like a menu, free anywhere on the screen, tucked into an edge with a
+/// sliver showing, or peeking back out of that edge for as long as the pointer
+/// is on it. The view inside knows nothing of this — it reports a grip on its
+/// ground and the pointer crossing its edge, and this decides what those mean.
+///
+/// The view's drawn body sits `inset` points in from the window's edge on every
+/// side — the air its shadow is cast into — and that air is not counted when
+/// the window is put against an edge or pushed through one.
+///
+/// Moving is done by hand, event by event, rather than handed to the window
+/// server: the release is what decides whether the window tucks, and a release
+/// this object never hears about is a decision it cannot make.
+///
+/// Tucked, it costs nothing: no timer, no monitor, one tracking area waiting
+/// for a crossing. The dwell and the grace are timers that exist only between
+/// a crossing and its re-check — and both re-check, because a pointer that
+/// skimmed the sliver on its way somewhere else is not a pointer asking for
+/// the window.
+final class Dock {
+    enum Edge: String {
+        case left, right, top, bottom
+    }
+
+    /// A press on the view's ground, in screen points, from press to release.
+    enum Grip {
+        case began(NSPoint)
+        case moved(NSPoint)
+        case ended(NSPoint)
+    }
+
+    enum State {
+        case hanging
+        case free
+        case tucked(Edge)
+        case peeking(Edge)
+
+        var isHanging: Bool {
+            if case .hanging = self { return true }
+            return false
+        }
+    }
+
+    /// How much of the body stays on screen when tucked: a rim's worth,
+    /// enough to be a tab and to be hovered. Never less than a few
+    /// points — a window with nothing on screen gets no events at all.
+    static let peek: CGFloat = 22
+
+    /// How near the pointer must be let go to an edge for the window to tuck.
+    static let snap: CGFloat = 8
+
+    /// The dwell before a hover reveals, and the grace after the pointer leaves
+    /// before it hides again — each re-checked when it fires. A fifth of a
+    /// second is what the Dock waits; the grace is longer because coming back
+    /// for something is more common than leaving for good.
+    static let dwell: TimeInterval = 0.2
+    static let grace: TimeInterval = 0.4
+
+    /// The slide, the same length from every edge: a window that took longer
+    /// from farther away would be a window that felt heavier at the bottom of
+    /// the screen than at the side.
+    static let sliding: TimeInterval = 0.22
+    static let tuckedAlpha: CGFloat = 0.6
+
+    /// The air between a revealed body and the edge it came out of.
+    static let clearance: CGFloat = 6
+
+    let panel: NSPanel
+    let view: Dockable
+    private let inset: CGFloat
+    private let reduceMotion: Bool
+    private(set) var state: State = .hanging
+
+    /// How far along its edge a tucked window sits, as a fraction, kept so that
+    /// peeking out and tucking back land on the same spot.
+    private var along: CGFloat = 0.5
+
+    /// The pointer's offset from the window's origin while the window is being
+    /// moved, and nothing at any other time.
+    private var grab: NSPoint?
+    private var pending: Timer?
+    private var screensChanged: Any?
+
+    /// Told once, when the window stops hanging: whoever hung it there closes it
+    /// on a click elsewhere and lights the button it hangs from, and a window that
+    /// has been carried off is neither of those things any more.
+    var onLeftHanging: (() -> Void)?
+
+    /// Told whenever where the window lives changes, with the place to remember.
+    var onPlaced: ((DockPlace) -> Void)?
+
+    init(panel: NSPanel, view: Dockable, inset: CGFloat, reduceMotion: Bool) {
+        self.panel = panel
+        self.view = view
+        self.inset = inset
+        self.reduceMotion = reduceMotion
+        view.onGrip = { [weak self] grip in self?.gripped(grip) }
+        view.onHover = { [weak self] inside in self?.hovered(inside) }
+        // a display arriving or leaving moves every edge; a tucked window is put
+        // back against the edge it was tucked into, on whatever is there now
+        screensChanged = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil,
+            queue: .main
+        ) { [weak self] _ in self?.reanchor() }
+    }
+
+    deinit {
+        pending?.invalidate()
+        if let screensChanged {
+            NotificationCenter.default.removeObserver(screensChanged)
+        }
+    }
+
+    // --- putting it back where it was ---------------------------------------------
+
+    /// The window put back where it was left, or nothing — and then the caller
+    /// hangs it under the status item — when that place is gone.
+    func restore(_ place: DockPlace) -> Bool {
+        switch place {
+        case .hanging:
+            return false
+        case let .free(display, x, y):
+            guard let screen = Dock.screen(numbered: display) else { return false }
+            let area = screen.visibleFrame
+            let origin = NSPoint(
+                x: area.minX + x * area.width - panel.frame.width / 2,
+                y: area.minY + y * area.height - panel.frame.height / 2
+            )
+            panel.setFrameOrigin(Dock.clamped(
+                origin, size: panel.frame.size, within: area.insetBy(dx: -inset, dy: -inset)
+            ))
+            state = .free
+            panel.alphaValue = 1
+            panel.orderFrontRegardless()
+            return true
+        case let .tucked(edge, display, along):
+            guard let screen = Dock.screen(numbered: display) else { return false }
+            self.along = along
+            state = .tucked(edge)
+            panel.setFrame(tuckedFrame(edge, on: screen), display: false)
+            panel.alphaValue = Dock.tuckedAlpha
+            panel.orderFrontRegardless()
+            return true
+        }
+    }
+
+    /// The window brought to where it can be used: out of its edge, or to the
+    /// front. This is the way in that needs no pointer.
+    func reveal() {
+        pending?.invalidate()
+        if case let .tucked(edge) = state {
+            peek(edge)
+        }
+        panel.orderFrontRegardless()
+    }
+
+    private var place: DockPlace {
+        let screen = Dock.screen(under: panel.frame) ?? NSScreen.main
+        guard let screen, let display = Dock.number(of: screen) else { return .hanging }
+        switch state {
+        case .hanging:
+            return .hanging
+        case .free:
+            let area = screen.visibleFrame
+            return .free(
+                display: display,
+                x: (panel.frame.midX - area.minX) / area.width,
+                y: (panel.frame.midY - area.minY) / area.height
+            )
+        case let .tucked(edge), let .peeking(edge):
+            return .tucked(edge, display: display, along: along)
+        }
+    }
+
+    // --- being moved ------------------------------------------------------------
+
+    private func gripped(_ grip: Grip) {
+        switch grip {
+        case let .began(point):
+            pending?.invalidate()
+            grab = NSPoint(x: point.x - panel.frame.minX, y: point.y - panel.frame.minY)
+            NSCursor.closedHand.push()
+        case let .moved(point):
+            guard let grab else { return }
+            leaveWherever()
+            panel.setFrameOrigin(NSPoint(x: point.x - grab.x, y: point.y - grab.y))
+        case let .ended(point):
+            NSCursor.pop()
+            guard grab != nil else { return }
+            grab = nil
+            release(at: point)
+        }
+    }
+
+    /// The first movement of a grip: a hanging window stops hanging, a tucked or
+    /// peeking one is just a window again, and either way it is fully lit.
+    private func leaveWherever() {
+        switch state {
+        case .hanging:
+            state = .free
+            onLeftHanging?()
+        case .tucked, .peeking:
+            state = .free
+        case .free:
+            break
+        }
+        panel.alphaValue = 1
+    }
+
+    /// Let go: within a few points of an edge it tucks into that edge, at the
+    /// spot along it where it was dropped; anywhere else it stays.
+    private func release(at point: NSPoint) {
+        guard let screen = Dock.screen(containing: point) else {
+            state = .free
+            onPlaced?(place)
+            return
+        }
+        if let edge = Dock.edge(near: point, of: screen) {
+            along = Dock.along(edge, of: panel.frame, on: screen)
+            tuck(edge, on: screen)
+        } else {
+            state = .free
+            onPlaced?(place)
+        }
+    }
+
+    // --- being hovered --------------------------------------------------------------
+
+    /// The pointer crossing the window's edge, in or out. A crossing sets a timer
+    /// and the timer asks again: what reveals a tucked window is a pointer still
+    /// on it a fifth of a second later, and what hides a peeking one is a
+    /// pointer still gone after the grace — and never one that is holding it.
+    private func hovered(_ inside: Bool) {
+        pending?.invalidate()
+        pending = nil
+        switch (state, inside) {
+        case let (.tucked(edge), true):
+            wait(Dock.dwell) { [weak self] in
+                guard let self, self.pointerIsOnTheWindow else { return }
+                self.peek(edge)
+            }
+        case let (.peeking(edge), false):
+            wait(Dock.grace) { [weak self] in
+                guard let self, self.grab == nil, !self.pointerIsOnTheWindow else { return }
+                guard let screen = Dock.screen(under: self.panel.frame) else { return }
+                self.tuck(edge, on: screen)
+            }
+        default:
+            break
+        }
+    }
+
+    private func wait(_ seconds: TimeInterval, then act: @escaping () -> Void) {
+        let timer = Timer(timeInterval: seconds, repeats: false) { [weak self] _ in
+            self?.pending = nil
+            act()
+        }
+        timer.tolerance = seconds / 10
+        RunLoop.main.add(timer, forMode: .common)
+        pending = timer
+    }
+
+    private var pointerIsOnTheWindow: Bool {
+        panel.frame.contains(NSEvent.mouseLocation)
+    }
+
+    // --- the two positions at an edge ---------------------------------------------------
+
+    private func tuck(_ edge: Edge, on screen: NSScreen) {
+        state = .tucked(edge)
+        slide(to: tuckedFrame(edge, on: screen), alpha: Dock.tuckedAlpha)
+        onPlaced?(place)
+    }
+
+    private func peek(_ edge: Edge) {
+        guard let screen = Dock.screen(under: panel.frame) ?? NSScreen.main else { return }
+        state = .peeking(edge)
+        slide(to: revealedFrame(edge, on: screen), alpha: 1)
+    }
+
+    /// A tucked or peeking window put back against its edge after the screens
+    /// changed under it — on the screen it is now nearest, which may be a
+    /// different one from the one it was tucked into.
+    private func reanchor() {
+        guard let screen = Dock.screen(under: panel.frame) ?? NSScreen.main else { return }
+        switch state {
+        case let .tucked(edge):
+            panel.setFrame(tuckedFrame(edge, on: screen), display: true)
+        case let .peeking(edge):
+            panel.setFrame(revealedFrame(edge, on: screen), display: true)
+        case .free:
+            panel.setFrameOrigin(Dock.clamped(
+                panel.frame.origin, size: panel.frame.size, within: screen.visibleFrame
+            ))
+        case .hanging:
+            break
+        }
+    }
+
+    /// The window moved and dimmed in one fixed-length ease-out, or at once
+    /// under Reduce Motion: a window sliding two hundred points is the large
+    /// movement that setting asks not to see.
+    private func slide(to frame: NSRect, alpha: CGFloat) {
+        guard !reduceMotion else {
+            panel.setFrame(frame, display: true)
+            panel.alphaValue = alpha
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Dock.sliding
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().setFrame(frame, display: true)
+            panel.animator().alphaValue = alpha
+        }
+    }
+
+    /// The whole body just inside the edge, at `along` of the way across it.
+    private func revealedFrame(_ edge: Edge, on screen: NSScreen) -> NSRect {
+        let area = screen.visibleFrame
+        let size = panel.frame.size
+        let body = NSSize(width: size.width - inset * 2, height: size.height - inset * 2)
+        let gap = Dock.clearance
+        var origin = NSPoint.zero
+        switch edge {
+        case .left:
+            origin.x = area.minX + gap - inset
+            origin.y = area.minY + along * area.height - size.height / 2
+        case .right:
+            origin.x = area.maxX - gap - body.width - inset
+            origin.y = area.minY + along * area.height - size.height / 2
+        case .top:
+            origin.y = area.maxY - gap - body.height - inset
+            origin.x = area.minX + along * area.width - size.width / 2
+        case .bottom:
+            origin.y = area.minY + gap - inset
+            origin.x = area.minX + along * area.width - size.width / 2
+        }
+        // clamped to the screen with the air taken off, or a window in a corner
+        // would be held a shadow's width short of it
+        let room = area.insetBy(dx: -inset, dy: -inset)
+        return NSRect(origin: Dock.clamped(origin, size: size, within: room), size: size)
+    }
+
+    /// The revealed frame pushed out through its edge until `peek` points of
+    /// the body are left. The window keeps its size; only where it is moves.
+    private func tuckedFrame(_ edge: Edge, on screen: NSScreen) -> NSRect {
+        var frame = revealedFrame(edge, on: screen)
+        let body = NSSize(width: frame.width - inset * 2, height: frame.height - inset * 2)
+        switch edge {
+        case .left: frame.origin.x -= body.width - Dock.peek + Dock.clearance
+        case .right: frame.origin.x += body.width - Dock.peek + Dock.clearance
+        case .top: frame.origin.y += body.height - Dock.peek + Dock.clearance
+        case .bottom: frame.origin.y -= body.height - Dock.peek + Dock.clearance
+        }
+        return frame
+    }
+
+    // --- screens ---------------------------------------------------------------------
+
+    /// The nearest edge within reach of a point, or nothing. Tested against the
+    /// screen's whole frame rather than the part the menu bar and Dock leave,
+    /// because a window dropped under either of them was dropped at the edge.
+    static func edge(near point: NSPoint, of screen: NSScreen) -> Edge? {
+        let frame = screen.frame
+        let distances: [(Edge, CGFloat)] = [
+            (.left, point.x - frame.minX), (.right, frame.maxX - point.x),
+            (.top, frame.maxY - point.y), (.bottom, point.y - frame.minY),
+        ]
+        return distances.filter { $0.1 <= snap }.min { $0.1 < $1.1 }?.0
+    }
+
+    /// How far along an edge a frame's middle sits, as a fraction of the screen.
+    static func along(_ edge: Edge, of frame: NSRect, on screen: NSScreen) -> CGFloat {
+        let area = screen.visibleFrame
+        switch edge {
+        case .left, .right:
+            return min(max((frame.midY - area.minY) / area.height, 0), 1)
+        case .top, .bottom:
+            return min(max((frame.midX - area.minX) / area.width, 0), 1)
+        }
+    }
+
+    /// The screen a point is on, with its far edges counted in: a rectangle's
+    /// `contains` leaves out its own right and top, which is exactly where a
+    /// pointer pushed against an edge sits.
+    static func screen(containing point: NSPoint) -> NSScreen? {
+        NSScreen.screens.first { $0.frame.insetBy(dx: -1, dy: -1).contains(point) }
+    }
+
+    /// The screen a frame is mostly on, by its middle first and any overlap
+    /// second — a tucked window's middle is off every screen.
+    static func screen(under frame: NSRect) -> NSScreen? {
+        screen(containing: NSPoint(x: frame.midX, y: frame.midY))
+            ?? NSScreen.screens.max { $0.frame.intersection(frame).area < $1.frame.intersection(frame).area }
+    }
+
+    static func number(of screen: NSScreen) -> UInt32? {
+        screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32
+    }
+
+    static func screen(numbered display: UInt32) -> NSScreen? {
+        NSScreen.screens.first { number(of: $0) == display }
+    }
+
+    static func clamped(_ origin: NSPoint, size: NSSize, within area: NSRect) -> NSPoint {
+        NSPoint(
+            x: min(max(origin.x, area.minX), max(area.minX, area.maxX - size.width)),
+            y: min(max(origin.y, area.minY), max(area.minY, area.maxY - size.height))
+        )
+    }
+}
+
+extension NSRect {
+    var area: CGFloat { isNull ? 0 : width * height }
 }
 
 // MARK: - end of meters and marks

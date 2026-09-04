@@ -2082,6 +2082,10 @@ def stub_bootstrap(monkeypatch, *, vad_fails=False, cloned_urls: list | None = N
     monkeypatch.setattr(services.bootstrap, "download_model_script", download)
     monkeypatch.setattr(services.bootstrap, "fetch_tar_bz2", fetch_tar_bz2)
     monkeypatch.setattr(services.bootstrap, "fetch", fetch)
+    monkeypatch.setattr(services.capture, "menubar_running", lambda: calls.append("pgrep") or False)
+    monkeypatch.setattr(services.capture, "recording_underway", lambda: False)
+    monkeypatch.setattr(services.capture, "quit_menubar", lambda: calls.append("quit"))
+    monkeypatch.setattr(services.capture, "open_menubar", lambda _app: calls.append("open"))
     return calls
 
 
@@ -2095,6 +2099,7 @@ def test_setup_runs_every_step_when_nothing_is_on_disk(monkeypatch, tmp_path):
     assert calls == [
         "tools", "clone", "build",
         "download-ggml-model.sh", "download-vad-model.sh", "seg", "emb", "capture", "menubar",
+        "pgrep", "open",
     ]
     assert services.config.MODELS_DIR.is_dir()
     assert services.config.DATA_DIR.is_dir()
@@ -2120,22 +2125,24 @@ def test_setup_numbers_and_times_each_step_it_actually_runs(monkeypatch, tmp_pat
 
     services.setup(log=logged.append, now=lambda: next(clock))
 
-    assert logged[0] == "[1/8] cloning whisper.cpp …"
+    assert logged[0] == "[1/9] cloning whisper.cpp …"
     assert logged[1] == "      done in 3s"
-    assert logged[2] == "[2/8] building whisper.cpp (Metal — takes a few minutes) …"
+    assert logged[2] == "[2/9] building whisper.cpp (Metal — takes a few minutes) …"
     assert logged[3] == "      done in 3s"
-    assert logged[4] == f"[3/8] downloading whisper model {config.WHISPER_MODEL} …"
+    assert logged[4] == f"[3/9] downloading whisper model {config.WHISPER_MODEL} …"
     assert logged[5] == "      done in 3s"
-    assert logged[6] == "[4/8] downloading VAD model …"
+    assert logged[6] == "[4/9] downloading VAD model …"
     assert logged[7] == "      done in 3s"
-    assert logged[8] == "[5/8] downloading speaker segmentation model (~6 MB) …"
+    assert logged[8] == "[5/9] downloading speaker segmentation model (~6 MB) …"
     assert logged[9] == "      done in 3s"
-    assert logged[10] == "[6/8] downloading speaker embedding model (~97 MB) …"
+    assert logged[10] == "[6/9] downloading speaker embedding model (~97 MB) …"
     assert logged[11] == "      done in 3s"
-    assert logged[12] == "[7/8] building meeting-capture helper …"
+    assert logged[12] == "[7/9] building meeting-capture helper …"
     assert logged[13] == "      done in 3s"
-    assert logged[14] == "[8/8] building menu bar recorder …"
+    assert logged[14] == "[8/9] building menu bar recorder …"
     assert logged[15] == "      done in 3s"
+    assert logged[16] == "[9/9] starting the menu bar recorder …"
+    assert logged[17] == "      done in 3s"
 
 
 def test_setup_reports_a_skipped_step_without_running_or_timing_it(monkeypatch, tmp_path):
@@ -2158,14 +2165,16 @@ def test_setup_reports_a_skipped_step_without_running_or_timing_it(monkeypatch, 
     services.setup(log=logged.append)
 
     assert logged == [
-        "[1/8] whisper.cpp source — already installed",
-        "[2/8] whisper.cpp build — already installed",
-        "[3/8] whisper model — already installed",
-        "[4/8] VAD model — already installed",
-        "[5/8] speaker segmentation model — already installed",
-        "[6/8] speaker embedding model — already installed",
-        "[7/8] meeting-capture helper — already installed",
-        "[8/8] menu bar recorder — already installed",
+        "[1/9] whisper.cpp source — already installed",
+        "[2/9] whisper.cpp build — already installed",
+        "[3/9] whisper model — already installed",
+        "[4/9] VAD model — already installed",
+        "[5/9] speaker segmentation model — already installed",
+        "[6/9] speaker embedding model — already installed",
+        "[7/9] meeting-capture helper — already installed",
+        "[8/9] menu bar recorder — already installed",
+        "[9/9] starting the menu bar recorder …",
+        "      done in 0s",
     ]
 
 
@@ -2221,7 +2230,9 @@ def test_setup_skips_steps_whose_artifact_already_exists(monkeypatch, tmp_path):
 
     services.setup()
 
-    assert calls == ["tools"]
+    # the recorder's launch is the one step with no artifact to find on disk:
+    # an upgrade has to put the new build in the menu bar every time
+    assert calls == ["tools", "pgrep", "open"]
 
 
 def test_the_embedding_model_always_downloads_under_its_own_fixed_name(monkeypatch, tmp_path):
@@ -2269,7 +2280,7 @@ def test_setup_skips_the_capture_helper_away_from_a_mac(monkeypatch, tmp_path):
     services.setup(log=logged.append)
 
     assert "capture" not in calls
-    assert "[7/8] meeting-capture helper — macOS only, skipped" in logged
+    assert "[7/9] meeting-capture helper — macOS only, skipped" in logged
 
 
 def test_setup_skips_the_menu_bar_recorder_away_from_a_mac(monkeypatch, tmp_path):
@@ -2283,7 +2294,9 @@ def test_setup_skips_the_menu_bar_recorder_away_from_a_mac(monkeypatch, tmp_path
     services.setup(log=logged.append)
 
     assert "menubar" not in calls
-    assert "[8/8] menu bar recorder — macOS only, skipped" in logged
+    assert "open" not in calls
+    assert "[8/9] menu bar recorder — macOS only, skipped" in logged
+    assert "[9/9] menu bar recorder launch — macOS only, skipped" in logged
 
 
 def test_setup_skips_a_native_helper_whose_stamp_matches_its_current_source(monkeypatch, tmp_path):
@@ -2300,8 +2313,8 @@ def test_setup_skips_a_native_helper_whose_stamp_matches_its_current_source(monk
 
     assert "capture" not in calls
     assert "menubar" not in calls
-    assert "[7/8] meeting-capture helper — already installed" in logged
-    assert "[8/8] menu bar recorder — already installed" in logged
+    assert "[7/9] meeting-capture helper — already installed" in logged
+    assert "[8/9] menu bar recorder — already installed" in logged
 
 
 def test_setup_rebuilds_a_native_helper_whose_stamp_no_longer_matches_its_source(
@@ -2368,9 +2381,9 @@ def test_mock_world_previews_setup_without_touching_the_network_or_disk(monkeypa
     )
 
     assert result == "setup complete"
-    for n in range(1, 9):
-        assert any(line.startswith(f"[{n}/8]") for line in logged)
-    assert sum(line.startswith("      done in") for line in logged) == 8
+    for n in range(1, 10):
+        assert any(line.startswith(f"[{n}/9]") for line in logged)
+    assert sum(line.startswith("      done in") for line in logged) == 9
     assert any("%" in line and "MB" in line for line in downloaded)
     assert not services.config.MODELS_DIR.exists()
     assert not services.config.DATA_DIR.exists()
@@ -3037,3 +3050,29 @@ def test_asking_a_video_import_for_speakers_explains_there_is_no_audio():
 def test_the_heading_names_the_video_its_channel_and_its_length():
     assert services.youtube_heading(yt_video()) == "How to think — Some Channel, 1h 4m 12s"
     assert services.youtube_heading(yt_video(channel="", duration_s=61)) == "How to think, 1m 1s"
+
+
+def test_setup_restarts_a_running_menu_bar_recorder_and_quits_it_first(monkeypatch, tmp_path):
+    # `open` merely raises an app that is still up, so the old process has to
+    # be gone before the fresh build can take its place in the menu bar
+    configured_paths(monkeypatch, tmp_path)
+    calls = stub_bootstrap(monkeypatch)
+    monkeypatch.setattr(services.capture, "menubar_running", lambda: True)
+    logged: list = []
+
+    services.setup(log=logged.append)
+
+    assert calls[-2:] == ["quit", "open"]
+    assert any("restarting the menu bar recorder" in line for line in logged)
+
+
+def test_setup_leaves_the_recorder_alone_while_a_meeting_is_being_taped(monkeypatch, tmp_path):
+    configured_paths(monkeypatch, tmp_path)
+    calls = stub_bootstrap(monkeypatch)
+    monkeypatch.setattr(services.capture, "recording_underway", lambda: True)
+    logged: list = []
+
+    services.setup(log=logged.append)
+
+    assert "quit" not in calls and "open" not in calls
+    assert "[9/9] menu bar recorder — recording underway, left as it is" in logged

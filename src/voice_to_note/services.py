@@ -204,7 +204,7 @@ def _report_step(
     """Times one setup step that actually has to run, saying what it is doing
     before the work and how long it took once it is done: the two lines a
     person staring at a silent terminal needs to know it has not hung."""
-    log(f"[{n}/8] {doing} …")
+    log(f"[{n}/9] {doing} …")
     t0 = now()
     work()
     log(f"      done in {int(now() - t0)}s")
@@ -229,6 +229,10 @@ class World:
     fetch_tar: Callable[[str, Path, Callable[[int, int], None]], None]
     read: Callable[[Path], str]
     write: Callable[[Path, str], None]
+    menubar_running: Callable[[], bool]
+    recording: Callable[[], bool]
+    quit_menubar: Callable[[], None]
+    open_menubar: Callable[[Path], None]
 
 
 def _real_world() -> World:
@@ -248,6 +252,10 @@ def _real_world() -> World:
         fetch_tar=bootstrap.fetch_tar_bz2,
         read=_read_stamp,
         write=_write_stamp,
+        menubar_running=capture.menubar_running,
+        recording=capture.recording_underway,
+        quit_menubar=capture.quit_menubar,
+        open_menubar=capture.open_menubar,
     )
 
 
@@ -302,6 +310,13 @@ def mock_world(sleep: Callable[[float], None] = time.sleep) -> World:
         fetch_tar=simulated_fetch,
         read=lambda _p: "",
         write=lambda _p, _v: None,
+        # a preview must keep its hands off the real menu bar: it reports no
+        # recorder running and starts none, so the step shows as the launch
+        # it would be without launching anything
+        menubar_running=lambda: False,
+        recording=lambda: False,
+        quit_menubar=lambda: None,
+        open_menubar=lambda _app: sleep(0.2),
     )
 
 
@@ -333,7 +348,7 @@ def setup(
         world.mkdir(d)
 
     if world.exists(config.VENDOR):
-        log("[1/8] whisper.cpp source — already installed")
+        log("[1/9] whisper.cpp source — already installed")
     else:
         _report_step(
             log,
@@ -344,7 +359,7 @@ def setup(
         )
 
     if world.built(config.WHISPER_BIN):
-        log("[2/8] whisper.cpp build — already installed")
+        log("[2/9] whisper.cpp build — already installed")
     else:
         _report_step(
             log,
@@ -355,7 +370,7 @@ def setup(
         )
 
     if world.exists(config.WHISPER_MODEL_PATH):
-        log("[3/8] whisper model — already installed")
+        log("[3/9] whisper model — already installed")
     else:
         _report_step(
             log,
@@ -370,9 +385,9 @@ def setup(
         )
 
     if world.exists(config.VAD_MODEL_PATH):
-        log("[4/8] VAD model — already installed")
+        log("[4/9] VAD model — already installed")
     else:
-        log("[4/8] downloading VAD model …")
+        log("[4/9] downloading VAD model …")
         t0 = now()
         try:
             world.script(
@@ -383,7 +398,7 @@ def setup(
             log("VAD download failed — continuing without VAD")
 
     if world.exists(config.SEG_MODEL_PATH):
-        log("[5/8] speaker segmentation model — already installed")
+        log("[5/9] speaker segmentation model — already installed")
     else:
         _report_step(
             log,
@@ -405,7 +420,7 @@ def setup(
     # download must never land under a name it does not own
     default_emb_model = config.MODELS_DIR / "nemo_en_titanet_large.onnx"
     if world.exists(default_emb_model):
-        log("[6/8] speaker embedding model — already installed")
+        log("[6/9] speaker embedding model — already installed")
     else:
         _report_step(
             log,
@@ -425,12 +440,12 @@ def setup(
     capture_sources = [config.CAPTURE_SRC, config.CAPTURE_PLIST]
     capture_stamp = _source_stamp(capture_sources)
     if sys.platform != "darwin":
-        log("[7/8] meeting-capture helper — macOS only, skipped")
+        log("[7/9] meeting-capture helper — macOS only, skipped")
     elif world.built(config.CAPTURE_BIN) and world.read(config.CAPTURE_STAMP) == capture_stamp:
-        log("[7/8] meeting-capture helper — already installed")
+        log("[7/9] meeting-capture helper — already installed")
     else:
         if world.built(config.CAPTURE_BIN):
-            log("[7/8] meeting-capture helper — source changed, rebuilding")
+            log("[7/9] meeting-capture helper — source changed, rebuilding")
         _report_step(
             log,
             now,
@@ -445,12 +460,12 @@ def setup(
     menubar_sources = [config.MENUBAR_SRC, config.MENUBAR_PLIST]
     menubar_stamp = _source_stamp(menubar_sources)
     if sys.platform != "darwin":
-        log("[8/8] menu bar recorder — macOS only, skipped")
+        log("[8/9] menu bar recorder — macOS only, skipped")
     elif world.built(config.MENUBAR_BIN) and world.read(config.MENUBAR_STAMP) == menubar_stamp:
-        log("[8/8] menu bar recorder — already installed")
+        log("[8/9] menu bar recorder — already installed")
     else:
         if world.built(config.MENUBAR_BIN):
-            log("[8/8] menu bar recorder — source changed, rebuilding")
+            log("[8/9] menu bar recorder — source changed, rebuilding")
         _report_step(
             log,
             now,
@@ -461,6 +476,30 @@ def setup(
             ),
         )
         world.write(config.MENUBAR_STAMP, menubar_stamp)
+
+    if sys.platform != "darwin":
+        log("[9/9] menu bar recorder launch — macOS only, skipped")
+    elif world.recording():
+        # quitting the recorder takes its capture helper down with it, and no
+        # upgrade is worth ending somebody's meeting; the fresh build is
+        # picked up by the next restart instead
+        log("[9/9] menu bar recorder — recording underway, left as it is")
+    else:
+        restarting = world.menubar_running()
+        doing = (
+            "restarting the menu bar recorder on the fresh build"
+            if restarting
+            else "starting the menu bar recorder"
+        )
+
+        def _relaunch() -> None:
+            """The old process has to be gone before `open` runs: `open` only
+            raises an app that is still up, stale binary and all."""
+            if restarting:
+                world.quit_menubar()
+            world.open_menubar(config.MENUBAR_APP)
+
+        _report_step(log, now, 9, doing, _relaunch)
 
     return "setup complete"
 
