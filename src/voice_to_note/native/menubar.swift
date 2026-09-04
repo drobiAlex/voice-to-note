@@ -175,6 +175,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var clicksElsewhere: Any?
     private var clicksHere: Any?
 
+    /// Whether the status item's menu is on screen. A click that lands in it
+    /// is somebody using this app, not somebody clicking elsewhere — but the
+    /// menu is its own window and no list of ours will ever contain it, so the
+    /// monitors are told to stand down for as long as it is open.
+    private var menuIsOpen = false
+
+    func menuWillOpen(_ menu: NSMenu) {
+        menuIsOpen = true
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        menuIsOpen = false
+    }
+
     /// What the button says to a screen reader and to a pointer resting on it,
     /// composed once a second because that is as often as any of it changes.
     private var spoken = ""
@@ -839,10 +853,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard clicksElsewhere == nil, clicksHere == nil else { return }
         let elsewhere: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
         clicksElsewhere = NSEvent.addGlobalMonitorForEvents(matching: elsewhere) { [weak self] _ in
-            self?.closeFloating()
+            guard let self, !self.menuIsOpen else { return }
+            self.closeFloating()
         }
         clicksHere = NSEvent.addLocalMonitorForEvents(matching: elsewhere) { [weak self] event in
-            guard let self else { return event }
+            guard let self, !self.menuIsOpen else { return event }
             let ours = [self.panel, self.puck, self.statusItem.button?.window]
             if !ours.contains(where: { $0 === event.window }) {
                 self.closeFloating()
@@ -1451,6 +1466,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         stopRehearsing()
         let system = Rehearsal(sides.system)
         let microphone = Rehearsal(sides.microphone)
+        // a scripted silence arrives already old. The scenario exists to show
+        // the state, and a preview that made somebody sit out the ten real
+        // seconds the threshold asks for would be showing them a wait instead;
+        // the histories take the reading's own time for exactly this reason
+        let aged = Date().addingTimeInterval(-15)
+        if case .quiet = sides.system {
+            systemLevels.push(LevelHistory.floor, now: aged)
+        }
+        if case .quiet = sides.microphone {
+            microphoneLevels.push(LevelHistory.floor, now: aged)
+        }
         var step = 0
         let rehearsal = Timer(timeInterval: Rehearsal.interval, repeats: true) { [weak self] _ in
             self?.metered(system.level(at: step), microphone.level(at: step))
