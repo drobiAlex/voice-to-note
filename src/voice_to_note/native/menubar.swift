@@ -88,7 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // the same reason the shimmer does. Emptying them on every state
             // that is not recording is also what makes each recording start
             // from silence rather than from whatever the last one ended on
-            puckView?.show(state: state, elapsed: elapsed())
+            puckView?.show(state: state, elapsed: elapsed(), trouble: troubleNow())
             if state == .recording {
                 // a preview keeps its menu through every state, where a
                 // recording gives it up for the panel: that menu is the only
@@ -241,7 +241,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             button.image = shimmerFrames[shimmerFrame]
             button.attributedTitle = NSAttributedString(string: "")
         }
-        puckView?.show(state: state, elapsed: elapsed())
+        puckView?.show(state: state, elapsed: elapsed(), trouble: troubleNow())
+    }
+
+    /// What the puck's one line should warn about right now: a side of a
+    /// rolling tape silent past the threshold, and nothing in any other state
+    /// — the histories outlive a recording only until the next one empties
+    /// them, and a warning about a tape that has stopped would be about nobody.
+    private func troubleNow() -> String? {
+        guard state == .recording else { return nil }
+        return Meters.trouble(system: systemLevels, microphone: microphoneLevels)
     }
 
     /// A fresh reading from each side. These are the only clock the waveforms
@@ -1949,6 +1958,24 @@ enum Meters {
         }
     }
 
+    /// The same news at the puck's size, or nothing while there is none: the
+    /// puck has one short line where the island has a footer that always says
+    /// something, so here silence speaks and health stays quiet.
+    static func trouble(
+        system: LevelHistory, microphone: LevelHistory, now: Date = Date()
+    ) -> String? {
+        switch (worthSaying(system, now), worthSaying(microphone, now)) {
+        case let (.some(quietSystem), .some(quietMicrophone)):
+            return "Both sides silent \(lasting(min(quietSystem, quietMicrophone)))"
+        case let (.some(quietSystem), .none):
+            return "System audio silent \(lasting(quietSystem))"
+        case let (.none, .some(quietMicrophone)):
+            return "Microphone silent \(lasting(quietMicrophone))"
+        case (.none, .none):
+            return nil
+        }
+    }
+
     /// How long a side has been silent, once that is long enough to be worth
     /// a line of its own.
     private static func worthSaying(_ history: LevelHistory, _ now: Date) -> TimeInterval? {
@@ -2694,6 +2721,8 @@ final class RecorderPuckView: NSView, Dockable {
     private static let ground = NSColor(srgbRed: 30 / 255, green: 30 / 255, blue: 33 / 255, alpha: 1)
     private static let rim = NSColor.white.withAlphaComponent(0.09)
     private static let rollingRim = NSColor.systemRed.withAlphaComponent(0.7)
+    private static let troubledRim = NSColor.systemOrange.withAlphaComponent(0.85)
+    private static let warning = NSColor.systemOrange
 
     /// Where the three small buttons sit: on the lower arc, 55 degrees apart
     /// with the middle one straight down. Down is an axis, and axes are hit
@@ -2791,7 +2820,7 @@ final class RecorderPuckView: NSView, Dockable {
         // the words above the button rather than under it: the lower half of
         // the disc belongs to the three choosers, and the state is glanced at
         // where a clock is — up
-        caption.frame = NSRect(x: centre.x - 60, y: centre.y + side / 2 + 7, width: 120, height: 14)
+        caption.frame = NSRect(x: centre.x - 75, y: centre.y + side / 2 + 7, width: 150, height: 14)
         caption.alignment = .center
         addSubview(caption)
 
@@ -2818,7 +2847,14 @@ final class RecorderPuckView: NSView, Dockable {
     /// recording is being made with, and a choice made now would be a choice
     /// for the next one, which is not what a button beside a rolling tape
     /// looks like it offers.
-    func show(state: RecorderState, elapsed: String) {
+    ///
+    /// Trouble outranks the clock. The one line above the button shows the
+    /// elapsed time until a side of the tape has been silent for long enough
+    /// to mean something broken — a muted microphone, a dead tap — and then it
+    /// shows that, in a colour that is not the rim's recording red, until
+    /// sound comes back. The rim says the same thing, because the rim is all a
+    /// puck tucked into an edge has left to say it with.
+    func show(state: RecorderState, elapsed: String, trouble: String? = nil) {
         self.state = state
         let idle = state == .idle
         record.rolling = state == .recording
@@ -2836,17 +2872,23 @@ final class RecorderPuckView: NSView, Dockable {
             caption.font = NSFont.systemFont(ofSize: 11)
             record.setAccessibilityLabel("Starting")
         case .recording:
-            caption.stringValue = elapsed
+            caption.stringValue = trouble ?? elapsed
             caption.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-            record.setAccessibilityLabel("Stop recording, \(elapsed) so far")
+            record.setAccessibilityLabel(trouble.map { "Stop recording — \($0)" }
+                ?? "Stop recording, \(elapsed) so far")
         case .processing:
             caption.stringValue = "Processing …"
             caption.font = NSFont.systemFont(ofSize: 11)
             record.setAccessibilityLabel("Processing")
         }
-        // the rim goes red for the length of the tape, so that a puck tucked
-        // into an edge still says from its sliver that a meeting is being taped
-        body.strokeColor = (state == .recording ? RecorderPuckView.rollingRim : RecorderPuckView.rim).cgColor
+        let troubled = state == .recording && trouble != nil
+        caption.textColor = troubled ? RecorderPuckView.warning : .secondaryLabelColor
+        // the rim goes red for the length of the tape, and amber for as long
+        // as a side is silent, so that a puck tucked into an edge still says
+        // from its sliver both that a meeting is being taped and that some of
+        // it is not being heard
+        body.strokeColor = (troubled ? RecorderPuckView.troubledRim
+            : state == .recording ? RecorderPuckView.rollingRim : RecorderPuckView.rim).cgColor
         body.lineWidth = state == .recording ? 1.5 : 1
     }
 
