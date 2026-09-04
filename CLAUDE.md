@@ -118,3 +118,10 @@ replaces `sys.stderr` with a capture object whose `fileno()` is -1, which `multi
 - mypy runs over `src` only, with `disallow_untyped_defs`; tests are unchecked.
 - Commits: conventional prefix plus a lowercase human sentence
   (`feat: point a recording at chosen audio devices`), body only when the why is not obvious.
+
+## Swift on the remote Mac
+
+`capture.swift` / `menubar.swift` only compile on macOS. `scripts/remote-build.sh check|build|test|verify`
+pushes the committed branch to the Mac and runs it there through a pinned SSH key that
+cannot open a shell — `docs/remote-build.md` says what is allowed, what is never done
+(launching the recorder, touching the installed `vtn`), and how the agent is expected to use it.
