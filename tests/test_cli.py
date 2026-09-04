@@ -992,6 +992,35 @@ def test_template_reset_routes_the_typed_name_to_services(monkeypatch, capsys):
     assert capsys.readouterr().err == "notes restored to built-in\n"
 
 
+def test_template_new_routes_the_name_and_source_to_services(monkeypatch, capsys):
+    seen = {}
+
+    def fake_template_new(name, source="notes"):
+        seen["call"] = (name, source)
+        return "created it"
+
+    monkeypatch.setattr(services, "template_new", fake_template_new)
+
+    run(monkeypatch, StubRepo(), "template", "new", "standup", "--from", "lecture")
+
+    assert seen["call"] == ("standup", "lecture")
+    assert capsys.readouterr().err == "created it\n"
+
+
+def test_template_new_starts_from_notes_when_no_source_is_given(monkeypatch, capsys):
+    seen = {}
+
+    def fake_template_new(name, source="notes"):
+        seen["call"] = (name, source)
+        return "created it"
+
+    monkeypatch.setattr(services, "template_new", fake_template_new)
+
+    run(monkeypatch, StubRepo(), "template", "new", "standup")
+
+    assert seen["call"] == ("standup", "notes")
+
+
 def test_the_bare_template_command_lists_names_and_status(monkeypatch, capsys):
     monkeypatch.setattr(
         services, "template_rows", lambda: [("notes", "built-in"), ("refine", "overridden")]

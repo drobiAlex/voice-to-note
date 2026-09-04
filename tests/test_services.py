@@ -590,6 +590,17 @@ def test_extraction_with_a_custom_template_sends_its_text_in_the_prompt(
     assert "Summarize this standup:" in prompts[0]
 
 
+def test_extraction_with_a_builtin_content_template_sends_its_prompt(
+    repo, wav, monkeypatch, templates_dir
+):
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Ship it", speaker="S1")])
+    prompts = fake_llm(monkeypatch, claude=json.dumps(NOTES))
+
+    services.run_extraction(repo, memo_id, template="interview")
+
+    assert "interview or podcast" in prompts[0]
+
+
 def test_extraction_refuses_an_unknown_template_before_any_backend_is_called(
     repo, wav, monkeypatch, templates_dir
 ):
@@ -1849,25 +1860,30 @@ def test_resetting_a_template_already_built_in_reports_so_without_erroring(templ
 # --- custom note templates ---------------------------------------------------
 
 
-def test_note_templates_is_just_notes_when_the_directory_is_empty_or_missing(templates_dir):
-    assert services.note_templates() == ["notes"]
+BUILTIN_NOTE_TEMPLATES = ["notes", "interview", "lecture", "tutorial", "learning"]
+
+
+def test_note_templates_is_the_builtins_when_the_directory_is_empty_or_missing(templates_dir):
+    assert services.note_templates() == BUILTIN_NOTE_TEMPLATES
 
 
 def test_note_templates_includes_a_custom_file_dropped_beside_the_others(templates_dir):
     templates_dir.mkdir()
     (templates_dir / "standup.md").write_text("Summarize the standup")
 
-    assert services.note_templates() == ["notes", "standup"]
+    assert services.note_templates() == [*BUILTIN_NOTE_TEMPLATES, "standup"]
 
 
 def test_note_templates_excludes_overrides_of_the_non_note_builtins(templates_dir):
     # refine.md and ask.md shadow other prompts, not this one — they must not
-    # show up as a note template a user could pick to extract with
+    # show up as a note template a user could pick to extract with, and an
+    # interview.md shadows a built-in note template rather than adding one
     templates_dir.mkdir()
     (templates_dir / "refine.md").write_text("override")
     (templates_dir / "ask.md").write_text("override")
+    (templates_dir / "interview.md").write_text("override")
 
-    assert services.note_templates() == ["notes"]
+    assert services.note_templates() == BUILTIN_NOTE_TEMPLATES
 
 
 def test_template_text_reads_a_custom_note_template_file_directly(templates_dir):
@@ -1889,6 +1905,47 @@ def test_resetting_a_custom_note_template_explains_deleting_the_file_without_tou
     assert custom.exists()
     assert "standup" in message
     assert "custom template" in message
+
+
+def test_template_new_copies_an_existing_template_and_is_immediately_pickable(templates_dir):
+    message = services.template_new("standup", source="lecture")
+
+    assert (templates_dir / "standup.md").read_text() == llm.TEMPLATES["lecture"]
+    assert "standup" in services.note_templates()
+    assert "--template standup" in message
+
+
+def test_template_new_copies_the_source_override_when_one_is_saved(templates_dir):
+    templates_dir.mkdir()
+    (templates_dir / "notes.md").write_text("my reworded notes prompt")
+
+    services.template_new("standup")
+
+    assert (templates_dir / "standup.md").read_text() == "my reworded notes prompt"
+
+
+def test_template_new_refuses_a_shipped_name_that_would_shadow_the_builtin(templates_dir):
+    with pytest.raises(services.InvalidInput, match="built-in template"):
+        services.template_new("chat")
+
+
+def test_template_new_refuses_a_name_that_already_exists(templates_dir):
+    services.template_new("standup")
+
+    with pytest.raises(services.InvalidInput, match="already exists"):
+        services.template_new("standup")
+
+
+def test_template_new_refuses_a_name_that_would_not_survive_as_a_filename(templates_dir):
+    with pytest.raises(services.InvalidInput, match="invalid template name"):
+        services.template_new("My Standup")
+
+
+def test_template_new_refuses_an_unknown_source_before_writing_anything(templates_dir):
+    with pytest.raises(services.InvalidInput, match="unknown note template"):
+        services.template_new("standup", source="refine")
+
+    assert not (templates_dir / "standup.md").exists()
 
 
 def test_unsetting_a_value_removes_it_from_the_file(config_path):

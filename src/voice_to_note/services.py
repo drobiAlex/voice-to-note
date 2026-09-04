@@ -2,6 +2,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -606,13 +607,13 @@ def _registered_template(name: str) -> None:
 
 
 def note_templates() -> list[str]:
-    """Every template that can shape a note extraction: the built-in "notes"
-    first, then any other `*.md` file a user has dropped into
+    """Every template that can shape a note extraction: the built-in note
+    templates first, then any other `*.md` file a user has dropped into
     config.TEMPLATES_DIR that is not one of the app's own template names
     (refine and ask shape other calls, not this one). Sorted so the list —
     and the order `vtn template` prints it in — does not depend on directory
     order, which differs by filesystem."""
-    names = ["notes"]
+    names = list(llm.NOTE_TEMPLATES)
     if config.TEMPLATES_DIR.is_dir():
         names += sorted(
             p.stem for p in config.TEMPLATES_DIR.glob("*.md") if p.stem not in llm.TEMPLATES
@@ -650,6 +651,10 @@ def template_rows() -> list[tuple[str, str]]:
 # template to look at, not for the model reading the prompt
 _TEMPLATE_DOCS: dict[str, str] = {
     "notes": "extracts title, summary, action items and decisions from a transcript",
+    "interview": "notes tuned to a podcast or interview: theses, quotes with timestamps, advice",
+    "lecture": "notes tuned to a talk: the argument in order, concepts defined, further reading",
+    "tutorial": "notes tuned to a walkthrough: ordered steps with exact commands, gotchas",
+    "learning": "a learning note: atomic insights with quotes, takeaways, what to explore next",
     "refine": "repairs mishearings and misplaced sentence breaks in transcribed lines",
     "ask": "answers a question about a memo using only its transcript",
     "chat": "holds a conversation about one or several memos, grounded in their notes",
@@ -719,6 +724,28 @@ def template_reset(name: str) -> str:
         return f"{name} is already built-in"
     path.unlink()
     return f"{name} restored to built-in"
+
+
+def template_new(name: str, source: str = "notes") -> str:
+    """Starts a custom note template as a copy of an existing one, so a user
+    edits a prompt that already asks for the JSON shape the parser accepts
+    rather than writing one from a blank page. The name has to survive as
+    both a filename and a --template argument, and may not be one this app
+    ships — a file by a shipped name would silently shadow the built-in text
+    instead of appearing as the new template the user asked for."""
+    source = note_template(source)
+    if not re.fullmatch(r"[a-z0-9_-]+", name):
+        raise InvalidInput(
+            f"invalid template name: {name} — lowercase letters, digits, - and _ only"
+        )
+    if name in llm.TEMPLATES:
+        raise InvalidInput(f"{name} is a built-in template — pick another name")
+    path = _template_override_path(name)
+    if path.exists():
+        raise InvalidInput(f"template {name} already exists at {path}")
+    config.TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+    path.write_text(template_text(source))
+    return f"created {path} — edit it, then: vtn extract <id> --template {name}"
 
 
 # the optional stages a new recording can go through, in the order they run.
