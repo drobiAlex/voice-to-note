@@ -207,6 +207,14 @@ SETTINGS: dict[str, Setting] = {
         "characters of transcript a chat sends along; memos past that go in as notes only",
         kind="int",
     ),
+    "youtube_lang": Setting(
+        "en",
+        str,
+        "caption languages preferred for a youtube import, in order; first available wins",
+    ),
+    "youtube_timeout_s": Setting(
+        120, int, "seconds before a stuck yt-dlp or caption download is given up on", kind="int"
+    ),
     "refine_workers": Setting(4, int, "repair windows a refine pass runs at once", kind="int"),
     "refine_window": Setting(
         20, int, "transcript lines repaired together in one refine window", kind="int"
@@ -296,6 +304,9 @@ GEMINI_TIMEOUT_S: int = _setting("gemini_timeout_s")
 CHAT_MODEL: str = _setting("chat_model")
 CHAT_HISTORY_TURNS: int = _setting("chat_history_turns")
 CHAT_CONTEXT_CHARS: int = _setting("chat_context_chars")
+
+YOUTUBE_LANG: str = _setting("youtube_lang")
+YOUTUBE_TIMEOUT_S: int = _setting("youtube_timeout_s")
 
 REFINE_WORKERS: int = _setting("refine_workers")
 REFINE_WINDOW: int = _setting("refine_window")
