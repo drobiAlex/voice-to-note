@@ -540,6 +540,39 @@ def test_the_newest_memo_answers_when_several_share_a_recording_moment(repo):
     assert repo.memo_by_recorded_at("2026-08-17T06:01:22Z").id == second
 
 
+def test_a_memo_is_found_again_by_the_video_it_was_imported_from(repo):
+    make_memo(repo, filename="How to think", source_url="https://www.youtube.com/watch?v=abc")
+
+    found = repo.memo_by_source_url("https://www.youtube.com/watch?v=abc")
+
+    assert found.filename == "How to think"
+    assert found.source_url == "https://www.youtube.com/watch?v=abc"
+    assert repo.memo_by_source_url("https://www.youtube.com/watch?v=zzz") is None
+
+
+def test_a_memo_stored_without_a_source_url_is_never_found_as_an_import(repo):
+    # not knowing where a memo came from is no evidence it came from here
+    make_memo(repo, filename="standup.m4a")
+
+    assert repo.memos()[0].source_url is None
+    assert repo.memo_by_source_url("") is None
+
+
+def test_a_database_from_before_video_imports_learns_the_column(tmp_path):
+    path = tmp_path / "old.db"
+    con = sqlite3.connect(path)
+    con.executescript(PRE_ARCHIVE_SCHEMA)
+    con.execute("INSERT INTO memos (filename, wav_path) VALUES ('old.m4a', '/tmp/old.wav')")
+    con.commit()
+    con.close()
+
+    repo = Repository(path)
+
+    assert repo.memo(1).source_url is None
+    assert repo.memo_by_source_url("https://www.youtube.com/watch?v=abc") is None
+    repo.close()
+
+
 def test_the_migration_accounts_for_every_column_it_adds(repo):
     # four clauses have shipped and the docstring fell behind on the fourth;
     # this fails the next time a column is added without a word about it

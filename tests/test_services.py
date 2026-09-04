@@ -13,6 +13,7 @@ from voice_to_note import config, services
 from voice_to_note.domain import Segment, Speaker, Turn
 from voice_to_note.gateways import GatewayError, llm, whisper
 from voice_to_note.transforms import refine
+from voice_to_note.transforms.youtube import YouTubeVideo
 
 ALICE_VOICE = np.array([1.0, 0.0, 0.0], dtype=np.float32)
 BOB_VOICE = np.array([0.0, 1.0, 0.0], dtype=np.float32)
@@ -2889,3 +2890,150 @@ def test_chat_rows_carry_what_a_table_shows(repo, wav, monkeypatch):
     (row,) = services.chat_rows(repo)
     assert (row.id, row.title, row.about, row.messages) == (cid, "when?", f"{memo_id} standup", "2")
     assert services.chat_rows(repo, memo_id=999) == []
+
+
+# --- importing a youtube video ---------------------------------------------
+
+
+def yt_video(**overrides):
+    fields = dict(
+        video_id="abc123",
+        url="https://www.youtube.com/watch?v=abc123",
+        title="How to think",
+        channel="Some Channel",
+        duration_s=3852.0,
+        uploaded_at="2026-01-15T00:00:00Z",
+        language="en",
+        is_live=False,
+        subtitles={},
+        automatic_captions={"en": [{"url": "https://captions.example/t", "ext": "json3"}]},
+    )
+    fields.update(overrides)
+    return YouTubeVideo(**fields)
+
+
+CAPTIONS = json.dumps(
+    {
+        "events": [
+            {"tStartMs": 0, "dDurationMs": 2000, "segs": [{"utf8": "hello"}]},
+            {"tStartMs": 2000, "dDurationMs": 2000, "segs": [{"utf8": "world"}]},
+        ]
+    }
+)
+
+
+def test_importing_a_video_stores_a_memo_that_reads_like_any_transcription(repo, monkeypatch):
+    monkeypatch.setattr(services.youtube, "captions", lambda _url: CAPTIONS)
+
+    result = services.import_youtube(repo, yt_video(), project="learning")
+
+    memo = repo.memo(result.memo_id)
+    assert memo.filename == "How to think"
+    assert memo.wav_path == ""
+    assert memo.status == "transcribed"
+    assert memo.language == "en"
+    assert memo.duration_s == 3852.0
+    assert memo.project == "learning"
+    assert memo.recorded_at == "2026-01-15T00:00:00Z"
+    assert memo.source_url == "https://www.youtube.com/watch?v=abc123"
+    assert [s.text for s in repo.segments(memo.id)] == ["hello world"]
+    assert result.language == "en"
+    assert result.labels == []
+
+
+def test_a_video_with_no_captions_at_all_refuses_before_storing_anything(repo, monkeypatch):
+    monkeypatch.setattr(
+        services.youtube, "captions", lambda _url: pytest.fail("fetched despite no captions")
+    )
+
+    with pytest.raises(services.InvalidInput, match="no captions"):
+        services.import_youtube(repo, yt_video(automatic_captions={}))
+
+    assert repo.memos() == []
+
+
+def test_asking_for_a_language_the_video_lacks_names_the_ones_it_has(repo, monkeypatch):
+    monkeypatch.setattr(
+        services.youtube, "captions", lambda _url: pytest.fail("fetched a refused language")
+    )
+
+    with pytest.raises(services.InvalidInput, match="no fr captions.*available: en"):
+        services.import_youtube(repo, yt_video(), lang="fr")
+
+
+def test_the_configured_preference_never_makes_a_video_unimportable(repo, monkeypatch):
+    # the default language list is a ranking, not a demand: a japanese-only
+    # video still imports, in japanese
+    monkeypatch.setattr(services.config, "YOUTUBE_LANG", "en")
+    monkeypatch.setattr(services.youtube, "captions", lambda _url: CAPTIONS)
+    video = yt_video(
+        language="ja",
+        automatic_captions={"ja": [{"url": "https://captions.example/ja", "ext": "json3"}]},
+    )
+
+    result = services.import_youtube(repo, video)
+
+    assert result.language == "ja"
+
+
+def test_an_empty_caption_track_refuses_rather_than_storing_a_blank_memo(repo, monkeypatch):
+    monkeypatch.setattr(services.youtube, "captions", lambda _url: '{"events": []}')
+
+    with pytest.raises(services.InvalidInput, match="empty"):
+        services.import_youtube(repo, yt_video())
+
+    assert repo.memos() == []
+
+
+def test_a_video_already_imported_is_found_by_its_canonical_url(repo, monkeypatch):
+    monkeypatch.setattr(services.youtube, "captions", lambda _url: CAPTIONS)
+    stored = services.import_youtube(repo, yt_video())
+
+    found = services.find_youtube_duplicate(repo, yt_video())
+    assert found is not None and found.id == stored.memo_id
+
+    other = yt_video(url="https://www.youtube.com/watch?v=zzz999")
+    assert services.find_youtube_duplicate(repo, other) is None
+
+
+def test_a_pasted_string_that_is_not_a_url_is_refused_before_the_network(monkeypatch):
+    monkeypatch.setattr(
+        services.youtube, "video_info", lambda _url: pytest.fail("touched the network")
+    )
+
+    with pytest.raises(services.InvalidInput, match="not a URL"):
+        services.youtube_video("how to think youtube")
+
+
+def test_a_stream_still_live_is_refused_with_when_to_come_back(monkeypatch):
+    monkeypatch.setattr(
+        services.youtube,
+        "video_info",
+        lambda _url: {
+            "id": "abc123",
+            "title": "Live now",
+            "webpage_url": "https://www.youtube.com/watch?v=abc123",
+            "is_live": True,
+        },
+    )
+
+    with pytest.raises(services.InvalidInput, match="still live"):
+        services.youtube_video("https://www.youtube.com/watch?v=abc123")
+
+
+def test_youtube_steps_allows_refine_and_notes_and_nothing_else():
+    assert services.youtube_steps("refine,notes") == {"refine", "notes"}
+    assert services.youtube_steps("") == frozenset()
+
+    with pytest.raises(services.InvalidInput, match="unknown step: dance"):
+        services.youtube_steps("dance")
+
+
+def test_asking_a_video_import_for_speakers_explains_there_is_no_audio():
+    with pytest.raises(services.InvalidInput, match="no audio"):
+        services.youtube_steps("speakers,notes")
+
+
+def test_the_heading_names_the_video_its_channel_and_its_length():
+    assert services.youtube_heading(yt_video()) == "How to think — Some Channel, 1h 4m 12s"
+    assert services.youtube_heading(yt_video(channel="", duration_s=61)) == "How to think, 1m 1s"

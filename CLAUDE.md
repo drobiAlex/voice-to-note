@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```sh
-uv run pytest -q                  # 948 tests, spread over the cores by default
+uv run pytest -q                  # 1004 tests, spread over the cores by default
 uv run pytest -m "not ui"         # skip the Textual Pilot tests (tests/test_tui.py)
 uv run pytest tests/test_services.py::test_name   # single test
 uv run mypy src
@@ -48,9 +48,11 @@ Four layers, strictly one-directional. `services.py` is the only module that com
 - **`gateways/`** — everything outside the process, each raising `GatewayError`: `audio` (ffmpeg),
   `whisper` (whisper-cli subprocess), `sherpa` (onnx diarization in a spawned process pool), `llm`
   (claude/codex/gemini CLIs, ollama HTTP), `bootstrap` (clone/build/download during setup),
-  `capture` (native Swift recorder), `qos` (taskpolicy/nice wrapping).
+  `capture` (native Swift recorder), `qos` (taskpolicy/nice wrapping), `youtube` (yt-dlp
+  subprocess plus a caption GET — the words arrive as captions, never as audio).
 - **`transforms/`** — pure functions, no I/O: `segments`, `speakers`, `notes`, `refine`, `todos`,
-  `live` (where to cut a chunk of a meeting, and how its lines fit into the whole).
+  `live` (where to cut a chunk of a meeting, and how its lines fit into the whole), `youtube`
+  (which caption track to take, and how its events fold into timed paragraphs).
 - **`storage/repository.py`** — every SQL statement in the app. `domain.py` holds the frozen
   dataclasses and TypedDicts both sides speak in.
 
@@ -80,7 +82,17 @@ already signed in to — no API keys anywhere.
 
 **Prompt templates.** `llm.TEMPLATES` ships the built-ins; `$VTN_HOME/templates/<name>.md`
 overrides one, re-read on every call. An override may reword the ask but not the JSON shape, which
-the parser downstream enforces.
+the parser downstream enforces. The subset a `--template` flag may pick lives in
+`llm.NOTE_TEMPLATES` (notes/interview/lecture/tutorial/learning, all sharing `_NOTES_SHAPE`);
+`services.note_templates()` filters anything registered in `TEMPLATES` out of the custom-file list,
+so a new shipped note template goes into `NOTE_TEMPLATES` — putting it only in `TEMPLATES` hides
+it. `vtn template new <name> --from <existing>` copies one into a custom file.
+
+**A memo can come from a video.** `vtn youtube <url>` stores YouTube captions as ordinary timed
+segments with `wav_path=''` and no speakers — status lands `'transcribed'`, so extract/refine/
+ask/chat all just work. Duplicates are recognised by the canonical `source_url` column, not
+`recorded_at` (the upload day only stamps midnight). yt-dlp is a subprocess on purpose: the user
+keeps it current with brew as YouTube churns, which is also the first fix for any fetch failure.
 
 **Migrations are additive.** `Repository._migrate` guards each `ALTER TABLE` with
 `PRAGMA table_info`; there is no version table. A brand-new `todos` table triggers a one-off

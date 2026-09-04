@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS memos (
   notes_md TEXT,
   updated_at TEXT,
   recorded_at TEXT,
-  archived_at TEXT
+  archived_at TEXT,
+  source_url TEXT
 );
 CREATE TABLE IF NOT EXISTS segments (
   id INTEGER PRIMARY KEY,
@@ -98,7 +99,7 @@ CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages(conversation_id,
 
 MEMO_COLUMNS = (
     "id, filename, wav_path, duration_s, language, status, created_at, project,"
-    " updated_at, recorded_at, archived_at"
+    " updated_at, recorded_at, archived_at, source_url"
 )
 
 
@@ -142,8 +143,9 @@ class Repository:
         grouped, `notes_md` for one made before notes could be edited,
         `updated_at` for one made before memos recorded when they last changed,
         `recorded_at` for one made before an import could be recognised as a
-        recording already stored, and `archived_at` for one made before a memo
-        could be put away without being deleted."""
+        recording already stored, `archived_at` for one made before a memo
+        could be put away without being deleted, and `source_url` for one made
+        before a memo could come from a video instead of a recording."""
         cols = {r["name"] for r in self.con.execute("PRAGMA table_info(speakers)")}
         if "embedding" not in cols:
             self.con.execute("ALTER TABLE speakers ADD COLUMN embedding BLOB")
@@ -163,6 +165,8 @@ class Repository:
             self.con.execute("ALTER TABLE memos ADD COLUMN recorded_at TEXT")
         if "archived_at" not in cols:
             self.con.execute("ALTER TABLE memos ADD COLUMN archived_at TEXT")
+        if "source_url" not in cols:
+            self.con.execute("ALTER TABLE memos ADD COLUMN source_url TEXT")
 
     def close(self) -> None:
         """Closes the memo database."""
@@ -205,16 +209,19 @@ class Repository:
         speakers: Sequence[Speaker] = (),
         project: str = "other",
         recorded_at: str | None = None,
+        source_url: str | None = None,
     ) -> int:
         """Stores a finished transcription: memo, segments and speakers together.
         When the recording was made is stored beside it where the source said so
         — the fact a later import is recognised by — and left empty where it did
-        not, which is not the same as a recording made at no particular time."""
+        not, which is not the same as a recording made at no particular time.
+        A memo whose words came off a video instead of a recording carries that
+        video's canonical URL the same way, for the same recognition."""
         with self.con:
             cur = self.con.execute(
                 "INSERT INTO memos (filename, wav_path, duration_s, language, status,"
-                " project, recorded_at) VALUES (?,?,?,?,'transcribed',?,?)",
-                (filename, wav_path, duration_s, language, project, recorded_at),
+                " project, recorded_at, source_url) VALUES (?,?,?,?,'transcribed',?,?,?)",
+                (filename, wav_path, duration_s, language, project, recorded_at, source_url),
             )
             # sqlite always reports the row it just inserted; the check narrows
             # the type for everything downstream that treats this as an id
@@ -488,6 +495,18 @@ class Repository:
         row = self.con.execute(
             f"SELECT {MEMO_COLUMNS} FROM memos WHERE recorded_at=? ORDER BY id DESC LIMIT 1",
             (recorded_at,),
+        ).fetchone()
+        return _memo(row) if row else None
+
+    def memo_by_source_url(self, source_url: str) -> Memo | None:
+        """The memo already imported from this video, or nothing when none is.
+        The newest wins where several carry the URL, and a memo stored without
+        one never matches, for exactly the reasons `memo_by_recorded_at` gives:
+        a duplicate is answered with its most current copy, and not knowing
+        where a memo came from is no evidence it came from here."""
+        row = self.con.execute(
+            f"SELECT {MEMO_COLUMNS} FROM memos WHERE source_url=? ORDER BY id DESC LIMIT 1",
+            (source_url,),
         ).fetchone()
         return _memo(row) if row else None
 
@@ -987,4 +1006,5 @@ def _memo(row: sqlite3.Row) -> Memo:
         row["updated_at"],
         row["recorded_at"],
         row["archived_at"],
+        row["source_url"],
     )

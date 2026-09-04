@@ -13,6 +13,7 @@ from .storage.repository import Repository
 EXAMPLES = """examples:
   vtn process ~/memos/standup.m4a     transcribe, diarize, then extract notes
   vtn record --project work           tape this Mac's meeting, then process it
+  vtn youtube <url> --template lecture   import a talk's captions, then extract notes
   vtn show 3                          print memo 3's transcript
   vtn notes 3 --json > notes.json     machine-readable notes for scripting
   vtn rename 3 S1 Samantha            name a speaker; later memos match by voice
@@ -151,6 +152,30 @@ def cmd_process(args: argparse.Namespace) -> None:
             status("skipped")
             return
         _pipeline(repo, src, args, steps, count)
+
+
+def cmd_youtube(args: argparse.Namespace) -> None:
+    """Takes a pasted YouTube link all the way to notes on screen, asking
+    first when the same video is already here. The options are checked before
+    the network is touched, and the video is named before its captions are
+    fetched, so a mispasted link is caught at the earliest line it can be."""
+    services.note_template(args.template)
+    steps = services.youtube_steps(args.steps)
+    with Repository() as repo:
+        status("fetching video info …")
+        video = services.youtube_video(args.url)
+        status(services.youtube_heading(video))
+        stored = services.find_youtube_duplicate(repo, video)
+        if stored is not None and not _confirmed(
+            f"memo {stored.id} — {stored.filename} was already imported from"
+            " this video; import it again?"
+        ):
+            status("skipped")
+            return
+        result = services.import_youtube(
+            repo, video, project=args.project, lang=args.lang, log=status
+        )
+        _finished(repo, result, args, steps)
 
 
 def _taped(track: Path) -> bool:
@@ -706,6 +731,29 @@ def main() -> None:
         " level<TAB>system dBFS<TAB>mic dBFS",
     )
     sp.set_defaults(fn=cmd_record)
+
+    sp = sub.add_parser("youtube", help="import a YouTube video's captions as a memo")
+    sp.add_argument("url")
+    sp.add_argument("--project", default="other", help="file the memo under a project")
+    sp.add_argument(
+        "--template",
+        default="notes",
+        help="note template to extract with (see: vtn template)",
+    )
+    sp.add_argument(
+        "--lang",
+        metavar="LANG",
+        help="caption language to fetch, refused if the video lacks it"
+        " (default: the youtube_lang setting's preference order)",
+    )
+    sp.add_argument(
+        "--steps",
+        default="notes",
+        metavar="STEPS",
+        help='comma-separated optional stages to run: refine,notes'
+        ' (default: notes; "" imports just the transcript)',
+    )
+    sp.set_defaults(fn=cmd_youtube)
 
     sp = sub.add_parser("menubar", help="open the menu bar recorder")
     sp.add_argument(

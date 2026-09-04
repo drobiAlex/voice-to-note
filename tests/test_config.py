@@ -70,6 +70,8 @@ def test_every_setting_resolves_to_its_known_default():
         "chat_model": "sonnet",
         "chat_history_turns": 12,
         "chat_context_chars": 60000,
+        "youtube_lang": "en",
+        "youtube_timeout_s": 120,
         "refine_workers": 4,
         "refine_window": 20,
         "whisper_repo_url": "https://github.com/ggml-org/whisper.cpp",

@@ -30,7 +30,16 @@ from .domain import (
     TrackFormat,
     Turn,
 )
-from .gateways import GatewayError, audio, bootstrap, capture, llm, sherpa, whisper
+from .gateways import (
+    GatewayError,
+    audio,
+    bootstrap,
+    capture,
+    llm,
+    sherpa,
+    whisper,
+    youtube,
+)
 from .storage.repository import Repository
 from .transforms.live import SEARCH_S, cut_offset, mono, prompt_tail, shifted
 from .transforms.notes import SCHEMA, parse_notes, render_notes, render_notes_markdown
@@ -57,6 +66,13 @@ from .transforms.speakers import (
     resolve_speaker_names,
 )
 from .transforms.todos import is_mine, normalize
+from .transforms.youtube import (
+    YouTubeVideo,
+    caption_langs,
+    pick_track,
+    segments_from_captions,
+    video_from_info,
+)
 
 Log = Callable[[str], None]
 # how far through the pipeline a recording has got: which stage is starting, and
@@ -1115,6 +1131,112 @@ def find_duplicate(repo: Repository, src: Path) -> Memo | None:
     question for whoever is asking, and only a front end can put it to a
     person."""
     return repo.memo_by_recorded_at(audio.recorded_at(src))
+
+
+# the optional stages a youtube import can go through. Shorter than a
+# recording's list on purpose: the words arrive as captions, so there is no
+# audio for speaker detection to listen to
+YOUTUBE_STEPS: tuple[str, ...] = ("refine", "notes")
+
+
+def youtube_steps(text: str) -> frozenset[str]:
+    """Which optional stages an imported video's transcript goes through, as a
+    caller types them — process_steps for a memo that never had audio. Asking
+    for speakers is refused with its own explanation rather than lumped in
+    with typos: it is a reasonable thing to want and simply cannot be had."""
+    steps = {t.strip() for t in text.split(",") if t.strip()}
+    if "speakers" in steps:
+        raise InvalidInput("a video import has no audio to detect speakers in")
+    unknown = steps - set(YOUTUBE_STEPS)
+    if unknown:
+        raise InvalidInput(
+            f"unknown step: {', '.join(sorted(unknown))}"
+            f" — valid steps: {', '.join(YOUTUBE_STEPS)}"
+        )
+    return frozenset(steps)
+
+
+def youtube_video(url: str) -> YouTubeVideo:
+    """What YouTube says about the video behind a pasted link, refused before
+    the network is touched when the link is not one, and refused after when
+    the stream is still running — captions exist once it ends, and a memo of
+    half a stream would read as the whole of it forever."""
+    url = url.strip()
+    if not url.startswith(("http://", "https://")):
+        raise InvalidInput(f"not a URL: {url or '(nothing)'}")
+    video = video_from_info(youtube.video_info(url))
+    if video.is_live:
+        raise InvalidInput("this stream is still live — captions can be imported once it ends")
+    return video
+
+
+def find_youtube_duplicate(repo: Repository, video: YouTubeVideo) -> Memo | None:
+    """The memo already imported from this video, if there is one. Recognised
+    by the canonical watch URL rather than the pasted spelling of it, so a
+    short link and a full one find the same memo. The lookup and nothing else,
+    for find_duplicate's reason: only a front end can ask a person whether a
+    duplicate was meant."""
+    return repo.memo_by_source_url(video.url)
+
+
+def youtube_heading(video: YouTubeVideo) -> str:
+    """The one line a front end shows before asking anything else: what this
+    video is, whose it is, and how long it runs — enough to catch a mispasted
+    link before any captions are fetched."""
+    channel = f" — {video.channel}" if video.channel else ""
+    return f"{video.title}{channel}, {_duration(video.duration_s)}"
+
+
+_NO_CAPTIONS = "no captions on this video — vtn imports captions, it does not transcribe audio"
+
+
+def import_youtube(
+    repo: Repository,
+    video: YouTubeVideo,
+    project: str = "other",
+    lang: str | None = None,
+    log: Log = _silent,
+) -> ProcessResult:
+    """A video's captions in, stored memo out — process_memo for words that
+    were never audio on this machine. The memo lands exactly where a
+    transcription does ('transcribed', timed segments, no speakers), so
+    everything downstream — extract, refine, ask, chat — treats it as any
+    other memo. A language asked for by name must be there or the import
+    refuses, naming what is; the configured preference merely ranks the
+    tracks, because a default must not make a video unimportable."""
+    project = _project_name(project)
+    if lang:
+        picked = pick_track(video, [lang], any_language=False)
+        if picked is None:
+            offered = caption_langs(video)
+            if not offered:
+                raise InvalidInput(_NO_CAPTIONS)
+            listed = ", ".join(offered[:20]) + (" …" if len(offered) > 20 else "")
+            raise InvalidInput(f"no {lang} captions on this video — available: {listed}")
+    else:
+        preferred = [t.strip() for t in config.YOUTUBE_LANG.split(",") if t.strip()]
+        picked = pick_track(video, preferred)
+        if picked is None:
+            raise InvalidInput(_NO_CAPTIONS)
+    track_lang, track_url, auto = picked
+    # auto-generated is worth flagging while the download runs: unpunctuated
+    # captions are why these notes may read rougher than a manual track's
+    log(f"downloading captions ({track_lang}, {'auto-generated' if auto else 'manual'}) …")
+    segs = segments_from_captions(youtube.captions(track_url))
+    if not segs:
+        raise InvalidInput("the caption track is empty — nothing to import")
+    memo_id = repo.create_memo(
+        filename=video.title,
+        wav_path="",
+        duration_s=video.duration_s,
+        language=track_lang,
+        segments=segs,
+        speakers=(),
+        project=project,
+        recorded_at=video.uploaded_at,
+        source_url=video.url,
+    )
+    return ProcessResult(memo_id, len(segs), [], track_lang)
 
 
 def _speaker_count(num_speakers: int | None) -> int | None:
