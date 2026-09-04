@@ -231,6 +231,16 @@ class ImportOptions:
     steps: frozenset[str]
 
 
+@dataclass(frozen=True)
+class YouTubeOptions:
+    """How captions from one video are filed and turned into knowledge."""
+
+    project: str
+    language: str | None
+    template: str
+    steps: frozenset[str]
+
+
 # the steps a form left untouched runs, reproducing `vtn process`'s own
 # default exactly: speakers guessed and detected, notes extracted, no repair
 # pass unless it is asked for
@@ -437,6 +447,74 @@ class ProcessMemo(ModalScreen[None]):
 
     def action_cancel(self) -> None:
         """Brings nothing in."""
+        self.dismiss(None)
+
+
+class ImportYouTube(ModalScreen[None]):
+    """A YouTube link and the choices that carry its captions on to notes."""
+
+    BINDINGS = [
+        Binding("ctrl+s", "start", "Start", priority=True),
+        ("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(
+        self, project: str, store: Callable[[str, YouTubeOptions], None]
+    ) -> None:
+        super().__init__()
+        self.project = project
+        self.store = store
+
+    def compose(self) -> ComposeResult:
+        yield Input(placeholder="YouTube URL", id="youtube-url")
+        yield Input(self.project, id="youtube-project")
+        yield Input(
+            placeholder="caption language (automatic)", id="youtube-language"
+        )
+        yield Select(
+            [(name, name) for name in services.note_templates()],
+            value="notes",
+            id="youtube-template",
+        )
+        yield SelectionList(
+            *[(step, step, step == "notes") for step in services.YOUTUBE_STEPS],
+            id="youtube-steps",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#youtube-url", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._send()
+
+    def action_start(self) -> None:
+        self._send()
+
+    def _send(self) -> None:
+        """Checks the cheap inputs here so a typo remains on screen to fix."""
+        try:
+            url = self.query_one("#youtube-url", Input).value.strip()
+            if not url.startswith(("http://", "https://")):
+                raise services.InvalidInput(f"not a URL: {url or '(nothing)'}")
+            project = services.project_name(
+                self.query_one("#youtube-project", Input).value
+            )
+            template = self.query_one("#youtube-template", Select).value
+            if template is Select.NULL:
+                template = "notes"
+            template = str(template)
+            services.note_template(template)
+            language = self.query_one("#youtube-language", Input).value.strip() or None
+            steps = frozenset(
+                self.query_one("#youtube-steps", SelectionList).selected
+            )
+            self.store(url, YouTubeOptions(project, language, template, steps))
+        except services.InvalidInput as refused:
+            self.notify(str(refused), severity="warning")
+            return
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
         self.dismiss(None)
 
 
@@ -1872,6 +1950,7 @@ class MemoApp(App[None]):
         # neither half of the case rule: this acts on no memo and on no project,
         # it brings something new into the app
         ("o", "process", "Add recording"),
+        ("y", "youtube", "Add YouTube"),
         # lower case acts on the one memo, upper case on the whole project the
         # sidebar cursor is resting on
         Binding("R", "rename_project", "Rename project", show=False),
@@ -2539,6 +2618,60 @@ class MemoApp(App[None]):
                 self._already_stored,
             )
         )
+
+    def action_youtube(self) -> None:
+        """Offers to import a video's captions and turn them into notes."""
+        self.push_screen(ImportYouTube(self.project or "other", self._youtube))
+
+    def _youtube(self, url: str, options: YouTubeOptions) -> None:
+        """Fetches, imports, repairs and extracts away from the UI thread."""
+        self._start_job(
+            url,
+            "YouTube video",
+            "importing",
+            lambda repo: self._youtube_imported(repo, url, options),
+        )
+
+    def _youtube_imported(
+        self, repo: Repository, url: str, options: YouTubeOptions
+    ) -> str:
+        self._stage("fetching video info …")
+        video = services.youtube_video(url)
+        self._stage(services.youtube_heading(video))
+        stored = services.find_youtube_duplicate(repo, video)
+        if stored is not None:
+            raise services.InvalidInput(
+                f"memo {stored.id} — {stored.filename} was already imported"
+                " from this video"
+            )
+        result = services.import_youtube(
+            repo,
+            video,
+            project=options.project,
+            lang=options.language,
+            log=self._stage,
+        )
+        if "refine" in options.steps:
+            self._stage("refining transcript …")
+            try:
+                refined = services.refine_transcript(repo, result.memo_id)
+            except (GatewayError, services.ExtractionError) as failed:
+                self.call_from_thread(self.notify, str(failed), severity="warning")
+            else:
+                self._stage(f"memo {result.memo_id} repaired {len(refined.changes)} lines")
+        if "notes" in options.steps:
+            self._stage("extracting notes …")
+            try:
+                backend = services.run_extraction(
+                    repo, result.memo_id, template=options.template
+                )
+            except (GatewayError, services.ExtractionError) as failed:
+                self.call_from_thread(self.notify, str(failed), severity="warning")
+            else:
+                self._stage(f"memo {result.memo_id} extracted via {backend}")
+        else:
+            self._stage("transcript stored — extract notes any time")
+        return f"{video.title} is memo {result.memo_id}"
 
     def _already_stored(self, path: str) -> Memo | None:
         """The memo this recording is already in the database as, when it is

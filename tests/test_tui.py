@@ -1791,6 +1791,98 @@ def said(pilot) -> list[str]:
     return [str(n.message) for n in pilot.app._notifications]
 
 
+# --- importing YouTube captions -------------------------------------------
+
+
+async def open_youtube_modal(pilot) -> None:
+    await pilot.press("y")
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_y_opens_a_youtube_import_form_for_the_project_being_browsed(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await open_youtube_modal(pilot)
+
+        assert showing(pilot.app, "#youtube-url")
+        assert pilot.app.screen.query_one("#youtube-project", Input).value == "work"
+        assert pilot.app.screen.query_one("#youtube-steps", SelectionList).selected == [
+            "notes"
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_non_url_stays_in_the_youtube_form_to_be_fixed(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+        pilot.app.screen.query_one("#youtube-url", Input).value = "not a link"
+        await pilot.press("enter")
+
+        assert showing(pilot.app, "#youtube-url")
+        assert any("not a URL" in message for message in said(pilot))
+
+
+@pytest.mark.asyncio
+async def test_a_youtube_video_is_imported_and_extracted_off_the_ui_thread(
+    repo, monkeypatch
+):
+    seed(repo)
+    video = services.YouTubeVideo(
+        video_id="abc",
+        url="https://www.youtube.com/watch?v=abc",
+        title="A useful lecture",
+        channel="Teacher",
+        duration_s=60.0,
+        uploaded_at="2026-01-01T00:00:00Z",
+        language="en",
+        is_live=False,
+        subtitles={},
+        automatic_captions={},
+    )
+    monkeypatch.setattr(services, "youtube_video", lambda _url: video)
+    monkeypatch.setattr(services, "find_youtube_duplicate", lambda _repo, _video: None)
+
+    def import_video(worker_repo, _video, project="other", lang=None, log=None):
+        memo_id = worker_repo.create_memo(
+            filename=video.title,
+            wav_path="",
+            duration_s=video.duration_s,
+            language=lang or "en",
+            segments=[Segment(0, 1000, "the useful idea")],
+            speakers=(),
+            project=project,
+            source_url=video.url,
+        )
+        return services.ProcessResult(memo_id, 1, [], lang or "en")
+
+    monkeypatch.setattr(services, "import_youtube", import_video)
+    extracted: list[tuple[int, str]] = []
+
+    def extract(worker_repo, memo_id, force=False, template="notes"):
+        extracted.append((memo_id, template))
+        worker_repo.save_extraction(memo_id, "claude", NOTES)
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", extract)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await open_youtube_modal(pilot)
+        pilot.app.screen.query_one("#youtube-url", Input).value = video.url
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert not showing(pilot.app, "#youtube-url")
+        assert extracted and extracted[0][1] == "notes"
+        assert "A useful lecture" in memo_names(pilot.app)
+        assert any("is memo" in message for message in said(pilot))
+
+
 @pytest.mark.asyncio
 async def test_pressing_x_extracts_notes_for_the_memo_on_screen(repo, monkeypatch):
     # the fake writes through the connection the worker opened, so this exercises
