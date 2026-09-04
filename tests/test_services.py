@@ -2871,3 +2871,15 @@ def test_setup_leaves_the_recorder_alone_while_a_meeting_is_being_taped(monkeypa
 
     assert "quit" not in calls and "open" not in calls
     assert "[9/9] menu bar recorder — recording underway, left as it is" in logged
+
+
+def test_setup_with_launching_switched_off_builds_the_recorder_but_never_starts_it(monkeypatch):
+    monkeypatch.setattr(services.sys, "platform", "darwin")
+    monkeypatch.setattr(services.config, "SETUP_LAUNCH", "off")
+    opened = []
+    world = services.mock_world()
+    world = dataclasses.replace(world, open_menubar=lambda app: opened.append(app))
+    logged = []
+    services.setup(log=logged.append, world=world)
+    assert "[9/9] menu bar recorder launch — off by setting, skipped" in logged
+    assert opened == []

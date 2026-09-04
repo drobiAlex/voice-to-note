@@ -462,6 +462,10 @@ def setup(
 
     if sys.platform != "darwin":
         log("[9/9] menu bar recorder launch — macOS only, skipped")
+    elif config.SETUP_LAUNCH != "on":
+        # a build box compiles the recorder to prove it compiles; launching it
+        # there would put a scratch checkout's recorder in somebody's menu bar
+        log("[9/9] menu bar recorder launch — off by setting, skipped")
     elif world.recording():
         # quitting the recorder takes its capture helper down with it, and no
         # upgrade is worth ending somebody's meeting; the fresh build is

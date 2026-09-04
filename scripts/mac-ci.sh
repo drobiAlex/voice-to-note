@@ -13,6 +13,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export VTN_HOME="$PWD"
+# prove the recorder compiles; never put the scratch checkout's recorder in
+# the menu bar of whoever owns this Mac
+export VTN_SETUP_LAUNCH=off
 mkdir -p artifacts
 native=src/voice_to_note/native
 
