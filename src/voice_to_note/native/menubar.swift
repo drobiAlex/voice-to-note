@@ -572,7 +572,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.hasShadow = shadow
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        // never dragged by the system, only by us. macOS hands a window the
+        // window server is dragging to its tiler the moment the pointer meets
+        // a screen edge — the screen splits in two and the window is swallowed
+        // — and there is no way to opt a window out of that. What there is, is
+        // this: a window the system was never dragging in the first place.
+        // AppKit blesses the arrangement outright, saying an app may move a
+        // window itself from the mouse events once user dragging is off.
+        panel.isMovable = false
+        panel.isMovableByWindowBackground = false
+        // stationary keeps Mission Control from shuffling it about with the
+        // ordinary windows, and ignoresCycle keeps it out of the app switcher's
+        // ring: this is a control that sits still, not a document window
+        panel.collectionBehavior = [
+            .canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle,
+        ]
         return panel
     }
 
@@ -3315,8 +3329,17 @@ final class Dock {
     /// points — a window with nothing on screen gets no events at all.
     static let peek: CGFloat = 22
 
-    /// How near the pointer must be let go to an edge for the window to tuck.
-    static let snap: CGFloat = 8
+    /// How near a window's own body must come to an edge to tuck into it when
+    /// let go. It is the window that is measured and not the pointer, so that
+    /// tucking never asks anybody to shove the cursor into the side of the
+    /// screen — the gesture macOS reads as "tile this window", and the one
+    /// thing this window must never look like it is doing.
+    static let magnet: CGFloat = 28
+
+    /// The air kept between the window and the edge of the screen while it is
+    /// being dragged. It cannot be pushed through the side: what a drag can do
+    /// is put it against the edge, and what letting go there does is tuck it.
+    static let keepOff: CGFloat = 2
 
     /// The dwell before a hover reveals, and the grace after the pointer leaves
     /// before it hides again — each re-checked when it fires. A fifth of a
@@ -3452,12 +3475,12 @@ final class Dock {
         case let .moved(point):
             guard let grab else { return }
             leaveWherever()
-            panel.setFrameOrigin(NSPoint(x: point.x - grab.x, y: point.y - grab.y))
-        case let .ended(point):
+            panel.setFrameOrigin(held(at: NSPoint(x: point.x - grab.x, y: point.y - grab.y)))
+        case .ended:
             NSCursor.pop()
             guard grab != nil else { return }
             grab = nil
-            release(at: point)
+            release()
         }
     }
 
@@ -3476,15 +3499,42 @@ final class Dock {
         panel.alphaValue = 1
     }
 
-    /// Let go: within a few points of an edge it tucks into that edge, at the
-    /// spot along it where it was dropped; anywhere else it stays.
-    private func release(at point: NSPoint) {
-        guard let screen = Dock.screen(containing: point) else {
+    /// Where a drag may put the window: on the screen the pointer is over,
+    /// and never past its edges. The window stops against the side the way a
+    /// thing pushed across a desk stops against the wall, which is what makes
+    /// tucking a push rather than a shove through.
+    ///
+    /// The pointer picks the screen, not the window, so a drag onto a second
+    /// display goes where the hand goes rather than being held back by the
+    /// edge of the display it started on.
+    private func held(at origin: NSPoint) -> NSPoint {
+        let cursor = NSEvent.mouseLocation
+        guard let screen = Dock.screen(containing: cursor) ?? NSScreen.main else { return origin }
+        return Dock.clamped(origin, size: panel.frame.size, within: room(screen.visibleFrame))
+    }
+
+    /// The window's own body — what is drawn, without the air its shadow is
+    /// cast into.
+    private var body: NSRect {
+        panel.frame.insetBy(dx: inset, dy: inset)
+    }
+
+    /// Where the window may sit, in frame terms: the body inside the screen
+    /// with a couple of points to spare, which is the frame overhanging it by
+    /// the width of that air.
+    private func room(_ area: NSRect) -> NSRect {
+        area.insetBy(dx: -inset + Dock.keepOff, dy: -inset + Dock.keepOff)
+    }
+
+    /// Let go: a window resting against an edge tucks into it, at the spot
+    /// along that edge where it was left; anywhere else it stays.
+    private func release() {
+        guard let screen = Dock.screen(under: panel.frame) ?? NSScreen.main else {
             state = .free
             onPlaced?(place)
             return
         }
-        if let edge = Dock.edge(near: point, of: screen) {
+        if let edge = Dock.edge(hugged: body, on: screen) {
             along = Dock.along(edge, of: panel.frame, on: screen)
             tuck(edge, on: screen)
         } else {
@@ -3626,16 +3676,17 @@ final class Dock {
 
     // --- screens ---------------------------------------------------------------------
 
-    /// The nearest edge within reach of a point, or nothing. Tested against the
-    /// screen's whole frame rather than the part the menu bar and Dock leave,
-    /// because a window dropped under either of them was dropped at the edge.
-    static func edge(near point: NSPoint, of screen: NSScreen) -> Edge? {
-        let frame = screen.frame
+    /// The edge a window has come to rest against, or nothing. Measured from
+    /// the body to the part of the screen the menu bar and Dock leave free,
+    /// which is the same rectangle a drag is held inside — so a window pushed
+    /// as far as it will go is always within reach of the edge it was pushed at.
+    static func edge(hugged body: NSRect, on screen: NSScreen) -> Edge? {
+        let area = screen.visibleFrame
         let distances: [(Edge, CGFloat)] = [
-            (.left, point.x - frame.minX), (.right, frame.maxX - point.x),
-            (.top, frame.maxY - point.y), (.bottom, point.y - frame.minY),
+            (.left, body.minX - area.minX), (.right, area.maxX - body.maxX),
+            (.top, area.maxY - body.maxY), (.bottom, body.minY - area.minY),
         ]
-        return distances.filter { $0.1 <= snap }.min { $0.1 < $1.1 }?.0
+        return distances.filter { $0.1 <= magnet }.min { $0.1 < $1.1 }?.0
     }
 
     /// How far along an edge a frame's middle sits, as a fraction of the screen.
