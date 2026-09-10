@@ -3289,7 +3289,7 @@ enum PuckMotion {
                                 bound: ((CGPoint) -> CGPoint)?) -> CGPoint {
         var destination = requested
         if let bound {
-            for _ in 0..<8 {
+            for _ in 0..<32 {
                 var probe = state
                 var correction = CGPoint.zero
                 for _ in 0..<120 {

@@ -70,9 +70,10 @@ for axis in 0...1 {
                                 y: axis == 1 ? 184 * sign : 0)
         var state = SpringMotionState(
             position: CGPoint(x: axis == 0 ? 175 * sign : 0, y: axis == 1 ? 175 * sign : 0),
-            velocity: .init(horizontal: axis == 0 ? 900 * sign : 0,
-                            vertical: axis == 1 ? 900 * sign : 0))
+            velocity: .init(horizontal: axis == 0 ? 1800 * sign : 0,
+                            vertical: axis == 1 ? 1800 * sign : 0))
         let destination = PuckMotion.safeDestination(requested, from: state, physics: physics, bound: bound)
+        precondition(outward(destination) < outward(requested), "Unsafe target was not adjusted")
         for _ in 0..<120 {
             state = physics.calculateNextState(from: state, destinationPoint: destination)
             precondition(outward(state.position) <= 195.001, "Prediction concealed the sliver")
