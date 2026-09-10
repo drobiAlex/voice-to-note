@@ -29,6 +29,20 @@ upgrade path. `./run.sh` exists so a change can be exercised without touching th
 it exports `VTN_HOME=$PWD`, so `data/`, `models/`, `vendor/` and `vtn.toml` land in the checkout
 (all gitignored). Editing source does **not** change the installed `vtn` until it is reinstalled.
 
+The numbers the optimisation notes below argue from come from `bench/`, which needs its fixtures
+built once (`bench/make_set.py`, then `bench/make_speech.py`; ~100 MB, gitignored):
+
+```sh
+VTN_HOME=$PWD .venv/bin/python bench/run.py       # every stage that needs no model, then the
+                                                  # listing at 50/100/200 memos, indexed and not
+VTN_HOME=$PWD .venv/bin/python bench/models.py    # whisper and diarization; needs setup to have run
+VTN_HOME=$PWD .venv/bin/python bench/pipeline.py  # the real process_memo, both overlap modes
+```
+
+`VTN_HOME` is not optional there: `run.py` and `pipeline.py` delete `config.DB_PATH` before they
+start, and unset that is the user's real memo library rather than a throwaway — both refuse to run
+without it. A stage whose model is missing prints as `skipped`, never as fast.
+
 CI (ubuntu) runs ruff → mypy → `pytest -q --cov=voice_to_note --cov-fail-under=84`. Tests must
 stay runnable off macOS even though the app itself is macOS-only.
 
