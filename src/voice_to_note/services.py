@@ -206,7 +206,7 @@ class World:
     clone: Callable[[Path, str], None]
     build: Callable[[Path], None]
     build_capture: Callable[[Path, Path, Path], None]
-    build_menubar: Callable[[Path, Path, Path], None]
+    build_menubar: Callable[[list[Path], Path, Path], None]
     script: Callable[[Path, str, list[str]], None]
     fetch: Callable[[str, Path, Callable[[int, int], None]], None]
     fetch_tar: Callable[[str, Path, Callable[[int, int], None]], None]
@@ -287,7 +287,7 @@ def mock_world(sleep: Callable[[float], None] = time.sleep) -> World:
         clone=clone,
         build=build,
         build_capture=lambda _src, _plist, _dst: None,
-        build_menubar=lambda _src, _plist, _app: None,
+        build_menubar=lambda _sources, _plist, _app: None,
         script=script,
         fetch=simulated_fetch,
         fetch_tar=simulated_fetch,
@@ -440,8 +440,8 @@ def setup(
         )
         world.write(config.CAPTURE_STAMP, capture_stamp)
 
-    menubar_sources = [config.MENUBAR_SRC, config.MENUBAR_PLIST]
-    menubar_stamp = _source_stamp(menubar_sources)
+    menubar_sources = [config.MENUBAR_SRC, config.MENUBAR_SPRINGS]
+    menubar_stamp = _source_stamp([*menubar_sources, config.MENUBAR_PLIST])
     if sys.platform != "darwin":
         log("[8/9] menu bar recorder — macOS only, skipped")
     elif world.built(config.MENUBAR_BIN) and world.read(config.MENUBAR_STAMP) == menubar_stamp:
@@ -455,7 +455,7 @@ def setup(
             8,
             "building menu bar recorder",
             lambda: world.build_menubar(
-                config.MENUBAR_SRC, config.MENUBAR_PLIST, config.MENUBAR_APP
+                menubar_sources, config.MENUBAR_PLIST, config.MENUBAR_APP
             ),
         )
         world.write(config.MENUBAR_STAMP, menubar_stamp)

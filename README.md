@@ -115,3 +115,10 @@ uv run ruff check src tests
 ```
 
 CI runs all three on every push, with a coverage floor of 84%.
+
+## Third-party notices
+
+The spring physics in `src/voice_to_note/native/springs.swift` comes from
+[MacPaw/CocoaSprings](https://github.com/MacPaw/CocoaSprings), copyright © 2023
+MacPaw Inc., under the MIT License. The vendored file includes the full license,
+upstream headers, and the source commit; platform animation wrappers are not included.

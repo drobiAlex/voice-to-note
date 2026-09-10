@@ -73,6 +73,7 @@ def test_every_setting_resolves_to_its_known_default():
         "refine_workers": 4,
         "refine_window": 20,
         "whisper_repo_url": "https://github.com/ggml-org/whisper.cpp",
+        "setup_launch": "on",
         "my_name": "Alex",
         "tui_theme": "textual-dark",
     }

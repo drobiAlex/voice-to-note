@@ -738,10 +738,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         self.puckDock = dock
         if dock.restore(place ?? (remembering ? rememberedPlace : .hanging)) {
+            view.refreshMotion()
             return
         }
         self.place(panel)
         arrive(panel, reduceMotion: reduceMotion) { view.appear() }
+        view.refreshMotion()
         statusItem.button?.highlight(true)
         watchForClicks()
     }
@@ -1398,7 +1400,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             action("Show Panel", #selector(togglePanel)),
             action("Replay Arrival", #selector(replayArrival)),
         ] {
-            item.isEnabled = rolling
+            item.isEnabled = rolling || (item.action == #selector(replayArrival) && puckView != nil)
             menu.addItem(item)
         }
         menu.addItem(.separator())
@@ -1424,7 +1426,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             show()
             // the puck by the door it is opened from; it stays up through the
             // scenarios after this one, showing each, the way a real one would
-            if scenario.isPuck {
+            if scenario.isPuck || scenario == .processing {
                 openPuck(remembering: false, place: scenario.puckPlace)
             }
             return
@@ -1446,12 +1448,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         showPreview(scenario)
     }
 
-    /// The panel closed and opened again by the path that opens it unasked, so
-    /// that the one thing in this app which happens once and cannot be asked
-    /// for — the island arriving out of the status item — can be watched more
-    /// than once. Closing first is what makes it an arrival: `showBriefly`
-    /// opens nothing over a panel already up, and rightly so.
+    /// Replay the visible puck's spring, or reopen the recording island when
+    /// there is no puck, so both arrival styles can be inspected repeatedly.
     @objc private func replayArrival() {
+        if let puckView { puckView.appear(); return }
         closePanel()
         showBriefly()
     }
@@ -2776,6 +2776,7 @@ final class RecorderPuckView: NSView, Dockable {
     private static let arcAngles: [CGFloat] = [215, 270, 325]
 
     private let body = CAShapeLayer()
+    private let workingRim = CAShapeLayer()
     private let record = RecordButton()
     private let caption = RecorderPuckView.label("Record")
     private let inputButton = ChoiceButton(symbol: "mic", label: "Microphone")
@@ -2847,6 +2848,13 @@ final class RecorderPuckView: NSView, Dockable {
         body.shadowRadius = 14
         body.shadowOffset = CGSize(width: 0, height: -5)
         layer.addSublayer(body)
+        workingRim.frame = bounds
+        workingRim.path = round
+        workingRim.fillColor = nil
+        workingRim.strokeColor = NSColor.white.withAlphaComponent(0.65).cgColor
+        workingRim.lineWidth = 2
+        workingRim.lineCap = .round
+        workingRim.strokeEnd = 0.22
     }
 
     private func layOut() {
@@ -2896,6 +2904,7 @@ final class RecorderPuckView: NSView, Dockable {
     /// puck tucked into an edge has left to say it with.
     func show(state: RecorderState, elapsed: String, trouble: String? = nil) {
         self.state = state
+        refreshMotion()
         let idle = state == .idle
         record.rolling = state == .recording
         record.isEnabled = idle || state == .recording
@@ -3081,13 +3090,42 @@ final class RecorderPuckView: NSView, Dockable {
     /// The disc grown into place out of the status item above it, the way the
     /// island arrives, and for the same reason: it says where the window came from.
     func appear() {
+        refreshMotion()
         guard !reduceMotion, let layer else { return }
-        let growing = CABasicAnimation(keyPath: "transform")
+        let growing = CASpringAnimation(keyPath: "transform")
+        growing.mass = 1
+        // k = mω², c = 2mζω: the layer and origin use the same spring.
+        let omega = CGFloat(PuckMotion.angularFrequency)
+        growing.stiffness = omega * omega
+        growing.damping = 2 * CGFloat(PuckMotion.dampingRatio) * omega
         growing.fromValue = NSValue(caTransform3D: RecordingPanelView.scaled(0.92, about: layer.bounds))
         growing.toValue = NSValue(caTransform3D: CATransform3DIdentity)
-        growing.duration = RecordingPanelView.appearing
-        growing.timingFunction = RecordingPanelView.easing
+        growing.duration = growing.settlingDuration
         layer.add(growing, forKey: "appear")
+    }
+
+    /// Refreshing processing never restarts the render-server rotation.
+    func refreshMotion() {
+        guard state == .processing, window?.isVisible == true else {
+            workingRim.removeAllAnimations()
+            workingRim.removeFromSuperlayer()
+            return
+        }
+        if workingRim.superlayer == nil { layer?.addSublayer(workingRim) }
+        guard !reduceMotion, workingRim.animation(forKey: "working") == nil else { return }
+        let rotation = CABasicAnimation(keyPath: "transform.rotation.z")
+        rotation.fromValue = 0
+        rotation.toValue = 2 * Double.pi
+        rotation.duration = 2.4
+        rotation.repeatCount = .infinity
+        workingRim.add(rotation, forKey: "working")
+    }
+
+    /// Hidden views and every nonworking state release the repeating layer.
+    func stopMotion() {
+        workingRim.removeAllAnimations()
+        workingRim.removeFromSuperlayer()
+        layer?.removeAnimation(forKey: "appear")
     }
 
     private static func label(_ text: String) -> NSTextField {
@@ -3235,7 +3273,163 @@ protocol Dockable: NSView {
     var onGrip: ((Dock.Grip) -> Void)? { get set }
     var onHover: ((Bool) -> Void)? { get set }
 }
+/// One physical spring for the window and arrival layer. The upstream 7.5/.5
+/// takes seconds to stop; 40/.7 gives a 180-point slide one 8-point overshoot.
+enum PuckMotion {
+    static let angularFrequency: Float = 40
+    static let dampingRatio: Float = 0.7
+    static let step: TimeInterval = 1 / 120
+    static let configuration = SpringConfiguration(
+        angularFrequency: angularFrequency, dampingRatio: dampingRatio
+    )
+    /// Predict the incoming trajectory and move its target inward only when
+    /// momentum would otherwise conceal the sliver; callers also guard frames.
+    static func safeDestination(_ requested: CGPoint, from state: SpringMotionState,
+                                physics: SpringMotionPhysics,
+                                bound: ((CGPoint) -> CGPoint)?) -> CGPoint {
+        var destination = requested
+        if let bound {
+            for _ in 0..<8 {
+                var probe = state
+                var correction = CGPoint.zero
+                for _ in 0..<120 {
+                    probe = physics.calculateNextState(from: probe, destinationPoint: destination)
+                    let safe = bound(probe.position)
+                    if abs(safe.x - probe.position.x) > abs(correction.x) {
+                        correction.x = safe.x - probe.position.x
+                    }
+                    if abs(safe.y - probe.position.y) > abs(correction.y) {
+                        correction.y = safe.y - probe.position.y
+                    }
+                }
+                destination.x += correction.x
+                destination.y += correction.y
+                if abs(correction.x) < 0.001 && abs(correction.y) < 0.001 { break }
+            }
+        }
+        return destination
+    }
+
+}
+
+/// A weak target breaks the display link's ownership cycle so dropping a dock
+/// immediately releases its motion even if the display has stopped delivering.
+private final class SpringFrameTarget: NSObject {
+    weak var motion: SpringMotion?
+
+    /// Display time is measured by the driver, independent of refresh rate.
+    @objc func frame(_ link: CADisplayLink) { motion?.tick() }
+}
+
+/// The sole owner of a window's moving origin; redirection keeps momentum,
+/// while grabbing, hiding and settling release every source of callbacks.
+final class SpringMotion {
+    private weak var panel: NSPanel?
+    private let physics = SpringMotionPhysics(configuration: PuckMotion.configuration,
+                                               timeStep: Float(PuckMotion.step))
+    private var state = SpringMotionState(position: .zero, velocity: .zero)
+    private var destination = CGPoint.zero
+    private var bound: ((CGPoint) -> CGPoint)?
+    private var link: CADisplayLink?
+    private let target = SpringFrameTarget()
+    private var watchdog: Timer?
+    private var lastTime: TimeInterval = 0
+    private var accumulator: TimeInterval = 0
+
+    /// The panel owns no driver, allowing dock teardown to end motion.
+    init(panel: NSPanel) {
+        self.panel = panel
+        target.motion = self
+    }
+
+    deinit { link?.invalidate(); watchdog?.invalidate() }
+
+    /// Removing the callbacks preserves the actual frame for a hand to take over.
+    func interrupt() {
+        link?.invalidate()
+        link = nil
+        watchdog?.invalidate()
+        watchdog = nil
+        accumulator = 0
+    }
+
+    /// Predicting the same fixed steps includes incoming velocity when a tuck
+    /// reverses a peek; shifting its target inward preserves the visible sliver.
+    func move(to requested: CGPoint, bound: ((CGPoint) -> CGPoint)? = nil) {
+        guard let panel else { return }
+        if link == nil {
+            state = SpringMotionState(position: panel.frame.origin, velocity: .zero)
+        }
+        self.bound = bound
+        destination = requested
+        destination = PuckMotion.safeDestination(requested, from: state, physics: physics, bound: bound)
+        guard panel.isVisible, let view = panel.contentView else { finish(); return }
+        guard link == nil else { return }
+        lastTime = CACurrentMediaTime()
+        let displayLink = view.displayLink(target: target, selector: #selector(SpringFrameTarget.frame(_:)))
+        displayLink.add(to: .main, forMode: .common)
+        link = displayLink
+        armWatchdog()
+    }
+
+    /// A one-shot deadline settles hidden views even when their display link
+    /// never fires; it exists only during motion and is renewed by real frames.
+    private func armWatchdog() {
+        if let watchdog {
+            watchdog.fireDate = Date(timeIntervalSinceNow: 0.25)
+            return
+        }
+        let timer = Timer(timeInterval: 0.25, repeats: false) { [weak self] _ in self?.finish() }
+        RunLoop.main.add(timer, forMode: .common)
+        watchdog = timer
+    }
+
+    /// Elapsed wall time, accumulated in fixed steps, gives both refresh rates
+    /// the same trajectory and leaves no fractional-pixel resting position.
+    fileprivate func tick() {
+        guard let panel, panel.isVisible else { finish(); return }
+        let now = CACurrentMediaTime()
+        accumulator += now - lastTime
+        lastTime = now
+        if accumulator > 0.25 { finish(); return }
+        while accumulator >= PuckMotion.step {
+            state = physics.calculateNextState(from: state, destinationPoint: destination)
+            if let bound { state = SpringMotionState(position: bound(state.position), velocity: state.velocity) }
+            accumulator -= PuckMotion.step
+        }
+        panel.setFrameOrigin(state.position)
+        if abs(state.velocity.horizontal) < 0.001 && abs(state.velocity.vertical) < 0.001
+            && abs(state.position.x - destination.x) < 0.5
+            && abs(state.position.y - destination.y) < 0.5 {
+            finish()
+        } else {
+            armWatchdog()
+        }
+    }
+
+    /// Exact placement and callback teardown are shared by settling and a
+    /// missing-display deadline, so neither path can leave an idle timer alive.
+    private func finish() {
+        panel?.setFrameOrigin(bound?(destination) ?? destination)
+        interrupt()
+    }
+}
+
 final class DockPanel: NSPanel {
+    var onMotionHidden: (() -> Void)?
+
+    /// Hiding stops callbacks before a view ceases receiving display frames.
+    override func orderOut(_ sender: Any?) {
+        onMotionHidden?()
+        super.orderOut(sender)
+    }
+
+    /// Closing also releases motion when callers bypass the ordinary fade.
+    override func close() {
+        onMotionHidden?()
+        super.close()
+    }
+
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         frameRect
     }
@@ -3360,6 +3554,7 @@ final class Dock {
     let panel: NSPanel
     let view: Dockable
     private let inset: CGFloat
+    private let motion: SpringMotion
     private let reduceMotion: Bool
     private(set) var state: State = .hanging
 
@@ -3370,6 +3565,8 @@ final class Dock {
     /// The pointer's offset from the window's origin while the window is being
     /// moved, and nothing at any other time.
     private var grab: NSPoint?
+    private var grabOrigin: NSPoint?
+    private var grabScreen: NSScreen?
     private var pending: Timer?
     private var screensChanged: Any?
 
@@ -3385,7 +3582,13 @@ final class Dock {
         self.panel = panel
         self.view = view
         self.inset = inset
+        self.motion = SpringMotion(panel: panel)
         self.reduceMotion = reduceMotion
+        (panel as? DockPanel)?.onMotionHidden = { [weak self] in
+            self?.motion.interrupt()
+            self?.pending?.invalidate()
+            (self?.view as? RecorderPuckView)?.stopMotion()
+        }
         view.onGrip = { [weak self] grip in self?.gripped(grip) }
         view.onHover = { [weak self] inside in self?.hovered(inside) }
         // a display arriving or leaving moves every edge; a tucked window is put
@@ -3397,6 +3600,8 @@ final class Dock {
     }
 
     deinit {
+        motion.interrupt()
+        (view as? RecorderPuckView)?.stopMotion()
         pending?.invalidate()
         if let screensChanged {
             NotificationCenter.default.removeObserver(screensChanged)
@@ -3469,6 +3674,9 @@ final class Dock {
     private func gripped(_ grip: Grip) {
         switch grip {
         case let .began(point):
+            motion.interrupt()
+            grabOrigin = panel.frame.origin
+            grabScreen = Dock.screen(under: panel.frame)
             pending?.invalidate()
             grab = NSPoint(x: point.x - panel.frame.minX, y: point.y - panel.frame.minY)
             NSCursor.closedHand.push()
@@ -3480,6 +3688,8 @@ final class Dock {
             NSCursor.pop()
             guard grab != nil else { return }
             grab = nil
+            grabOrigin = nil
+            grabScreen = nil
             release()
         }
     }
@@ -3510,7 +3720,13 @@ final class Dock {
     private func held(at origin: NSPoint) -> NSPoint {
         let cursor = NSEvent.mouseLocation
         guard let screen = Dock.screen(containing: cursor) ?? NSScreen.main else { return origin }
-        return Dock.clamped(origin, size: panel.frame.size, within: room(screen.visibleFrame))
+        var area = room(screen.visibleFrame)
+        // A tucked grab starts outside the normal drag room. Expand just far
+        // enough to include that starting frame, never farther off screen.
+        if let grabOrigin, screen == grabScreen {
+            area = area.union(NSRect(origin: grabOrigin, size: panel.frame.size))
+        }
+        return Dock.clamped(origin, size: panel.frame.size, within: area)
     }
 
     /// The window's own body — what is drawn, without the air its shadow is
@@ -3587,20 +3803,21 @@ final class Dock {
 
     private func tuck(_ edge: Edge, on screen: NSScreen) {
         state = .tucked(edge)
-        slide(to: tuckedFrame(edge, on: screen), alpha: Dock.tuckedAlpha)
+        slide(to: tuckedFrame(edge, on: screen), alpha: Dock.tuckedAlpha, bound: sliverBound(edge, on: screen))
         onPlaced?(place)
     }
 
     private func peek(_ edge: Edge) {
         guard let screen = Dock.screen(under: panel.frame) ?? NSScreen.main else { return }
         state = .peeking(edge)
-        slide(to: revealedFrame(edge, on: screen), alpha: 1)
+        slide(to: revealedFrame(edge, on: screen), alpha: 1, bound: sliverBound(edge, on: screen))
     }
 
     /// A tucked or peeking window put back against its edge after the screens
     /// changed under it — on the screen it is now nearest, which may be a
     /// different one from the one it was tucked into.
     private func reanchor() {
+        motion.interrupt()
         guard let screen = Dock.screen(under: panel.frame) ?? NSScreen.main else { return }
         switch state {
         case let .tucked(edge):
@@ -3616,20 +3833,38 @@ final class Dock {
         }
     }
 
-    /// The window moved and dimmed in one fixed-length ease-out, or at once
-    /// under Reduce Motion: a window sliding two hundred points is the large
-    /// movement that setting asks not to see.
-    private func slide(to frame: NSRect, alpha: CGFloat) {
+    /// Spring the origin while alpha fades independently; accessibility places
+    /// the window immediately without creating a display link.
+    private func slide(to frame: NSRect, alpha: CGFloat, bound: ((CGPoint) -> CGPoint)? = nil) {
         guard !reduceMotion else {
+            motion.interrupt()
             panel.setFrame(frame, display: true)
             panel.alphaValue = alpha
             return
         }
+        motion.move(to: frame.origin, bound: bound)
         NSAnimationContext.runAnimationGroup { context in
             context.duration = Dock.sliding
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            panel.animator().setFrame(frame, display: true)
             panel.animator().alphaValue = alpha
+        }
+    }
+
+    /// Half the peek remains visible even when an incoming velocity needs
+    /// more room than the spring's ordinary zero-velocity overshoot.
+    private func sliverBound(_ edge: Edge, on screen: NSScreen) -> (CGPoint) -> CGPoint {
+        let area = screen.visibleFrame
+        let size = panel.frame.size
+        let inset = self.inset
+        return { point in
+            var safe = point
+            switch edge {
+            case .left: safe.x = max(safe.x, area.minX + Dock.peek / 2 - size.width + inset)
+            case .right: safe.x = min(safe.x, area.maxX - Dock.peek / 2 - inset)
+            case .bottom: safe.y = max(safe.y, area.minY + Dock.peek / 2 - size.height + inset)
+            case .top: safe.y = min(safe.y, area.maxY - Dock.peek / 2 - inset)
+            }
+            return safe
         }
     }
 
@@ -3736,10 +3971,16 @@ extension NSRect {
 
 // MARK: - end of meters and marks
 
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-// accessory: this app is its menu bar item and nothing else — no Dock tile, no
-// window, and no place in the app switcher for something with nothing to show
-app.setActivationPolicy(.accessory)
-app.run()
+@main
+struct RecorderApplication {
+    /// An explicit entry point lets the app compile with vendored source files.
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        // accessory: this app is its menu bar item and nothing else — no Dock tile, no
+        // window, and no place in the app switcher for something with nothing to show
+        app.setActivationPolicy(.accessory)
+        withExtendedLifetime(delegate) { app.run() }
+    }
+}

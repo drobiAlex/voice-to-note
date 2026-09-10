@@ -20,11 +20,15 @@ mkdir -p artifacts
 native=src/voice_to_note/native
 
 check() {
-    for f in capture menubar; do
-        echo "typecheck $f.swift"
-        swiftc -typecheck "$native/$f.swift" 2>&1 | tee "artifacts/typecheck-$f.log"
-        [[ ${PIPESTATUS[0]} -eq 0 ]]
-    done
+    echo "typecheck capture.swift"
+    swiftc -typecheck "$native/capture.swift" 2>&1 | tee artifacts/typecheck-capture.log
+    [[ ${PIPESTATUS[0]} -eq 0 ]]
+    echo "typecheck springs.swift alone"
+    swiftc -typecheck "$native/springs.swift" 2>&1 | tee artifacts/typecheck-springs.log
+    [[ ${PIPESTATUS[0]} -eq 0 ]]
+    echo "typecheck menubar.swift with springs.swift"
+    swiftc -typecheck "$native/menubar.swift" "$native/springs.swift" 2>&1 | tee artifacts/typecheck-menubar.log
+    [[ ${PIPESTATUS[0]} -eq 0 ]]
 }
 
 build() {

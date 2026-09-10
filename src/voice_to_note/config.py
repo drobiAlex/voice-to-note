@@ -38,6 +38,7 @@ CAPTURE_BIN = ROOT / "bin" / "vtn-capture"
 # recording is launched from, and only a bundle carries the Info.plist whose
 # wording the permission prompt then shows
 MENUBAR_SRC = NATIVE_DIR / "menubar.swift"
+MENUBAR_SPRINGS = NATIVE_DIR / "springs.swift"
 MENUBAR_PLIST = NATIVE_DIR / "menubar-Info.plist"
 MENUBAR_APP = ROOT / "bin" / "VTN Recorder.app"
 MENUBAR_BIN = MENUBAR_APP / "Contents" / "MacOS" / "vtn-menubar"

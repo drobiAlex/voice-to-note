@@ -129,7 +129,7 @@ def test_building_the_menu_bar_recorder_without_swiftc_names_how_to_get_it(monke
 
     with pytest.raises(GatewayError, match="swiftc"):
         bootstrap.build_menubar(
-            tmp_path / "menubar.swift",
+            [tmp_path / "menubar.swift", tmp_path / "springs.swift"],
             tmp_path / "menubar-Info.plist",
             tmp_path / "bin" / "VTN Recorder.app",
         )
@@ -148,11 +148,13 @@ def test_building_the_menu_bar_recorder_assembles_a_signed_app_bundle(monkeypatc
     plist.write_text("<plist/>")
     app = tmp_path / "bin" / "VTN Recorder.app"
 
-    bootstrap.build_menubar(tmp_path / "menubar.swift", plist, app)
+    sources = [tmp_path / "menubar.swift", tmp_path / "springs.swift"]
+    bootstrap.build_menubar(sources, plist, app)
 
     # macOS attributes recording permission to the bundle a capture is launched
     # from, so the binary and its plist have to land in the layout it reads
     assert seen[0][0] == "swiftc"
+    assert seen[0][1:3] == list(map(str, sources))
     assert seen[0][-1] == str(app / "Contents" / "MacOS" / "vtn-menubar")
     assert (app / "Contents" / "Info.plist").read_text() == "<plist/>"
     assert seen[1] == [

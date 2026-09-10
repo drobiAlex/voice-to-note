@@ -33,7 +33,7 @@ the way.
 reasons. They drive themselves with `CVDisplayLink`, which Apple deprecated in macOS 15 and
 documents as replaced by `NSView.displayLink(target:selector:)`. And they advance the
 physics by one fixed 0.008 s step per display frame, which means the same animation runs
-half again as fast on a 120 Hz display as on a 60 Hz one. Ours accumulates real elapsed
+twice as fast on a 120 Hz display as on a 60 Hz one. Ours accumulates real elapsed
 time and steps a fixed timestep, so a settle takes the same wall-clock time on any display.
 
 **Licence hygiene**, and it is not optional: the copied file keeps its upstream header and
@@ -59,10 +59,13 @@ that only says "add springs" invites springs where they do not belong.
 
 ## The numbers, in one place
 
-`angularFrequency 7.5`, `dampingRatio 0.5` — MacPaw's shipped defaults, taken as-is.
+The starting reference was `angularFrequency 7.5`, `dampingRatio 0.5`, MacPaw's shipped
+defaults. The implemented puck uses `40` / `0.7`, centralized in `PuckMotion` in
+`menubar.swift`: the original slow spring cannot meet the strict velocity threshold and
+700 ms acceptance together. The vendored defaults remain untouched.
 
 The layer animations use Core Animation's own spring, which is parameterised differently;
-the same spring in its terms is `mass 1`, `stiffness ω² = 56.25`, `damping 2ζω = 7.5`.
+the implemented spring in its terms is `mass 1`, `stiffness ω² = 1600`, `damping 2ζω = 56`.
 Written once as a constant with that derivation in a comment, so the window and the layers
 are demonstrably the same spring rather than two springs that look similar.
 
@@ -256,3 +259,41 @@ The puck is dragged into a corner and let go, and it settles there like somethin
 weight; it is grabbed again mid-slide and does not flinch; it turns quietly while the
 meeting is being transcribed and is perfectly still the rest of the time; and none of it
 costs anything measurable when nobody is touching it.
+
+## Implementation record
+
+The physics is vendored at CocoaSprings commit
+`54ecdecad92c447d977a6623a03113f441b880e3`, preserving the three model files, their
+headers, the two point operators, and MIT text. Both Swift inputs and the app plist
+participate in the rebuild stamp. The executable now has an explicit `@main` entry point
+so Swift can compile multiple sources; the remote typecheck includes the physics alone
+and the combined app.
+
+The puck uses one display-link driver per dock, accumulating monotonic elapsed time at
+1/120 s. Redirects retain velocity; a grip interrupts before measuring its pointer offset.
+An initially offscreen grip has enough drag room to avoid jumping into the screen.
+Tuck safety predicts the trajectory with incoming velocity, adjusts the destination if
+needed, and bounds individual steps so at least half the sliver stays visible. Missing
+display frames trigger a one-shot deadline; settling, hiding and teardown invalidate
+motion callbacks. Alpha still fades separately, the island keeps its ease-out, and exit
+fades remain unchanged.
+
+The processing rim is a Core Animation arc, static under Reduce Motion and removed outside
+processing or when hidden. Preview's Processing scenario opens the puck directly, and
+Replay Arrival can replay the puck's spring.
+
+### Human acceptance still required
+
+Step 0 was not performed: this checkout is on Linux, and no before-motion captures were
+provided. Neither remote compilation nor a physics test supplies a visual comparison.
+The remote workflow never launches the recorder or grants recording permissions.
+
+On the Mac, use `VTN_SETUP_LAUNCH=off ./run.sh menubar --preview` from the updated
+development checkout to check the
+original nine criteria: tuck/peek on all four edges and corners, grab during both motions,
+compare 60/120 Hz captures, open Processing directly, switch away, replay arrivals, and
+repeat with Reduce Motion enabled before opening the window. Check the sliver throughout
+redirects, not only ordinary tucks. Use `powermetrics` on untouched free, tucked and hidden
+windows to establish the energy result; callback teardown alone is not that measurement.
+An actual setup after changing only `springs.swift` must still be observed on the Mac to
+confirm the source-stamp rebuild end to end.

@@ -1972,7 +1972,7 @@ def _write_native_helpers() -> None:
         services._source_stamp([services.config.CAPTURE_SRC, services.config.CAPTURE_PLIST])
     )
     services.config.MENUBAR_STAMP.write_text(
-        services._source_stamp([services.config.MENUBAR_SRC, services.config.MENUBAR_PLIST])
+        services._source_stamp([services.config.MENUBAR_SRC, services.config.MENUBAR_SPRINGS, services.config.MENUBAR_PLIST])
     )
 
 
@@ -2009,7 +2009,8 @@ def stub_bootstrap(monkeypatch, *, vad_fails=False, cloned_urls: list | None = N
         calls.append("capture")
         _write_binary(dst)
 
-    def build_menubar(source, plist, app):
+    def build_menubar(sources, plist, app):
+        assert sources == [services.config.MENUBAR_SRC, services.config.MENUBAR_SPRINGS]
         calls.append("menubar")
         _write_binary(app / "Contents" / "MacOS" / "vtn-menubar")
 
@@ -2292,7 +2293,7 @@ def test_setup_stamps_a_freshly_built_native_helper_with_its_source_hash(monkeyp
         [services.config.CAPTURE_SRC, services.config.CAPTURE_PLIST]
     )
     assert services.config.MENUBAR_STAMP.read_text() == services._source_stamp(
-        [services.config.MENUBAR_SRC, services.config.MENUBAR_PLIST]
+        [services.config.MENUBAR_SRC, services.config.MENUBAR_SPRINGS, services.config.MENUBAR_PLIST]
     )
 
 
@@ -2883,3 +2884,22 @@ def test_setup_with_launching_switched_off_builds_the_recorder_but_never_starts_
     services.setup(log=logged.append, world=world)
     assert "[9/9] menu bar recorder launch — off by setting, skipped" in logged
     assert opened == []
+
+
+def test_setup_rebuilds_the_recorder_when_only_the_vendored_spring_source_changes(monkeypatch, tmp_path):
+    """Physics edits must invalidate the executable even when its entry point is unchanged."""
+    configured_paths(monkeypatch, tmp_path)
+    springs = tmp_path / "springs.swift"
+    springs.write_text("original physics")
+    monkeypatch.setattr(services.config, "MENUBAR_SPRINGS", springs)
+    _write_native_helpers()
+    calls = stub_bootstrap(monkeypatch)
+    springs.write_text("updated physics")
+
+    services.setup()
+
+    assert "menubar" in calls
+    assert "capture" not in calls
+    assert services.config.MENUBAR_STAMP.read_text() == services._source_stamp(
+        [services.config.MENUBAR_SRC, springs, services.config.MENUBAR_PLIST]
+    )
