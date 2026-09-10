@@ -60,6 +60,38 @@ def loudness(samples: np.ndarray, rate: int, bin_s: float = BIN_S) -> np.ndarray
     return np.asarray(power, dtype=np.float32)
 
 
+def has_speech(tracks: Sequence[tuple[np.ndarray, int]], floor: float) -> bool:
+    """Is there any speech in this stretch worth decoding, or is it quiet
+    enough that whisper would only spend a subprocess and a model load on
+    silence — which it does not sit through quietly either: fed nothing to
+    transcribe, it hallucinates text rather than returning none.
+
+    floor is a power threshold on the same 0..1 scale loudness() measures in,
+    where a sample at full scale reads as 1.0 and a sine wave that loud reads
+    as 0.5. The default the setting behind this ships with, 1e-6, sits around
+    -60 dBFS — quieter than a voice hushed to a whisper a few feet from the
+    mic, and picked to that side on purpose: this only ever costs power and a
+    little hallucinated text on a stretch nobody was talking in, while
+    dropping a real utterance costs it outright, so a floor that might be too
+    low is the safe kind of wrong and a floor that might be too high is not.
+
+    Checked against the loudest short bin in the stretch, summed across every
+    side the way cut_offset sums them, rather than the stretch's own average:
+    a few seconds of talk inside a much longer quiet stretch must show up on
+    its own, not get diluted away by everything quiet around it. floor <= 0
+    always answers yes, which is what asking for it to never skip means to
+    the setting that carries it here."""
+    if floor <= 0:
+        return True
+    bins = [loudness(s, rate) for s, rate in tracks]
+    usable = [b for b in bins if len(b)]
+    if not usable:
+        return False
+    span = min(len(b) for b in usable)
+    total = np.sum([b[:span] for b in usable], axis=0)
+    return bool(total.size) and float(total.max()) >= floor
+
+
 def cut_offset(
     tracks: Sequence[tuple[np.ndarray, int]],
     target_s: float,
