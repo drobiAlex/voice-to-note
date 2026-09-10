@@ -36,7 +36,7 @@ def require(model: Path | None = None) -> None:
         raise GatewayError(f"model missing: {wanted} — run ./run.sh first")
 
 
-def decoding() -> list[str]:
+def decoding(beam: int | None = None) -> list[str]:
     """The flags that decide how hard whisper works for its words.
 
     Left to itself the binary searches five beams on four threads whatever
@@ -45,18 +45,26 @@ def decoding() -> list[str]:
     decoding is measurably faster and reads a little differently — the same
     words, punctuated and split into segments its own way. So the thread count
     follows the machine by default and the beam width does not move unless
-    somebody has compared the two on their own recordings."""
+    somebody has compared the two on their own recordings.
+
+    beam defaults to the configured archival width; a caller reading a meeting
+    live asks explicitly for its own, lower one instead, so tuning either
+    setting can never accidentally move the other pass's answer."""
     threads = config.WHISPER_THREADS
     count = int(threads) if threads.strip().isdigit() else qos.performance_cores()
     flags = ["-t", str(max(1, count))]
-    beam = config.WHISPER_BEAM_SIZE
+    beam = config.WHISPER_BEAM_SIZE if beam is None else beam
     # -bo as well as -bs: a beam of one still samples several candidates and
     # picks the best unless best-of is brought down with it
     return flags + (["-bs", "1", "-bo", "1"] if beam <= 1 else ["-bs", str(beam)])
 
 
 def transcribe(
-    wav: Path, duration_s: float, model: Path | None = None, prompt: str = ""
+    wav: Path,
+    duration_s: float,
+    model: Path | None = None,
+    prompt: str = "",
+    beam: int | None = None,
 ) -> WhisperTranscription:
     """Turns speech into timed text, locally.
 
@@ -64,7 +72,12 @@ def transcribe(
     one stretch of something longer. Whisper primes each of its own 30-second
     windows with the text ahead of it and has nothing to prime the first one
     with, so a meeting handed over a chunk at a time loses that context at
-    every seam unless the previous chunk's tail is handed back here."""
+    every seam unless the previous chunk's tail is handed back here.
+
+    beam is passed straight through to decoding() — left at its default, an
+    archival call keeps searching whatever whisper_beam_size says, while
+    LiveSession names live_beam_size explicitly so the two passes can be
+    tuned apart."""
     require(model)
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "out"
@@ -76,7 +89,7 @@ def transcribe(
             "-ojf",
             "-of", str(out),
             "-np",
-            *decoding(),
+            *decoding(beam),
         ]
         if prompt:
             cmd += ["--prompt", prompt]

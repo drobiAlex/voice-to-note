@@ -235,8 +235,11 @@ def cmd_record(args: argparse.Namespace) -> None:
     time, so that stopping the recording leaves the last stretch and the
     speaker pass to do rather than the whole meeting — minutes of a machine at
     full tilt, at the moment somebody wants to close the laptop and leave. A
-    live pass that cannot run costs nothing but itself: the recording is then
-    transcribed the ordinary way, from the merged file, exactly as before."""
+    live pass that cannot run, or that gives out partway through the meeting,
+    costs nothing but itself: the whole recording is then transcribed the
+    ordinary way, from the merged file, exactly as before — whatever the live
+    pass had already stored is thrown away first, so it cannot sit beside the
+    ordinary pass's segments and double the transcript."""
     if sys.platform != "darwin":
         sys.exit("meeting recording is macOS-only")
     steps, count = _checked(args)
@@ -283,25 +286,50 @@ def cmd_record(args: argparse.Namespace) -> None:
         mic_wav.unlink()
         tracks.rmdir()
         status(f"recorded {merged}")
-        if live is not None and heard is not None and heard.segment_count:
-            status(f"transcribed while recording — {heard.segment_count} segments")
-            _finished(
-                repo,
-                services.finish_live(
+        if live is not None and heard is not None:
+            if heard.failure:
+                # a stretch of the meeting the live pass never got to read is
+                # worse than none of it read live: finish_live only converts
+                # and diarizes what is already stored, so the segments after
+                # the failure point would simply be missing rather than
+                # merely late. The whole recording still exists on disk, so
+                # it is transcribed the ordinary way instead, exactly as if
+                # the live pass had never run.
+                status(
+                    "transcribing while recording stopped partway"
+                    f" ({heard.failure}) — transcribing the whole recording"
+                    " the ordinary way"
+                )
+                services.discard_live(repo, live.memo_id)
+            else:
+                # heard.failure is None: the live pass listened to the whole
+                # meeting and either stored words or, having found nothing
+                # loud enough to be speech, correctly stored none. Either way
+                # it is trusted rather than redone — segment_count == 0 here
+                # means "we heard all of it and there was nothing to
+                # transcribe", not "the live pass came up short", so sending
+                # the recording through the ordinary pipeline on top of it
+                # would spend the whole meeting's worth of whisper at
+                # archival beam size for a transcript that already exists.
+                if heard.segment_count:
+                    status(f"transcribed while recording — {heard.segment_count} segments")
+                else:
+                    status("transcribed while recording — nothing worth transcribing")
+                _finished(
                     repo,
-                    live.memo_id,
-                    merged,
-                    language=heard.language,
-                    log=status,
-                    num_speakers=count,
-                    diarize="speakers" in steps,
-                ),
-                args,
-                steps,
-            )
-            return
-        if live is not None:
-            services.discard_live(repo, live.memo_id)
+                    services.finish_live(
+                        repo,
+                        live.memo_id,
+                        merged,
+                        language=heard.language,
+                        log=status,
+                        num_speakers=count,
+                        diarize="speakers" in steps,
+                    ),
+                    args,
+                    steps,
+                )
+                return
         _pipeline(repo, merged, args, steps, count)
 
 

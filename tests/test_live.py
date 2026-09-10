@@ -7,9 +7,15 @@ import pytest
 
 from voice_to_note import cli, config, services
 from voice_to_note.domain import Segment, TrackFormat
-from voice_to_note.gateways import GatewayError, audio, capture, whisper
+from voice_to_note.gateways import GatewayError, audio, capture, sherpa, whisper
 from voice_to_note.storage.repository import Repository
-from voice_to_note.transforms.live import cut_offset, mono, prompt_tail, shifted
+from voice_to_note.transforms.live import (
+    cut_offset,
+    has_speech,
+    mono,
+    prompt_tail,
+    shifted,
+)
 
 RATE = 16000
 INT16 = TrackFormat(rate=RATE, channels=1, bits=16, is_float=False)
@@ -150,6 +156,31 @@ def test_a_sample_width_nothing_can_read_is_refused_rather_than_reinterpreted():
         mono(b"\x00" * 12, TrackFormat(RATE, channels=1, bits=24, is_float=False))
 
 
+# --- deciding whether a stretch is worth decoding at all --------------------
+
+
+def test_a_stretch_of_pure_silence_has_no_speech_worth_decoding():
+    assert not has_speech([(hush(2.0), RATE)], config.LIVE_SILENCE_FLOOR)
+
+
+def test_a_quiet_but_real_utterance_still_counts_as_speech_worth_decoding():
+    # guards against a floor picked so eager it would mistake a real, soft
+    # voice for room tone — the whole point of picking it conservatively
+    quiet = tone(1.0, level=0.01)
+
+    assert has_speech([(quiet, RATE)], config.LIVE_SILENCE_FLOOR)
+
+
+def test_speech_on_only_one_side_of_the_meeting_still_counts():
+    # summed across sides the same way cut_offset sums them: a voice that
+    # only the microphone or only the system audio heard is still a voice
+    assert has_speech([(hush(2.0), RATE), (tone(2.0), RATE)], config.LIVE_SILENCE_FLOOR)
+
+
+def test_a_silence_floor_of_zero_never_skips_anything():
+    assert has_speech([(hush(2.0), RATE)], 0.0)
+
+
 # --- putting the chunks back together --------------------------------------
 
 
@@ -214,15 +245,18 @@ def test_a_stretch_with_no_audio_in_it_at_all_is_refused(tmp_path):
 
 class FakeWhisper:
     """The transcriber, without the model: every chunk comes back as one line
-    naming how long it was, and every prompt it was handed is remembered."""
+    naming how long it was, and every prompt and beam width it was handed is
+    remembered."""
 
     def __init__(self):
         self.prompts: list[str] = []
         self.durations: list[float] = []
+        self.beams: list[int | None] = []
 
-    def __call__(self, wav, duration_s, model=None, prompt=""):
+    def __call__(self, wav, duration_s, model=None, prompt="", beam=None):
         self.prompts.append(prompt)
         self.durations.append(duration_s)
+        self.beams.append(beam)
         n = len(self.durations)
         return {
             "result": {"language": "en"},
@@ -243,7 +277,9 @@ def live(tmp_path, monkeypatch):
     fake = FakeWhisper()
     monkeypatch.setattr(whisper, "transcribe", fake)
     monkeypatch.setattr(audio, "mix_chunk", lambda parts, dst: dst.write_bytes(b"wav"))
-    monkeypatch.setattr(services, "LIVE_POLL_S", 0.01)
+    # the wait between looks is now aimed at readiness itself rather than a
+    # fixed poll, so nothing here needs shortening for the tests to run fast:
+    # stop() cuts any wait short the instant it is called
     system, mic = tmp_path / "system.wav", tmp_path / "mic.wav"
     write_wav(system, hush(0))
     write_wav(mic, hush(0))
@@ -290,6 +326,110 @@ def test_the_last_stretch_of_a_meeting_is_read_when_the_recording_stops(tmp_path
     assert result.segment_count == 1
 
 
+def test_a_silent_stretch_is_never_sent_to_whisper_and_the_speech_after_it_keeps_its_place(
+    tmp_path, live, monkeypatch
+):
+    # search_s pulled to zero makes every pass cut at exactly
+    # min(pending, the catch-up cap), with no pause search involved — the
+    # offset arithmetic under test here, not where a pause happens to fall
+    monkeypatch.setattr(services, "SEARCH_S", 0.0)
+    system, mic, fake = live
+    with Repository(tmp_path / "db.sqlite") as repo:
+        session = services.start_live(repo, system, mic, "meeting.m4a", "work")
+        assert session is not None
+        append_frames(system, hush(8.0))
+        append_frames(mic, hush(8.0))
+        append_frames(system, tone(6.0))
+        append_frames(mic, tone(6.0))
+        result = session.stop()
+
+        stored = repo.segments(session.memo_id)
+
+    # the 8s of silence never became a whisper call at all
+    assert sum(fake.durations) == pytest.approx(6.0)
+    # yet the speech is still placed 8s into the meeting, not shifted to its
+    # start by however much silence was skipped ahead of it
+    assert stored and stored[0].t0_ms == 8000
+    assert result.segment_count == len(stored) >= 1
+
+
+def test_a_silence_floor_of_zero_leaves_the_session_transcribing_even_pure_silence(
+    tmp_path, live, monkeypatch
+):
+    monkeypatch.setattr(services, "SEARCH_S", 0.0)
+    monkeypatch.setattr(config, "LIVE_SILENCE_FLOOR", 0)
+    system, mic, fake = live
+    with Repository(tmp_path / "db.sqlite") as repo:
+        session = services.start_live(repo, system, mic, "meeting.m4a", "work")
+        assert session is not None
+        append_frames(system, hush(6.0))
+        append_frames(mic, hush(6.0))
+        result = session.stop()
+
+    assert sum(fake.durations) == pytest.approx(6.0)
+    assert result.segment_count >= 1
+
+
+def test_the_live_pass_asks_whisper_to_decode_greedily(tmp_path, live):
+    # live_beam_size defaults to 1 — greedy — precisely because finish_live
+    # archives whatever this call comes back with; process_memo's own call to
+    # whisper.transcribe never names a beam at all, so it keeps asking for
+    # whatever whisper_beam_size is configured, unaffected by this one
+    system, mic, fake = live
+    with Repository(tmp_path / "db.sqlite") as repo:
+        session = services.start_live(repo, system, mic, "meeting.m4a", "work")
+        assert session is not None
+        append_frames(system, spoken(2.0))
+        append_frames(mic, spoken(2.0))
+        session.stop()
+
+    assert fake.beams == [config.LIVE_BEAM_SIZE] == [1]
+
+
+def test_the_archival_pass_keeps_its_configured_beam_while_the_live_call_site_asks_for_its_own(
+    tmp_path, monkeypatch
+):
+    # exercises the actual wiring in whisper.transcribe/decoding rather than a
+    # stand-in: process_memo's call site never names a beam, so it must still
+    # get whatever whisper_beam_size says, while LiveSession's call site
+    # always names live_beam_size explicitly
+    bin_path = tmp_path / "whisper-cli"
+    bin_path.write_bytes(b"")
+    model_path = tmp_path / "model.bin"
+    model_path.write_bytes(b"")
+    monkeypatch.setattr(whisper.config, "WHISPER_BIN", bin_path)
+    monkeypatch.setattr(whisper.config, "WHISPER_MODEL_PATH", model_path)
+    monkeypatch.setattr(whisper.config, "VAD_MODEL_PATH", tmp_path / "absent-vad.bin")
+    monkeypatch.setattr(whisper.config, "WHISPER_BEAM_SIZE", 5)
+    monkeypatch.setattr(whisper.qos, "background", lambda cmd: cmd)
+    seen: list[list[str]] = []
+
+    def run(cmd, **kwargs):
+        seen.append(cmd)
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+    monkeypatch.setattr(whisper.subprocess, "run", run)
+
+    with pytest.raises(GatewayError, match="timed out"):
+        whisper.transcribe(tmp_path / "memo.wav", 10.0)  # the archival call site's shape
+    with pytest.raises(GatewayError, match="timed out"):
+        whisper.transcribe(tmp_path / "memo.wav", 10.0, beam=config.LIVE_BEAM_SIZE)  # live's
+
+    archival, live_cmd = seen
+    assert archival[archival.index("-bs") + 1] == "5"
+    assert "-bo" not in archival
+    assert live_cmd[live_cmd.index("-bs") + 1] == "1"
+    assert live_cmd[live_cmd.index("-bo") + 1] == "1"
+
+
+def test_the_catch_up_cap_is_still_about_360_seconds_at_the_new_defaults():
+    # live_chunk_s moved from 90 to 180 to spawn whisper-cli half as often;
+    # LIVE_MAX_FACTOR moved from 4 to 2 in the same change so stop()'s
+    # worst-case wait — the product of the two — stayed where it always was
+    # rather than doubling along with the chunk length
+    assert services.LIVE_MAX_FACTOR * config.SETTINGS["live_chunk_s"].default == 360
+
+
 def test_each_stretch_is_told_what_the_one_before_it_ended_with(tmp_path, live):
     system, mic, fake = live
     with Repository(tmp_path / "db.sqlite") as repo:
@@ -322,6 +462,64 @@ def test_a_stretch_that_fails_costs_the_live_transcript_and_not_the_recording(
     assert result.segment_count == 0
     assert result.failure is not None
     assert system.exists() and mic.exists()
+
+
+def test_a_stretch_that_fails_after_an_earlier_one_stored_still_reports_the_failure(
+    tmp_path, live, monkeypatch
+):
+    # the bug this guards: a pass that fails only after the meeting was
+    # already partly stored must still be told apart from a fully live
+    # meeting, or the caller has no way to know the transcript stops short
+    system, mic, _fake = live
+    calls = {"n": 0}
+
+    def flaky(wav, duration_s, model=None, prompt="", beam=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "result": {"language": "en"},
+                "transcription": [{"offsets": {"from": 0, "to": 500}, "text": " chunk one"}],
+            }
+        raise GatewayError("whisper-cli failed")
+
+    monkeypatch.setattr(whisper, "transcribe", flaky)
+    with Repository(tmp_path / "db.sqlite") as repo:
+        session = services.start_live(repo, system, mic, "meeting.m4a", "work")
+        assert session is not None
+        append_frames(system, spoken(20.0))
+        append_frames(mic, spoken(20.0))
+        result = session.stop()
+
+        stored = repo.segments(session.memo_id)
+
+    assert result.failure is not None
+    assert result.segment_count > 0
+    assert len(stored) == result.segment_count
+    assert not session._thread.is_alive()
+
+
+def test_a_failure_that_is_not_a_gatewayerror_does_not_take_the_live_thread_down_with_it(
+    tmp_path, live, monkeypatch
+):
+    # mono(), segments_from_whisper and repo.append_segments can each raise
+    # something other than GatewayError; none of them may escape the thread
+    system, mic, _fake = live
+
+    def malformed(*_a, **_k):
+        # whisper's own shape, missing the offsets segments_from_whisper needs
+        return {"result": {"language": "en"}, "transcription": [{"text": "no offsets"}]}
+
+    monkeypatch.setattr(whisper, "transcribe", malformed)
+    with Repository(tmp_path / "db.sqlite") as repo:
+        session = services.start_live(repo, system, mic, "meeting.m4a", "work")
+        assert session is not None
+        append_frames(system, spoken(20.0))
+        append_frames(mic, spoken(20.0))
+        result = session.stop()
+
+    assert result.failure is not None
+    assert "offsets" in result.failure
+    assert not session._thread.is_alive()
 
 
 def test_transcribing_as_it_records_is_skipped_rather_than_failed_when_it_cannot_run(
@@ -388,15 +586,20 @@ def test_a_live_memo_is_finished_by_the_archive_rather_than_re_transcribed(
 class Taping:
     """A meeting being taped, standing in for the helper: the audio arrives
     while the caller is sitting through the recording, exactly as it does when
-    somebody is in a real meeting."""
+    somebody is in a real meeting. Silent defaults to False so every existing
+    caller keeps taping a meeting somebody is actually talking in; a caller
+    that wants a room that stayed quiet the whole time asks for that
+    explicitly instead."""
 
-    def __init__(self, system, mic, seconds: float = 20.0):
+    def __init__(self, system, mic, seconds: float = 20.0, silent: bool = False):
         self._tracks = (system, mic)
         self._seconds = seconds
+        self._silent = silent
 
     def wait(self) -> int:
+        samples = hush(self._seconds) if self._silent else spoken(self._seconds)
         for track in self._tracks:
-            append_frames(track, spoken(self._seconds))
+            append_frames(track, samples)
         return 0
 
     def stop(self) -> None:
@@ -474,3 +677,181 @@ def test_a_meeting_the_live_pass_could_not_read_is_transcribed_the_ordinary_way(
     with Repository(tmp_path / "db.sqlite") as repo:
         # the memo opened for the live pass is gone, not left beside the real one
         assert len(repo.memos()) == 1
+
+
+def test_a_meeting_that_fails_partway_through_is_transcribed_the_ordinary_way_not_finished_live(
+    tmp_path, recorded, monkeypatch, capsys
+):
+    # the bug this guards: segment_count alone said "finish the live memo",
+    # even when a later stretch of the same meeting had already failed and
+    # left everything after it untranscribed
+    calls = {"n": 0}
+
+    def flaky(wav, duration_s, model=None, prompt="", beam=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "result": {"language": "en"},
+                "transcription": [{"offsets": {"from": 0, "to": 500}, "text": " chunk one"}],
+            }
+        raise GatewayError("whisper-cli failed")
+
+    monkeypatch.setattr(whisper, "transcribe", flaky)
+    ordinary: list[str] = []
+
+    def process(repo, src, **kwargs):
+        ordinary.append(src.name)
+        memo_id = repo.start_memo(filename=src.name, project="other")
+        repo.append_segments(memo_id, [Segment(0, 1000, "the whole meeting, ordinarily")])
+        repo.finish_memo(memo_id, wav_path=str(src), duration_s=20.0, language="en")
+        return services.ProcessResult(memo_id, 1, [], "en")
+
+    monkeypatch.setattr(services, "process_memo", process)
+
+    recorded(tmp_path / "db.sqlite")
+
+    assert ordinary and ordinary[0].startswith("meeting-")
+    err = capsys.readouterr().err
+    assert "stopped partway" in err
+    assert "transcribed while recording" not in err
+    with Repository(tmp_path / "db.sqlite") as repo:
+        memos = repo.memos()
+        # the live memo is gone, not left sitting beside the ordinary one
+        assert len(memos) == 1
+        segs = repo.segments(memos[0].id)
+        # nothing from the partial live pass survives beside the ordinary pass
+        assert [s.text for s in segs] == ["the whole meeting, ordinarily"]
+
+
+def test_a_wholly_silent_meeting_finishes_live_without_the_ordinary_pipeline_ever_running(
+    tmp_path, recorded, live, monkeypatch
+):
+    # the bug this guards: a live pass that ran cleanly to the end but never
+    # heard anything loud enough to decode stored zero segments, and
+    # segment_count == 0 alone used to read exactly like "the live pass never
+    # got anywhere" — discarding the live memo and sending the whole meeting
+    # through whisper at archival beam size, the very cost the silence gate
+    # exists to avoid, at the moment somebody is waiting for the recording to
+    # finish
+    system, mic, fake = live
+    monkeypatch.setattr(
+        capture, "start",
+        lambda system, mic, **_k: (
+            system.parent.mkdir(parents=True, exist_ok=True),
+            write_wav(system, hush(0)),
+            write_wav(mic, hush(0)),
+            Taping(system, mic, seconds=20.0, silent=True),
+        )[3],
+    )
+
+    def never(*_a, **_k):
+        raise AssertionError("a wholly silent recording was sent through the ordinary pipeline")
+
+    monkeypatch.setattr(services, "process_memo", never)
+
+    recorded(tmp_path / "db.sqlite")
+
+    # the silence gate meant whisper was never spawned at all, live or ordinary
+    assert fake.durations == []
+    with Repository(tmp_path / "db.sqlite") as repo:
+        memos = repo.memos()
+        assert len(memos) == 1
+        # a clean run with nothing to transcribe is a legitimate empty
+        # transcript, not a memo stuck waiting to be finished
+        assert memos[0].status == "transcribed"
+        assert repo.segments(memos[0].id) == []
+
+
+def test_a_meeting_that_opens_silent_and_turns_into_speech_is_unaffected(
+    tmp_path, recorded, live, monkeypatch
+):
+    # the borderline case: only the leading stretch is quiet, so the gate must
+    # skip exactly that stretch and still finish live with what follows,
+    # rather than the presence of any silence at all tipping the whole
+    # meeting into the ordinary pipeline
+    system, mic, fake = live
+    monkeypatch.setattr(services, "SEARCH_S", 0.0)
+
+    class QuietThenSpoken(Taping):
+        def wait(self) -> int:
+            for track in self._tracks:
+                append_frames(track, hush(self._seconds))
+                append_frames(track, spoken(self._seconds))
+            return 0
+
+    monkeypatch.setattr(
+        capture, "start",
+        lambda system, mic, **_k: (
+            system.parent.mkdir(parents=True, exist_ok=True),
+            write_wav(system, hush(0)),
+            write_wav(mic, hush(0)),
+            QuietThenSpoken(system, mic, seconds=8.0),
+        )[3],
+    )
+
+    def never(*_a, **_k):
+        raise AssertionError("a meeting that did have speech in it was re-transcribed ordinarily")
+
+    monkeypatch.setattr(services, "process_memo", never)
+
+    recorded(tmp_path / "db.sqlite")
+
+    with Repository(tmp_path / "db.sqlite") as repo:
+        memos = repo.memos()
+        assert len(memos) == 1
+        assert memos[0].status == "transcribed"
+        segs = repo.segments(memos[0].id)
+        assert segs
+        # the speech is still where the meeting actually put it, not shifted
+        # to the start by however much silence came before it
+        assert segs[0].t0_ms >= 8000
+
+
+def test_finish_live_skips_diarizing_a_memo_the_live_pass_found_nothing_to_transcribe_in(
+    tmp_path, monkeypatch
+):
+    # assign_speakers on an empty transcript returns [] whatever the turns are,
+    # so running the diarizer here would spend real minutes clustering a file
+    # purely to throw the answer away — worth skipping outright, not just
+    # tolerating
+    monkeypatch.setattr(config, "UPLOADS_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(
+        audio,
+        "to_wav16k",
+        lambda src, dst: (dst.parent.mkdir(parents=True, exist_ok=True), dst.write_bytes(b"wav")),
+    )
+    monkeypatch.setattr(audio, "duration_seconds", lambda path: 90.0)
+    monkeypatch.setattr(audio, "recorded_at", lambda path: "2026-08-26T09:00:00Z")
+
+    def never(*_a, **_k):
+        raise AssertionError("diarize was called over a transcript with nothing in it")
+
+    monkeypatch.setattr(sherpa, "diarize", never)
+
+    with Repository(tmp_path / "db.sqlite") as repo:
+        memo_id = repo.start_memo(filename="meeting.m4a", project="work")
+        result = services.finish_live(repo, memo_id, tmp_path / "meeting.m4a", language="en")
+        memo = repo.memo(memo_id)
+
+    assert memo is not None
+    assert memo.status == "transcribed"
+    assert result.segment_count == 0
+
+
+# --- keeping other work off a memo that is still being recorded ------------
+
+
+def test_extracting_notes_refuses_a_memo_that_is_still_being_recorded(tmp_path):
+    with Repository(tmp_path / "db.sqlite") as repo:
+        memo_id = repo.start_memo(filename="meeting.m4a", project="work")
+
+        with pytest.raises(services.InvalidInput, match="recording"):
+            services.run_extraction(repo, memo_id)
+
+
+def test_refining_a_transcript_refuses_a_memo_that_is_still_being_recorded(tmp_path):
+    with Repository(tmp_path / "db.sqlite") as repo:
+        memo_id = repo.start_memo(filename="meeting.m4a", project="work")
+
+        with pytest.raises(services.InvalidInput, match="recording"):
+            services.refine_transcript(repo, memo_id)
