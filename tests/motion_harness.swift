@@ -1,5 +1,10 @@
 // Compiled with the vendored solver and the app's PuckMotion constants by pytest.
 
+/// AppKit supplies this convenience in production; the Foundation-only solver harness does not.
+extension CGPoint {
+    static var zero: CGPoint { CGPoint(x: 0, y: 0) }
+}
+
 /// The same fixed-step accumulator checks observed frame times, not frame counts.
 func settle(at rate: Double, distance: Double) -> Double {
     let physics = SpringMotionPhysics(configuration: PuckMotion.configuration,
