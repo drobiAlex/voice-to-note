@@ -302,6 +302,20 @@ an invisible button cannot take a click; the remaining sliver still belongs to t
 drag and hover view. Reduce Motion applies the appropriate end outline with the existing
 direct frame placement and starts no animation or timer.
 
+While the mouse is held, the full circle begins changing 24 points from an exposed screen
+edge and reaches the complete 22-point tab at the drag room's 2-point limit. Pulling away
+reverses that same geometry while the window remains exactly under the pointer; release
+continues from the held outline into the existing spring tuck. Re-grabbing that spring
+preserves its current cubic blend and reverses through the original release frame before
+returning to live proximity. The working rim measures this selected held or release path,
+rather than an ordinary tuck at the same nominal amount.
+
+Only physical desktop boundaries accept the held morph. A probe just across the owning
+screen rejects an edge when another display occupies that passage, and an eight-point
+corner preference keeps the current exposed edge until its neighbour is clearly closer.
+Display ownership stays fixed during a release spring; moving onto another display clears
+the old contour before that display chooses one of its own exposed edges.
+
 ### Automated verification
 
 At commits `81d0b7b` through `d4a2cbe`, the remote Mac typechecked `capture.swift`,
@@ -338,5 +352,9 @@ confirm the source-stamp rebuild end to end.
 For the edge-tab addition, also check that the shoulders visibly meet each of the four
 screen edges rather than looking like a clipped disc, that the processing rim follows the
 tab boundary, and that grabbing during either direction reverses the contour without a
-shape jump. The remote compiler can establish source validity only; this visual join still
-needs the preview on a real display.
+shape jump. During a held drag, approach each edge slowly from beyond 24 points, pull away
+without releasing, and verify that the window keeps the original pointer offset while the
+circle becomes the tab and reverses. Repeat at corners, across every shared-display seam,
+and with Reduce Motion enabled; seams must remain circular and exposed outer edges must
+still morph. The remote compiler can establish source validity only; these joins and
+multi-display passages still need the preview on real displays.

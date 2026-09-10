@@ -2817,6 +2817,39 @@ struct PuckEdgeContour {
         }
     }
 
+    /// While a hand holds the puck inside the display, the complete tucked
+    /// contour is translated to that display's boundary and clipped there.
+    /// Its off-screen closure stays hidden; the on-screen result is the same
+    /// twenty-two point tab the release will leave behind.
+    static func heldSegments(amount: CGFloat, boundary: CGFloat) -> [Cubic] {
+        let amount = min(max(amount, 0), 1)
+        let circle = segments(amount: 0, boundary: 0)
+        let tab = segments(amount: 1, boundary: 22)
+        let shift = boundary - 22
+        func move(_ point: CGPoint) -> CGPoint { CGPoint(x: point.x + shift, y: point.y) }
+        func blend(_ left: CGPoint, _ right: CGPoint) -> CGPoint {
+            CGPoint(x: left.x + (right.x - left.x) * amount, y: left.y + (right.y - left.y) * amount)
+        }
+        return zip(circle, tab).map { left, right in
+            Cubic(start: blend(left.start, move(right.start)), control1: blend(left.control1, move(right.control1)),
+                  control2: blend(left.control2, move(right.control2)), end: blend(left.end, move(right.end)))
+        }
+    }
+
+    static func releaseSegments(heldAmount: CGFloat, tuckedAmount: CGFloat, boundary: CGFloat,
+                                transition: CGFloat) -> [Cubic] {
+        let held = heldSegments(amount: heldAmount, boundary: boundary)
+        let tucked = segments(amount: tuckedAmount, boundary: boundary)
+        let transition = min(max(transition, 0), 1)
+        func blend(_ left: CGPoint, _ right: CGPoint) -> CGPoint {
+            CGPoint(x: left.x + (right.x - left.x) * transition, y: left.y + (right.y - left.y) * transition)
+        }
+        return zip(held, tucked).map { left, right in
+            Cubic(start: blend(left.start, right.start), control1: blend(left.control1, right.control1),
+                  control2: blend(left.control2, right.control2), end: blend(left.end, right.end))
+        }
+    }
+
     /// The outline stays circular through the first part of a tuck, then
     /// forms its shoulders with zero slope at either end. This avoids the
     /// concave half-tab that a linear point-for-point blend briefly exposed.
@@ -2835,7 +2868,7 @@ struct PuckEdgeContour {
 
     /// Sampling the production cubics gives the rim one dash period for the
     /// current outline without asking AppKit to flatten a path on every frame.
-    static func approximateLength(amount: CGFloat, boundary: CGFloat, samples: Int = 16) -> CGFloat {
+    static func approximateLength(of segments: [Cubic], samples: Int = 16) -> CGFloat {
         func point(_ cubic: Cubic, _ t: CGFloat) -> CGPoint {
             let inverse = 1 - t
             let a = inverse * inverse * inverse
@@ -2845,7 +2878,7 @@ struct PuckEdgeContour {
             return CGPoint(x: a * cubic.start.x + b * cubic.control1.x + c * cubic.control2.x + d * cubic.end.x,
                            y: a * cubic.start.y + b * cubic.control1.y + c * cubic.control2.y + d * cubic.end.y)
         }
-        return segments(amount: amount, boundary: boundary).reduce(CGFloat.zero) { total, cubic in
+        return segments.reduce(CGFloat.zero) { total, cubic in
             var length = total
             var previous = cubic.start
             for sample in 1...samples {
@@ -2855,6 +2888,44 @@ struct PuckEdgeContour {
             }
             return length
         }
+    }
+
+    static func approximateLength(amount: CGFloat, boundary: CGFloat, samples: Int = 16) -> CGFloat {
+        approximateLength(of: segments(amount: amount, boundary: boundary), samples: samples)
+    }
+}
+
+/// Direct manipulation uses one pure policy for proximity strength and edge
+/// retention, so corners and display seams can be exercised without AppKit.
+struct PuckEdgeProximity {
+    /// The contour must meet the edge inside the window's 24-point shadow
+    /// margin; beyond it, the layer bounds would clip a live shoulder first.
+    static let outerGap: CGFloat = 24
+    static let innerGap: CGFloat = 2
+    static let cornerHysteresis: CGFloat = 8
+
+    static func amount(for gap: CGFloat) -> CGFloat {
+        min(max((outerGap - gap) / (outerGap - innerGap), 0), 1)
+    }
+
+    static func chosenIndex(distances: [CGFloat], exposed: [Bool], current: Int?,
+                            maximumGap: CGFloat = outerGap) -> Int? {
+        guard distances.count == exposed.count else { return nil }
+        let choices = distances.indices.filter { exposed[$0] && distances[$0] <= maximumGap }
+        guard let nearest = choices.min(by: { distances[$0] < distances[$1] }) else { return nil }
+        if let current, choices.contains(current), nearest != current,
+           distances[nearest] + cornerHysteresis >= distances[current] {
+            return current
+        }
+        return nearest
+    }
+
+    static func transition(from origin: CGPoint, to target: CGPoint, at point: CGPoint) -> CGFloat {
+        let dx = target.x - origin.x
+        let dy = target.y - origin.y
+        let length = dx * dx + dy * dy
+        guard length > 0 else { return 1 }
+        return min(max(((point.x - origin.x) * dx + (point.y - origin.y) * dy) / length, 0), 1)
     }
 }
 
@@ -2995,7 +3066,8 @@ final class RecorderPuckView: NSView, Dockable {
     /// ever moved off the display link, and body, shadow and working rim stay
     /// one exact outline today.
     func setEdgeMorph(_ edge: Dock.Edge?, amount: CGFloat, boundary: CGFloat? = nil,
-                      visibleFrame: NSRect? = nil) {
+                      visibleFrame: NSRect? = nil, held: Bool = false,
+                      heldAmount: CGFloat? = nil, transition: CGFloat = 1) {
         guard let edge else {
             clearEdgeMorph()
             return
@@ -3003,17 +3075,17 @@ final class RecorderPuckView: NSView, Dockable {
         let amount = min(max(amount, 0), 1)
         let boundary = boundary ?? Dock.peek
         clipToVisibleFrame(visibleFrame)
-        if let old = edgeMorph, old.edge == edge, abs(old.amount - amount) < 0.001,
-           abs(old.boundary - boundary) < 0.001 { return }
         edgeMorph = (edge, amount, boundary)
-        let path = edgePath(edge, amount: amount, boundary: boundary)
+        let segments = edgeSegments(amount: amount, boundary: boundary, held: held,
+                                    heldAmount: heldAmount, transition: transition)
+        let path = edgePath(edge, segments: segments)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         body.path = path
         body.shadowPath = path
         workingRim.path = path
         CATransaction.commit()
-        tuneWorkingRim(PuckEdgeContour.approximateLength(amount: amount, boundary: boundary - 0.5))
+        tuneWorkingRim(PuckEdgeContour.approximateLength(of: segments))
         let contentAlpha = max(0, 1 - amount * 1.25)
         for control in [record, caption, inputButton, projectButton, outputButton] {
             control.alphaValue = contentAlpha
@@ -3069,11 +3141,20 @@ final class RecorderPuckView: NSView, Dockable {
     /// Eight corresponding cubic pieces turn a circle into a smooth-union
     /// tab. `boundary` is measured from the body's inward edge to the actual
     /// screen edge, so a spring overshoot never tears the tab away from it.
-    private func edgePath(_ edge: Dock.Edge, amount: CGFloat, boundary: CGFloat) -> CGPath {
+    private func edgeSegments(amount: CGFloat, boundary: CGFloat, held: Bool,
+                              heldAmount: CGFloat?, transition: CGFloat) -> [PuckEdgeContour.Cubic] {
         // The circular path begins half a stroke inside the disc rect. Keep
         // that same inset here and compensate the moving screen anchor so the
         // visible shoulders still land on the exact display boundary.
-        let segments = PuckEdgeContour.segments(amount: amount, boundary: boundary - 0.5)
+        heldAmount.map {
+            PuckEdgeContour.releaseSegments(heldAmount: $0, tuckedAmount: amount,
+                                            boundary: boundary - 0.5, transition: transition)
+        } ?? (held
+            ? PuckEdgeContour.heldSegments(amount: amount, boundary: boundary - 0.5)
+            : PuckEdgeContour.segments(amount: amount, boundary: boundary - 0.5))
+    }
+
+    private func edgePath(_ edge: Dock.Edge, segments: [PuckEdgeContour.Cubic]) -> CGPath {
         let origin: NSPoint
         let outward: NSPoint
         let along: NSPoint
@@ -3854,6 +3935,13 @@ final class Dock {
     /// the tab across a shared display seam while the spring is in flight.
     private var morphScreen: NSScreen?
     private var morphDisplay: UInt32?
+    /// The direct-manipulation tab is measured from the held body, not the
+    /// release spring's revealed-to-tucked travel.
+    private var heldMorphAmount: CGFloat?
+    private var releaseMorph: (amount: CGFloat, origin: NSPoint, target: NSPoint)?
+    /// A tuck or peek that did not start as a held proximity contour keeps its
+    /// existing geometry until the hand has carried it beyond the live band.
+    private var preservedGrabEdge: Edge?
 
     /// Told once, when the window stops hanging: whoever hung it there closes it
     /// on a click elsewhere and lights the button it hangs from, and a window that
@@ -3872,6 +3960,9 @@ final class Dock {
         (panel as? DockPanel)?.onMotionHidden = { [weak self] in
             self?.motion.interrupt()
             self?.pending?.invalidate()
+            self?.heldMorphAmount = nil
+            self?.releaseMorph = nil
+            self?.preservedGrabEdge = nil
             (self?.view as? RecorderPuckView)?.stopMotion()
         }
         view.onGrip = { [weak self] grip in self?.gripped(grip) }
@@ -3898,6 +3989,13 @@ final class Dock {
     /// The window put back where it was left, or nothing — and then the caller
     /// hangs it under the status item — when that place is gone.
     func restore(_ place: DockPlace) -> Bool {
+        heldMorphAmount = nil
+        releaseMorph = nil
+        preservedGrabEdge = nil
+        morphEdge = nil
+        morphScreen = nil
+        morphDisplay = nil
+        (view as? RecorderPuckView)?.clearEdgeMorph()
         switch place {
         case .hanging:
             return false
@@ -3962,6 +4060,7 @@ final class Dock {
         switch grip {
         case let .began(point):
             motion.interrupt()
+            preservedGrabEdge = releaseMorph == nil ? morphEdge : nil
             grabOrigin = panel.frame.origin
             grabScreen = Dock.screen(under: panel.frame)
             pending?.invalidate()
@@ -3978,9 +4077,46 @@ final class Dock {
                 morphEdge = nil
                 morphDisplay = nil
                 self.morphScreen = nil
+                heldMorphAmount = nil
+                releaseMorph = nil
+                preservedGrabEdge = nil
                 (view as? RecorderPuckView)?.clearEdgeMorph()
-            } else if let edge = morphEdge, let screen = currentMorphScreen() {
-                applyMorph(edge, at: origin, on: screen)
+            }
+            if let releaseMorph, let edge = morphEdge, let screen = currentMorphScreen() {
+                let transition = PuckEdgeProximity.transition(
+                    from: releaseMorph.origin, to: releaseMorph.target, at: origin
+                )
+                if transition > 0 {
+                    applyMorph(edge, at: origin, on: screen)
+                    return
+                }
+                self.releaseMorph = nil
+            }
+            if let edge = preservedGrabEdge, let screen = currentMorphScreen() {
+                let gap = edgeDistance(edge, from: body, to: screen.visibleFrame)
+                if gap < PuckEdgeProximity.outerGap {
+                    if morphEdge != nil { applyMorph(edge, at: origin, on: screen) }
+                    return
+                }
+                preservedGrabEdge = nil
+                morphEdge = nil
+                morphScreen = nil
+                morphDisplay = nil
+                (view as? RecorderPuckView)?.clearEdgeMorph()
+            }
+            if let screen = cursorScreen, let edge = proximityEdge(for: body, on: screen) {
+                let gap = edgeDistance(edge, from: body, to: screen.visibleFrame)
+                let amount = PuckEdgeProximity.amount(for: gap)
+                heldMorphAmount = amount
+                morphEdge = edge
+                holdMorphScreen(screen)
+                applyHeldMorph(edge, amount: amount, on: screen)
+            } else {
+                heldMorphAmount = nil
+                morphEdge = nil
+                morphScreen = nil
+                morphDisplay = nil
+                (view as? RecorderPuckView)?.clearEdgeMorph()
             }
         case .ended:
             NSCursor.pop()
@@ -3988,6 +4124,7 @@ final class Dock {
             grab = nil
             grabOrigin = nil
             grabScreen = nil
+            preservedGrabEdge = nil
             release()
         }
     }
@@ -4043,16 +4180,32 @@ final class Dock {
     /// Let go: a window resting against an edge tucks into it, at the spot
     /// along that edge where it was left; anywhere else it stays.
     private func release() {
-        guard let screen = Dock.screen(under: panel.frame) ?? NSScreen.main else {
+        guard let screen = currentMorphScreen() ?? Dock.screen(under: panel.frame) ?? NSScreen.main else {
             state = .free
+            heldMorphAmount = nil
+            releaseMorph = nil
+            preservedGrabEdge = nil
             onPlaced?(place)
             return
         }
-        if let edge = Dock.edge(hugged: body, on: screen) {
+        // The edge chosen while held owns release through the live band, using
+        // its display number because AppKit may vend a new NSScreen instance.
+        if heldMorphAmount != nil, let edge = morphEdge,
+           morphDisplay != nil, Dock.number(of: screen) == morphDisplay {
+            along = Dock.along(edge, of: panel.frame, on: screen)
+            tuck(edge, on: screen)
+            return
+        }
+        if let edge = proximityEdge(for: body, on: screen, within: Dock.magnet) {
             along = Dock.along(edge, of: panel.frame, on: screen)
             tuck(edge, on: screen)
         } else {
             state = .free
+            heldMorphAmount = nil
+            morphEdge = nil
+            morphScreen = nil
+            morphDisplay = nil
+            (view as? RecorderPuckView)?.clearEdgeMorph()
             onPlaced?(place)
         }
     }
@@ -4103,11 +4256,19 @@ final class Dock {
         state = .tucked(edge)
         morphEdge = edge
         holdMorphScreen(screen)
-        slide(to: tuckedFrame(edge, on: screen), alpha: Dock.tuckedAlpha, bound: sliverBound(edge, on: screen))
+        let target = tuckedFrame(edge, on: screen)
+        if let heldMorphAmount {
+            releaseMorph = (heldMorphAmount, panel.frame.origin, target.origin)
+            self.heldMorphAmount = nil
+        }
+        slide(to: target, alpha: Dock.tuckedAlpha, bound: sliverBound(edge, on: screen))
         onPlaced?(place)
     }
 
     private func peek(_ edge: Edge) {
+        heldMorphAmount = nil
+        releaseMorph = nil
+        preservedGrabEdge = nil
         guard let screen = currentMorphScreen() ?? Dock.screen(under: panel.frame) ?? NSScreen.main else { return }
         state = .peeking(edge)
         morphEdge = edge
@@ -4120,6 +4281,9 @@ final class Dock {
     /// different one from the one it was tucked into.
     private func reanchor() {
         motion.interrupt()
+        heldMorphAmount = nil
+        releaseMorph = nil
+        preservedGrabEdge = nil
         guard let screen = currentMorphScreen() ?? Dock.screen(under: panel.frame) ?? NSScreen.main else { return }
         holdMorphScreen(screen)
         switch state {
@@ -4182,13 +4346,6 @@ final class Dock {
         let travelled = NSPoint(x: origin.x - revealed.x, y: origin.y - revealed.y)
         let length = delta.x * delta.x + delta.y * delta.y
         let amount = length > 0 ? min(max((travelled.x * delta.x + travelled.y * delta.y) / length, 0), 1) : 0
-        guard amount > 0.001 else {
-            morphEdge = nil
-            (view as? RecorderPuckView)?.clearEdgeMorph()
-            return
-        }
-        morphEdge = edge
-        holdMorphScreen(screen)
         let body = NSRect(x: origin.x + inset, y: origin.y + inset,
                           width: panel.frame.width - inset * 2, height: panel.frame.height - inset * 2)
         let area = screen.visibleFrame
@@ -4199,9 +4356,76 @@ final class Dock {
         case .top: boundary = area.maxY - body.minY
         case .bottom: boundary = body.maxY - area.minY
         }
-        (view as? RecorderPuckView)?.setEdgeMorph(
-            edge, amount: amount, boundary: boundary, visibleFrame: area
+        if let releaseMorph {
+            let transition = PuckEdgeProximity.transition(
+                from: releaseMorph.origin, to: releaseMorph.target, at: origin
+            )
+            let tucked = releaseMorph.amount + (1 - releaseMorph.amount) * transition
+            morphEdge = edge
+            holdMorphScreen(screen)
+            (view as? RecorderPuckView)?.setEdgeMorph(edge, amount: tucked, boundary: boundary,
+                visibleFrame: area, heldAmount: releaseMorph.amount, transition: transition)
+            if transition >= 1 { self.releaseMorph = nil }
+        } else {
+            guard amount > 0.001 else {
+                morphEdge = nil
+                (view as? RecorderPuckView)?.clearEdgeMorph()
+                return
+            }
+            morphEdge = edge
+            holdMorphScreen(screen)
+            (view as? RecorderPuckView)?.setEdgeMorph(edge, amount: amount, boundary: boundary, visibleFrame: area)
+        }
+    }
+
+    /// The held contour reaches the real edge through the view mask while the
+    /// window remains under the pointer, so there is no magnetic movement.
+    private func applyHeldMorph(_ edge: Edge, amount: CGFloat, on screen: NSScreen) {
+        let area = screen.visibleFrame
+        let boundary = edgeDistance(edge, from: body, to: area) + (edge == .left || edge == .right ? body.width : body.height)
+        (view as? RecorderPuckView)?.setEdgeMorph(edge, amount: amount, boundary: boundary,
+                                                   visibleFrame: area, held: true)
+    }
+
+    private func proximityEdge(for body: NSRect, on screen: NSScreen,
+                               within maximumGap: CGFloat = PuckEdgeProximity.outerGap) -> Edge? {
+        let area = screen.visibleFrame
+        let edges: [Edge] = [.left, .right, .top, .bottom]
+        let distances = [body.minX - area.minX, area.maxX - body.maxX,
+                         area.maxY - body.maxY, body.minY - area.minY]
+        let midpoint = NSPoint(x: body.midX, y: body.midY)
+        let exposed = edges.map { self.exposed($0, on: screen, at: midpoint) }
+        let current = morphEdge.flatMap { edges.firstIndex(of: $0) }
+        return PuckEdgeProximity.chosenIndex(
+            distances: distances, exposed: exposed, current: current, maximumGap: maximumGap
         )
+            .map { edges[$0] }
+    }
+
+    private func edgeDistance(_ edge: Edge, from body: NSRect, to area: NSRect) -> CGFloat {
+        switch edge {
+        case .left: return body.minX - area.minX
+        case .right: return area.maxX - body.maxX
+        case .top: return area.maxY - body.maxY
+        case .bottom: return body.minY - area.minY
+        }
+    }
+
+    /// A neighbour across a physical display boundary owns that passage. The
+    /// outer desktop edge alone may grow a tab, preventing a drag from being
+    /// captured while it crosses between screens.
+    private func exposed(_ edge: Edge, on screen: NSScreen, at point: NSPoint) -> Bool {
+        let frame = screen.frame
+        let probe: NSPoint
+        switch edge {
+        case .left: probe = NSPoint(x: frame.minX - 1, y: point.y)
+        case .right: probe = NSPoint(x: frame.maxX + 1, y: point.y)
+        case .top: probe = NSPoint(x: point.x, y: frame.maxY + 1)
+        case .bottom: probe = NSPoint(x: point.x, y: frame.minY - 1)
+        }
+        return !NSScreen.screens.contains { other in
+            other != screen && other.frame.insetBy(dx: -1, dy: -1).contains(probe)
+        }
     }
 
     /// Keep a moving tab on the display that accepted it, unless that display

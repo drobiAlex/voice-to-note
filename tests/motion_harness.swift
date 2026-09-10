@@ -123,6 +123,12 @@ func near(_ left: CGFloat, _ right: CGFloat, _ tolerance: CGFloat = 0.001) -> Bo
     abs(left - right) <= tolerance
 }
 func finite(_ point: CGPoint) -> Bool { point.x.isFinite && point.y.isFinite }
+func same(_ left: PuckEdgeContour.Cubic, _ right: PuckEdgeContour.Cubic) -> Bool {
+    near(left.start.x, right.start.x) && near(left.start.y, right.start.y)
+        && near(left.control1.x, right.control1.x) && near(left.control1.y, right.control1.y)
+        && near(left.control2.x, right.control2.x) && near(left.control2.y, right.control2.y)
+        && near(left.end.x, right.end.x) && near(left.end.y, right.end.y)
+}
 precondition(PuckEdgeContour.contactAmount(for: 0) == 0, "Tab starts before contact")
 precondition(PuckEdgeContour.contactAmount(for: 0.5) < 0.15, "Approach stopped reading as a circle")
 precondition(PuckEdgeContour.contactAmount(for: 1) == 1, "Tab never reaches its terminal outline")
@@ -173,3 +179,80 @@ for boundary in [CGFloat(11), 22, 35] {
     precondition(tabRim.isFinite && tabRim > 36, "Tab cannot carry a single rim dash")
 }
 print("Contour-length dash period keeps one continuous processing highlight")
+
+/// A held drag reaches the same clipped tab without moving its window.  The
+/// translated terminal remains finite at the real 202-point boundary, where
+/// the ordinary tucked contour is intentionally not shown in full.
+for amount in [CGFloat(0), 0.29, 0.57, 0.86, 1] {
+    let held = PuckEdgeContour.heldSegments(amount: amount, boundary: 202)
+    precondition(held.count == 8, "Held contour changed topology")
+    for index in held.indices {
+        let next = held[(index + 1) % held.count]
+        precondition(finite(held[index].start) && finite(held[index].control1)
+            && finite(held[index].control2) && finite(held[index].end), "Held contour contains a nonfinite point")
+        precondition(near(held[index].end.x, next.start.x) && near(held[index].end.y, next.start.y),
+                     "Held contour is not closed")
+    }
+    for (upper, lower) in [(0, 3), (1, 2), (4, 7), (5, 6)] {
+        precondition(near(held[upper].start.x, held[lower].end.x)
+            && near(held[upper].start.y, -held[lower].end.y), "Held contour lost symmetry")
+    }
+}
+let heldCircle = PuckEdgeContour.heldSegments(amount: 0, boundary: 202)
+let circle = PuckEdgeContour.segments(amount: 0, boundary: 0)
+precondition(zip(heldCircle, circle).allSatisfy { same($0.0, $0.1) },
+             "The proximity band does not begin as a circle")
+let held = PuckEdgeContour.heldSegments(amount: 1, boundary: 202)
+precondition(near(held[0].start.x, 202) && near(held[4].start.x, 202),
+             "The held tab missed the live display boundary")
+for index in held.indices {
+    let prior = held[(index + 7) % 8]
+    let current = held[index]
+    precondition(near(current.start.x - prior.control2.x, current.control1.x - current.start.x)
+        && near(current.start.y - prior.control2.y, current.control1.y - current.start.y),
+        "The held terminal contour has a cusp")
+}
+let heldAmount: CGFloat = 0.57
+let heldAtRelease = PuckEdgeContour.heldSegments(amount: heldAmount, boundary: 202)
+let releaseStart = PuckEdgeContour.releaseSegments(
+    heldAmount: heldAmount, tuckedAmount: heldAmount, boundary: 202, transition: 0)
+let tuckedAtEnd = PuckEdgeContour.segments(amount: 1, boundary: 22)
+let releaseEnd = PuckEdgeContour.releaseSegments(
+    heldAmount: heldAmount, tuckedAmount: 1, boundary: 22, transition: 1)
+precondition(zip(releaseStart, heldAtRelease).allSatisfy { same($0.0, $0.1) },
+             "Release changed the held outline on its first frame")
+precondition(zip(releaseEnd, tuckedAtEnd).allSatisfy { same($0.0, $0.1) },
+             "Release did not finish on the ordinary tucked outline")
+let heldRim = PuckEdgeContour.approximateLength(of: heldAtRelease)
+let releaseRim = PuckEdgeContour.approximateLength(of: PuckEdgeContour.releaseSegments(
+    heldAmount: heldAmount, tuckedAmount: 0.8, boundary: 80, transition: 0.4))
+precondition(heldRim.isFinite && releaseRim.isFinite && heldRim > 36 && releaseRim > 36,
+             "The actual held or release path cannot carry its working-rim dash")
+print("Held and release contours share endpoints and measure their actual rim paths")
+
+precondition(PuckEdgeProximity.amount(for: 24) == 0, "Live morph starts outside its window margin")
+precondition(PuckEdgeProximity.amount(for: 2) == 1, "Live morph misses its terminal tab")
+precondition(near(PuckEdgeProximity.amount(for: 13), 0.5), "Live morph is not continuous across its band")
+precondition(PuckEdgeProximity.chosenIndex(
+    distances: [12, 10, 90, 90], exposed: [true, true, true, true], current: 0) == 0,
+    "Corner jitter changed the retained edge")
+precondition(PuckEdgeProximity.chosenIndex(
+    distances: [20, 10, 90, 90], exposed: [true, true, true, true], current: 0) == 1,
+    "A decisively closer corner edge was not selected")
+precondition(PuckEdgeProximity.chosenIndex(
+    distances: [2, 90, 90, 90], exposed: [false, true, true, true], current: nil) == nil,
+    "A shared display seam accepted a live morph")
+precondition(PuckEdgeProximity.chosenIndex(
+    distances: [2, 18, 90, 90], exposed: [false, true, true, true], current: 0) == 1,
+    "An exposed outer edge lost to a nearer shared seam")
+precondition(PuckEdgeProximity.chosenIndex(
+    distances: [25, 27, 90, 90], exposed: [false, true, true, true], current: nil, maximumGap: 28) == 1,
+    "Release selected a nearer shared seam instead of an exposed edge")
+let releaseOrigin = CGPoint(x: 100, y: 20)
+let releaseTarget = CGPoint(x: 200, y: 20)
+precondition(PuckEdgeProximity.transition(from: releaseOrigin, to: releaseTarget, at: releaseOrigin) == 0,
+             "A re-grab cannot reverse from the exact held frame")
+precondition(near(PuckEdgeProximity.transition(
+    from: releaseOrigin, to: releaseTarget, at: CGPoint(x: 150, y: 75)), 0.5),
+    "Release progress changed with motion along the edge")
+print("Proximity strength, corner hysteresis, seam filtering, and release reversal are stable")
