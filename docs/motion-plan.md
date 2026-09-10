@@ -282,6 +282,18 @@ The processing rim is a Core Animation arc, static under Reduce Motion and remov
 processing or when hidden. Preview's Processing scenario opens the puck directly, and
 Replay Arrival can replay the puck's spring.
 
+### Automated verification
+
+At commits `81d0b7b` through `d4a2cbe`, the remote Mac typechecked `capture.swift`,
+`springs.swift` alone, and the combined recorder sources. Its optimized full-app compile
+test passed without launching the app. The production-solver harness also passed in 3.68 s:
+it checks 180, 184, and 200 point slides at 60 and 120 Hz against the 700 ms, one-visible-
+overshoot, 4–12 point, and five-percent criteria, plus momentum-preserving redirects and
+all four bounded-edge predictions at 1,800 pt/s incoming velocity. The remote runner uses
+quiet pytest output and captures the harness's per-case numeric lines, so those individual
+settle times are not available in its log; this is automated constraint evidence, not a
+replacement for the visual measurement below.
+
 ### Human acceptance still required
 
 Step 0 was not performed: this checkout is on Linux, and no before-motion captures were
