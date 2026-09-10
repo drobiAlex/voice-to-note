@@ -15,9 +15,11 @@ from . import GatewayError
 # rather than making the user wait on a backend that is not there
 AVAILABILITY_TIMEOUT_S = 3
 
-NOTES_PROMPT = """Extract structured notes from this voice-memo transcript.
-
-Return ONLY a JSON object, no markdown fences, exactly this shape:
+# the one reply shape every note template asks for. The parser downstream
+# accepts exactly this JSON and nothing else, so the note templates below may
+# steer what goes *into* each field for their kind of content, but share this
+# block so none of them can drift into a shape the app cannot store
+_NOTES_SHAPE = """Return ONLY a JSON object, no markdown fences, exactly this shape:
 {
   "title": "short descriptive title",
   "project": "short project name",
@@ -28,7 +30,11 @@ Return ONLY a JSON object, no markdown fences, exactly this shape:
   "open_questions": ["..."],
   "dates": [{"date": "...", "context": "..."}],
   "tags": ["lowercase-keyword"]
-}
+}"""
+
+NOTES_PROMPT = f"""Extract structured notes from this voice-memo transcript.
+
+{_NOTES_SHAPE}
 
 Rules:
 - project: the thing this conversation is about — the product, client or area of work it belongs to, lowercase, a word or two
@@ -38,6 +44,81 @@ Rules:
 - key_insights: important facts, realizations, information worth remembering
 - open_questions: questions raised but not resolved
 - dates: every date/time mentioned, with its context
+- Empty arrays are fine. Never invent content not in the transcript.
+
+Transcript:
+"""
+
+INTERVIEW_PROMPT = f"""Extract structured notes from this transcript of an interview or podcast conversation.
+
+{_NOTES_SHAPE}
+
+Rules:
+- project: the area or topic the conversation belongs to, lowercase, a word or two
+- summary: who is talking and the through-line of the conversation
+- key_insights: the guest's core theses, stories and advice — one idea per entry, each followed by a short verbatim quote and its [mm:ss] timestamp
+- decisions: strong positions or claims a speaker firmly committed to
+- action_items: recommendations worth acting on; owner = the speaker who urged it when clear, else null
+- open_questions: questions raised, disagreements left unresolved, threads left hanging
+- dates: every date/time mentioned, with its context
+- tags: topics, plus the people, books and tools mentioned, lowercase
+- Quotes must be verbatim from the transcript, never paraphrased
+- Empty arrays are fine. Never invent content not in the transcript.
+
+Transcript:
+"""
+
+LECTURE_PROMPT = f"""Extract structured notes from this transcript of a lecture or conference talk.
+
+{_NOTES_SHAPE}
+
+Rules:
+- project: the field or subject the talk belongs to, lowercase, a word or two
+- summary: the speaker's thesis and why it matters
+- key_insights: the argument in the order it was made — one step per entry with its [mm:ss] timestamp — plus a "term — definition" entry for every concept introduced
+- decisions: the conclusions the speaker argued for
+- action_items: further reading, exercises or resources the speaker pointed to; owner null
+- open_questions: limits, caveats and open problems the speaker admitted
+- dates: every date/time mentioned, with its context
+- tags: lowercase topic keywords
+- Quotes must be verbatim from the transcript, never paraphrased
+- Empty arrays are fine. Never invent content not in the transcript.
+
+Transcript:
+"""
+
+TUTORIAL_PROMPT = f"""Extract structured notes from this transcript of a technical tutorial or walkthrough.
+
+{_NOTES_SHAPE}
+
+Rules:
+- project: the tool or technology being taught, lowercase, a word or two
+- summary: the goal of the tutorial and its prerequisites
+- key_insights: the steps in order — "step 1: …", "step 2: …" — keeping commands, settings and exact values as spoken, each with its [mm:ss] timestamp
+- decisions: tool and approach choices the author made, with the reason when one was given
+- action_items: how to verify the result, and things the author suggests trying next
+- open_questions: gotchas, version caveats, and points the video glossed over
+- dates: every date/time mentioned, with its context
+- tags: lowercase keywords for the tools and techniques covered
+- Empty arrays are fine. Never invent content not in the transcript.
+
+Transcript:
+"""
+
+LEARNING_PROMPT = f"""Extract a learning note from this transcript, so its ideas survive apart from the recording.
+
+{_NOTES_SHAPE}
+
+Rules:
+- project: the subject area, lowercase, a word or two
+- summary: the big idea in your own words
+- key_insights: atomic insight cards — one self-contained idea per entry, each followed by a short verbatim quote and its [mm:ss] timestamp
+- decisions: takeaways that are settled enough to act on as stated
+- action_items: things worth doing or trying because of this material; owner null
+- open_questions: what to explore, verify or read next
+- dates: every date/time mentioned, with its context
+- tags: topics that connect this note to other notes, lowercase
+- Quotes must be verbatim from the transcript, never paraphrased
 - Empty arrays are fine. Never invent content not in the transcript.
 
 Transcript:
@@ -75,12 +156,24 @@ Lines:
 """
 
 
+# the templates a --template flag may pick from, apart so callers listing
+# what shapes a *note* extraction never offer refine/ask/chat, which shape
+# different calls entirely. All five ask for the same JSON; they differ only
+# in what kind of content they tell the model to put into each field
+NOTE_TEMPLATES: dict[str, str] = {
+    "notes": NOTES_PROMPT,
+    "interview": INTERVIEW_PROMPT,
+    "lecture": LECTURE_PROMPT,
+    "tutorial": TUTORIAL_PROMPT,
+    "learning": LEARNING_PROMPT,
+}
+
 # every static prompt block a caller can put a saved override in front of.
 # the JSON shape each reply must come back in is enforced by the parser that
 # reads it, not by this text, so an override can reword the ask but not the
 # answer a caller downstream is prepared to accept
 TEMPLATES: dict[str, str] = {
-    "notes": NOTES_PROMPT,
+    **NOTE_TEMPLATES,
     "refine": REFINE_PROMPT,
     "ask": ASK_PROMPT,
     "chat": CHAT_PROMPT,

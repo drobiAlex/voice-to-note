@@ -2,6 +2,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -29,9 +30,25 @@ from .domain import (
     TrackFormat,
     Turn,
 )
-from .gateways import GatewayError, audio, bootstrap, capture, llm, sherpa, whisper
+from .gateways import (
+    GatewayError,
+    audio,
+    bootstrap,
+    capture,
+    llm,
+    sherpa,
+    whisper,
+    youtube,
+)
 from .storage.repository import Repository
-from .transforms.live import SEARCH_S, cut_offset, mono, prompt_tail, shifted
+from .transforms.live import (
+    SEARCH_S,
+    cut_offset,
+    has_speech,
+    mono,
+    prompt_tail,
+    shifted,
+)
 from .transforms.notes import SCHEMA, parse_notes, render_notes, render_notes_markdown
 from .transforms.refine import (
     REFINE_SCHEMA,
@@ -56,6 +73,13 @@ from .transforms.speakers import (
     resolve_speaker_names,
 )
 from .transforms.todos import is_mine, normalize
+from .transforms.youtube import (
+    YouTubeVideo,
+    caption_langs,
+    pick_track,
+    segments_from_captions,
+    video_from_info,
+)
 
 Log = Callable[[str], None]
 # how far through the pipeline a recording has got: which stage is starting, and
@@ -104,6 +128,18 @@ def require_memo(repo: Repository, memo_id: int) -> Memo:
     if not memo:
         raise NotFound(f"no memo with id {memo_id}")
     return memo
+
+
+def _require_not_recording(memo: Memo) -> None:
+    """Refuses a use case that needs a settled transcript while a memo is
+    still being taped. run_extraction and refine_transcript both read
+    repo.segments() once, as if the meeting were over; run against a memo a
+    LiveSession is still appending to, either would read a transcript that
+    gets more stretches a moment later and never sees them. Kept out of
+    require_memo itself: show and list read a recording memo all the time,
+    and only these two use cases need the meeting to have actually stopped."""
+    if memo.status == "recording":
+        raise InvalidInput(f"memo {memo.id} is still recording — try again once it stops")
 
 
 def _project_name(project: str) -> str:
@@ -649,13 +685,13 @@ def _registered_template(name: str) -> None:
 
 
 def note_templates() -> list[str]:
-    """Every template that can shape a note extraction: the built-in "notes"
-    first, then any other `*.md` file a user has dropped into
+    """Every template that can shape a note extraction: the built-in note
+    templates first, then any other `*.md` file a user has dropped into
     config.TEMPLATES_DIR that is not one of the app's own template names
     (refine and ask shape other calls, not this one). Sorted so the list —
     and the order `vtn template` prints it in — does not depend on directory
     order, which differs by filesystem."""
-    names = ["notes"]
+    names = list(llm.NOTE_TEMPLATES)
     if config.TEMPLATES_DIR.is_dir():
         names += sorted(
             p.stem for p in config.TEMPLATES_DIR.glob("*.md") if p.stem not in llm.TEMPLATES
@@ -693,6 +729,10 @@ def template_rows() -> list[tuple[str, str]]:
 # template to look at, not for the model reading the prompt
 _TEMPLATE_DOCS: dict[str, str] = {
     "notes": "extracts title, summary, action items and decisions from a transcript",
+    "interview": "notes tuned to a podcast or interview: theses, quotes with timestamps, advice",
+    "lecture": "notes tuned to a talk: the argument in order, concepts defined, further reading",
+    "tutorial": "notes tuned to a walkthrough: ordered steps with exact commands, gotchas",
+    "learning": "a learning note: atomic insights with quotes, takeaways, what to explore next",
     "refine": "repairs mishearings and misplaced sentence breaks in transcribed lines",
     "ask": "answers a question about a memo using only its transcript",
     "chat": "holds a conversation about one or several memos, grounded in their notes",
@@ -762,6 +802,28 @@ def template_reset(name: str) -> str:
         return f"{name} is already built-in"
     path.unlink()
     return f"{name} restored to built-in"
+
+
+def template_new(name: str, source: str = "notes") -> str:
+    """Starts a custom note template as a copy of an existing one, so a user
+    edits a prompt that already asks for the JSON shape the parser accepts
+    rather than writing one from a blank page. The name has to survive as
+    both a filename and a --template argument, and may not be one this app
+    ships — a file by a shipped name would silently shadow the built-in text
+    instead of appearing as the new template the user asked for."""
+    source = note_template(source)
+    if not re.fullmatch(r"[a-z0-9_-]+", name):
+        raise InvalidInput(
+            f"invalid template name: {name} — lowercase letters, digits, - and _ only"
+        )
+    if name in llm.TEMPLATES:
+        raise InvalidInput(f"{name} is a built-in template — pick another name")
+    path = _template_override_path(name)
+    if path.exists():
+        raise InvalidInput(f"template {name} already exists at {path}")
+    config.TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+    path.write_text(template_text(source))
+    return f"created {path} — edit it, then: vtn extract <id> --template {name}"
 
 
 # the optional stages a new recording can go through, in the order they run.
@@ -872,14 +934,22 @@ def _overlapping(diarize: bool) -> bool:
     return diarize and config.OVERLAP_STAGES == "on"
 
 
-# how often a meeting being recorded is looked at. Often enough that ending a
-# recording never waits on it, rarely enough that the look itself costs nothing
-LIVE_POLL_S = 1.0
+# the shortest a wait between looks at the meeting is ever allowed to be, so
+# that a moment already ready — or a miscalculation that thinks it is — costs
+# one quick recheck rather than a tight spin against the disk
+LIVE_POLL_FLOOR_S = 0.5
 # the most audio one live pass will read, as a multiple of the configured chunk
-# length. A machine that cannot keep up with the room would otherwise fall
-# further behind with every pass; capped, it reads bigger stretches less often
-# and catches the rest up once the meeting is over
-LIVE_MAX_FACTOR = 4
+# length. What matters about this is the product with live_chunk_s, not the
+# factor by itself: stop() joins the live thread with no timeout of its own,
+# so that product is the longest a caller ending a recording is ever kept
+# waiting while the last stretch is read. Raising live_chunk_s without lowering
+# this to match would raise that wait right along with it — the factor moved
+# from 4 to 2 in the same change that took the chunk length from 90s to 180s,
+# so the worst case stayed the same ~360s it always was rather than doubling.
+# Short of that, a machine that cannot keep up with the room would otherwise
+# fall further behind with every pass; capped, it reads bigger stretches less
+# often and catches the rest up once the meeting is over
+LIVE_MAX_FACTOR = 2
 
 
 @dataclass
@@ -946,7 +1016,7 @@ class LiveSession:
         thread that did not open it, and the recording's own thread is busy
         sitting through the meeting."""
         with open_repo(self._repo) as repo:
-            while not self._ending.wait(LIVE_POLL_S):
+            while not self._ending.wait(self._wait_s()):
                 if not self._ready() or not self._pass(repo, final=False):
                     if self._failure is not None:
                         return
@@ -970,17 +1040,69 @@ class LiveSession:
         clocks of their own, and a stretch only exists once both have it."""
         return min(r.available() / r.format.rate for r in self._readers)
 
+    def _wait_s(self) -> float:
+        """How long to leave the meeting alone before the next look, instead of
+        waking up once a second for however long the meeting runs — each wake
+        does a stat() per track, and a two-hour meeting has no use for
+        thousands of them. Aimed at the moment _ready() would first say yes:
+        the chunk length plus its run-up, minus what is already pending.
+
+        Clamped on both ends rather than trusted outright. The floor keeps a
+        stretch that is already ready, or a pending_s() that came out negative
+        by some arithmetic slip, from turning into a wait(0) spun in a tight
+        loop against the disk. The ceiling — one configured chunk length — is
+        the other half of the same worry the other direction: a stretch that
+        somehow never becomes ready must still be re-looked at at least once
+        per chunk length, not slept through in a single wait that outlasts the
+        stretch it was waiting for.
+
+        Either way, stop() is never slowed by this: self._ending is a
+        threading.Event, and .wait() returns the moment it is set no matter
+        how long the timeout it was given."""
+        try:
+            remaining = float(config.LIVE_CHUNK_S) + SEARCH_S - self._pending_s()
+        except GatewayError:
+            # left for _ready() to raise and record properly on the very next
+            # loop iteration; this is just how soon that iteration comes
+            return LIVE_POLL_FLOOR_S
+        return min(float(config.LIVE_CHUNK_S), max(LIVE_POLL_FLOOR_S, remaining))
+
     def _pass(self, repo: Repository, final: bool) -> bool:
         """One stretch of the meeting: read, cut at a pause, mixed, transcribed
         and stored. False means the live work is over — either it failed, or
-        there was nothing there to read."""
+        there was nothing there to read.
+
+        Catches Exception rather than GatewayError alone, on purpose: this
+        runs on a background thread, whose exception dies with it the instant
+        join() returns in stop() — nobody downstream would ever see it. The
+        contract this whole class exists under is that transcribing a meeting
+        as it happens may only ever cost the live transcript, never the
+        recording or the caller's fallback to transcribing it the ordinary
+        way, and that has to hold for every failure this pass can hit, not
+        just the ones a gateway wraps. mono() raises a bare ValueError on a
+        sample width nothing here supports, segments_from_whisper raises the
+        same on a JSON shape whisper stopped producing, and
+        repo.append_segments can raise sqlite3.Error on a full disk or a
+        locked database — none of those is a GatewayError."""
         try:
             return self._read(repo, final)
-        except GatewayError as e:
+        except Exception as e:
             self._fail(e)
             return False
 
     def _read(self, repo: Repository, final: bool) -> bool:
+        """One stretch of the meeting, cut at a pause and either stored as
+        words or, when there were none worth decoding, simply advanced past.
+        False means there was nothing there to read at all.
+
+        The silence check runs after the cut rather than before it, on the
+        exact audio the cut chose to keep — cutting first and then measuring
+        what got cut keeps this from ever looking at, or advancing past, a
+        different stretch than the one that was decided on. A skipped stretch
+        still moves the readers forward by exactly its length, so a real
+        stretch later in the meeting lands at the timestamp the meeting
+        actually put it at rather than one shifted early by however much
+        quiet came before it."""
         span = self._pending_s()
         wanted = float(config.LIVE_CHUNK_S)
         limit = LIVE_MAX_FACTOR * wanted
@@ -1004,6 +1126,13 @@ class LiveSession:
             return False
         kept = [(r, raw[: int(cut * r.format.rate) * r.format.frame_bytes]) for r, raw in peeked]
         at_ms = int(self._readers[0].taken_s * 1000)
+        if not has_speech(
+            [(mono(raw, r.format), r.format.rate) for r, raw in kept], config.LIVE_SILENCE_FLOOR
+        ):
+            for reader, raw in kept:
+                reader.advance(len(raw) // reader.format.frame_bytes)
+            self._log(f"  silence {fmt_ts(at_ms)}–{fmt_ts(at_ms + int(cut * 1000))}, not sent to whisper")
+            return True
         segments = self._transcribe([(raw, r.format) for r, raw in kept], cut)
         repo.append_segments(self.memo_id, shifted(segments, at_ms))
         for reader, raw in kept:
@@ -1018,20 +1147,32 @@ class LiveSession:
         """One stretch of both tracks, as words. The mix is thrown away with the
         stretch: the archive of the meeting is made from the tracks themselves
         when it ends, and keeping a minute of wav per minute of meeting would
-        double what a recording costs on disk for nothing."""
+        double what a recording costs on disk for nothing.
+
+        Asks for live_beam_size explicitly rather than falling through to
+        whisper's own default, because finish_live keeps whatever comes back
+        here as the archived transcript: this is the one call in the app that
+        trades wording accuracy for several times less compute, and it must
+        never quietly start doing that to the archival pass too."""
         with tempfile.TemporaryDirectory() as td:
             chunk = Path(td) / "chunk.wav"
             audio.mix_chunk(parts, chunk)
-            raw = whisper.transcribe(chunk, seconds, model=self._model, prompt=self._tail)
+            raw = whisper.transcribe(
+                chunk, seconds, model=self._model, prompt=self._tail, beam=config.LIVE_BEAM_SIZE
+            )
         if not self._language:
             self._language = raw.get("result", {}).get("language", "")
         return segments_from_whisper(raw)
 
     def _fail(self, e: Exception) -> None:
         """Gives up on reading the meeting as it happens, saying so once. The
-        recording itself is untouched and carries on."""
+        recording itself is untouched and carries on. Logs the exception's
+        type beside its message — the live pass runs unattended on its own
+        thread, so this line is the only diagnosis anybody gets of a failure
+        that was not already a GatewayError with its own explanation baked
+        in."""
         self._failure = str(e)
-        self._log(f"  transcribing as it records stopped: {e}")
+        self._log(f"  transcribing as it records stopped: {type(e).__name__}: {e}")
 
 
 def live_model_path() -> Path:
@@ -1091,7 +1232,16 @@ def finish_live(
     over: the archive converted and stored against the memo, and speakers put
     to words that already exist. Transcription is the stage that is already
     done, which is the whole point — what is left here takes seconds where the
-    transcript itself took the length of the meeting to accumulate."""
+    transcript itself took the length of the meeting to accumulate.
+
+    A memo with no segments — the live pass listened to the whole meeting and
+    the silence gate found nothing loud enough to be speech anywhere in it —
+    still lands here rather than being treated specially by a caller: the
+    archive still needs converting and the memo still needs to leave
+    status='recording', it is just that there is no transcript to put speakers
+    on. finish_memo and the ProcessResult below both do the right thing with
+    an empty segment list already, so the only thing worth skipping is
+    diarization itself, which is guarded next."""
     num_speakers = _speaker_count(num_speakers)
     wav = config.UPLOADS_DIR / f"{src.stem}-{uuid.uuid4().hex[:8]}.wav"
     progress(1, "converting")
@@ -1107,7 +1257,7 @@ def finish_live(
     )
     segs = repo.segments(memo_id)
     labels: list[str] = []
-    if diarize:
+    if diarize and segs:
         progress(3, "diarizing")
         log("diarizing …")
         turns = sherpa.diarize(wav, num_speakers)
@@ -1115,6 +1265,13 @@ def finish_live(
         labels, speakers, matches = _identify(repo, wav, turns, keep_names={})
         repo.save_diarization(memo_id, segs, speakers)
         _report_matches(log, matches, keep_names={})
+    elif diarize:
+        # assign_speakers on an empty transcript returns an empty list
+        # whatever turns comes back as, so running the diarizer here would
+        # spend real minutes clustering a file purely to throw the answer
+        # away — and do it on the one recording the live pass has already
+        # told us had nothing worth transcribing in it at all.
+        log("nothing was said — skipping speaker detection …")
     else:
         log("skipping speaker detection …")
     return ProcessResult(memo_id, len(segs), labels, language)
@@ -1131,6 +1288,122 @@ def find_duplicate(repo: Repository, src: Path) -> Memo | None:
     question for whoever is asking, and only a front end can put it to a
     person."""
     return repo.memo_by_recorded_at(audio.recorded_at(src))
+
+
+# the optional stages a youtube import can go through. Shorter than a
+# recording's list on purpose: the words arrive as captions, so there is no
+# audio for speaker detection to listen to
+YOUTUBE_STEPS: tuple[str, ...] = ("refine", "notes")
+
+
+def youtube_steps(text: str) -> frozenset[str]:
+    """Which optional stages an imported video's transcript goes through, as a
+    caller types them — process_steps for a memo that never had audio. Asking
+    for speakers is refused with its own explanation rather than lumped in
+    with typos: it is a reasonable thing to want and simply cannot be had."""
+    steps = {t.strip() for t in text.split(",") if t.strip()}
+    if "speakers" in steps:
+        raise InvalidInput("a video import has no audio to detect speakers in")
+    unknown = steps - set(YOUTUBE_STEPS)
+    if unknown:
+        raise InvalidInput(
+            f"unknown step: {', '.join(sorted(unknown))}"
+            f" — valid steps: {', '.join(YOUTUBE_STEPS)}"
+        )
+    return frozenset(steps)
+
+
+def youtube_url(text: str) -> str:
+    """A pasted link as typed, refused before the network is touched when it
+    is not one. Public so a front end can refuse it while the line it was
+    typed on is still in front of the person — the fetch that follows takes
+    seconds on a thread of its own, and a typo found only at the end of that
+    wait has to be typed over from scratch."""
+    url = text.strip()
+    if not url.startswith(("http://", "https://")):
+        raise InvalidInput(f"not a URL: {url or '(nothing)'}")
+    return url
+
+
+def youtube_video(url: str) -> YouTubeVideo:
+    """What YouTube says about the video behind a pasted link, refused before
+    the network is touched when the link is not one, and refused after when
+    the stream is still running — captions exist once it ends, and a memo of
+    half a stream would read as the whole of it forever."""
+    url = youtube_url(url)
+    video = video_from_info(youtube.video_info(url))
+    if video.is_live:
+        raise InvalidInput("this stream is still live — captions can be imported once it ends")
+    return video
+
+
+def find_youtube_duplicate(repo: Repository, video: YouTubeVideo) -> Memo | None:
+    """The memo already imported from this video, if there is one. Recognised
+    by the canonical watch URL rather than the pasted spelling of it, so a
+    short link and a full one find the same memo. The lookup and nothing else,
+    for find_duplicate's reason: only a front end can ask a person whether a
+    duplicate was meant."""
+    return repo.memo_by_source_url(video.url)
+
+
+def youtube_heading(video: YouTubeVideo) -> str:
+    """The one line a front end shows before asking anything else: what this
+    video is, whose it is, and how long it runs — enough to catch a mispasted
+    link before any captions are fetched."""
+    channel = f" — {video.channel}" if video.channel else ""
+    return f"{video.title}{channel}, {_duration(video.duration_s)}"
+
+
+_NO_CAPTIONS = "no captions on this video — vtn imports captions, it does not transcribe audio"
+
+
+def import_youtube(
+    repo: Repository,
+    video: YouTubeVideo,
+    project: str = "other",
+    lang: str | None = None,
+    log: Log = _silent,
+) -> ProcessResult:
+    """A video's captions in, stored memo out — process_memo for words that
+    were never audio on this machine. The memo lands exactly where a
+    transcription does ('transcribed', timed segments, no speakers), so
+    everything downstream — extract, refine, ask, chat — treats it as any
+    other memo. A language asked for by name must be there or the import
+    refuses, naming what is; the configured preference merely ranks the
+    tracks, because a default must not make a video unimportable."""
+    project = _project_name(project)
+    if lang:
+        picked = pick_track(video, [lang], any_language=False)
+        if picked is None:
+            offered = caption_langs(video)
+            if not offered:
+                raise InvalidInput(_NO_CAPTIONS)
+            listed = ", ".join(offered[:20]) + (" …" if len(offered) > 20 else "")
+            raise InvalidInput(f"no {lang} captions on this video — available: {listed}")
+    else:
+        preferred = [t.strip() for t in config.YOUTUBE_LANG.split(",") if t.strip()]
+        picked = pick_track(video, preferred)
+        if picked is None:
+            raise InvalidInput(_NO_CAPTIONS)
+    track_lang, track_url, auto = picked
+    # auto-generated is worth flagging while the download runs: unpunctuated
+    # captions are why these notes may read rougher than a manual track's
+    log(f"downloading captions ({track_lang}, {'auto-generated' if auto else 'manual'}) …")
+    segs = segments_from_captions(youtube.captions(track_url))
+    if not segs:
+        raise InvalidInput("the caption track is empty — nothing to import")
+    memo_id = repo.create_memo(
+        filename=video.title,
+        wav_path="",
+        duration_s=video.duration_s,
+        language=track_lang,
+        segments=segs,
+        speakers=(),
+        project=project,
+        recorded_at=video.uploaded_at,
+        source_url=video.url,
+    )
+    return ProcessResult(memo_id, len(segs), [], track_lang)
 
 
 def _speaker_count(num_speakers: int | None) -> int | None:
@@ -1434,6 +1707,7 @@ def run_extraction(
     notes are what the run was for, so they are stored before anything that only
     changes how the memo is listed."""
     note_template(template)
+    _require_not_recording(require_memo(repo, memo_id))
     if not force and repo.notes_md(memo_id):
         raise InvalidInput(
             f"memo {memo_id} has notes you edited by hand;"
@@ -1503,7 +1777,7 @@ def refine_transcript(repo: Repository, memo_id: int, dry_run: bool = False) -> 
     lines out of a reply must not fail the whole pass over it. A pass replaces
     the memo's whole refinement, so running it again reverts any line this pass
     does not repair the same way."""
-    require_memo(repo, memo_id)
+    _require_not_recording(require_memo(repo, memo_id))
     segments = repo.segments(memo_id)
     chunks = chunk_segments(segments, chunk_size=config.REFINE_WINDOW)
     with ThreadPoolExecutor(max_workers=REFINE_WORKERS) as pool:

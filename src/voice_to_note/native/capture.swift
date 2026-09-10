@@ -6,7 +6,7 @@
 //
 // Recording runs until SIGINT or SIGTERM. Its parent reads two words on stdout:
 // "recording" once both streams are live, "stopped" once both files are closed.
-// Asked with --levels, it also says how loud each side is ten times a second in
+// Asked with --levels, it also says how loud each side is four times a second in
 // between, so whatever started it can show that both sides are arriving while
 // the meeting can still be saved rather than an hour later in the transcript.
 //
@@ -703,14 +703,26 @@ say("recording")
 // only ever touch a lock
 let levelQueue = DispatchQueue(label: "app.vtn.capture.levels")
 
-/// The reading the parent draws its meters from, ten times a second, or
-/// nothing at all when nobody asked to measure. Ten a second is fast enough
-/// that a bar moves the way the sound does and slow enough that a meeting's
-/// worth of them is still a trickle down a pipe.
+/// The reading the parent draws its meters from, four times a second, or
+/// nothing at all when nobody asked to measure. This timer is what wakes the
+/// machine for the whole life of a meeting — `--levels` is on by default for
+/// the menu bar recorder (`menubar.swift`'s `recordArguments`), so it used to
+/// mean a wakeup every 100 ms for however long somebody was in a call. Four a
+/// second is still fast enough that a bar moves the way speech does — a
+/// quarter second is under the length of a spoken syllable, so an onset never
+/// waits more than one frame to show — and it cuts the wakeups (and the
+/// dBFS pass over the buffered peak that each one does) by more than half.
+/// The 50 ms leeway is a fifth of the interval, which is enough slack for the
+/// OS to fold this wakeup into others already due rather than powering on
+/// the CPU for this alone — most of the saving is here, not in the slower
+/// rate itself.
 func reportLevels(_ system: LevelMeter?, _ microphone: LevelMeter?) -> DispatchSourceTimer? {
     guard let system, let microphone else { return nil }
     let timer = DispatchSource.makeTimerSource(queue: levelQueue)
-    timer.schedule(deadline: .now() + .milliseconds(100), repeating: .milliseconds(100))
+    timer.schedule(
+        deadline: .now() + .milliseconds(250), repeating: .milliseconds(250),
+        leeway: .milliseconds(50)
+    )
     timer.setEventHandler {
         say(
             String(

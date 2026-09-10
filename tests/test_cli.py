@@ -8,6 +8,7 @@ from conftest import StubRepo
 from voice_to_note import cli, config, services
 from voice_to_note.domain import Memo, Segment, Speaker
 from voice_to_note.storage.repository import Repository
+from voice_to_note.transforms.youtube import YouTubeVideo
 
 
 def add_memo(
@@ -992,6 +993,35 @@ def test_template_reset_routes_the_typed_name_to_services(monkeypatch, capsys):
     assert capsys.readouterr().err == "notes restored to built-in\n"
 
 
+def test_template_new_routes_the_name_and_source_to_services(monkeypatch, capsys):
+    seen = {}
+
+    def fake_template_new(name, source="notes"):
+        seen["call"] = (name, source)
+        return "created it"
+
+    monkeypatch.setattr(services, "template_new", fake_template_new)
+
+    run(monkeypatch, StubRepo(), "template", "new", "standup", "--from", "lecture")
+
+    assert seen["call"] == ("standup", "lecture")
+    assert capsys.readouterr().err == "created it\n"
+
+
+def test_template_new_starts_from_notes_when_no_source_is_given(monkeypatch, capsys):
+    seen = {}
+
+    def fake_template_new(name, source="notes"):
+        seen["call"] = (name, source)
+        return "created it"
+
+    monkeypatch.setattr(services, "template_new", fake_template_new)
+
+    run(monkeypatch, StubRepo(), "template", "new", "standup")
+
+    assert seen["call"] == ("standup", "notes")
+
+
 def test_the_bare_template_command_lists_names_and_status(monkeypatch, capsys):
     monkeypatch.setattr(
         services, "template_rows", lambda: [("notes", "built-in"), ("refine", "overridden")]
@@ -1302,3 +1332,113 @@ def test_chats_lists_conversations_as_text_or_json_narrowed_to_a_memo(monkeypatc
 
     run(monkeypatch, StubRepo(), "chats", "--json", "--memo", "3")
     assert capsys.readouterr().out == "json 3\n"
+
+
+# --- importing a youtube video ---------------------------------------------
+
+
+def yt_video(**overrides):
+    fields = dict(
+        video_id="abc123",
+        url="https://www.youtube.com/watch?v=abc123",
+        title="How to think",
+        channel="Some Channel",
+        duration_s=60.0,
+        uploaded_at=None,
+        language="en",
+        is_live=False,
+        subtitles={},
+        automatic_captions={"en": [{"url": "https://captions.example/t", "ext": "json3"}]},
+    )
+    fields.update(overrides)
+    return YouTubeVideo(**fields)
+
+
+def test_youtube_imports_captions_and_prints_the_notes_on_stdout(monkeypatch, capsys):
+    monkeypatch.setattr(services, "youtube_video", lambda _url: yt_video())
+    monkeypatch.setattr(
+        services,
+        "import_youtube",
+        lambda repo, video, project="other", lang=None, log=None: services.ProcessResult(
+            7, 3, [], "en"
+        ),
+    )
+    monkeypatch.setattr(
+        services, "run_extraction", lambda repo, memo_id, force=False, template="notes": "claude"
+    )
+    monkeypatch.setattr(services, "notes", lambda repo, memo_id: "## How to think")
+
+    run(monkeypatch, StubRepo(), "youtube", "https://youtu.be/abc123")
+
+    out, err = capsys.readouterr()
+    assert out == "## How to think\n"
+    assert "How to think — Some Channel, 1m" in err
+    assert "memo 7 — 3 segments, 0 speakers, language=en" in err
+    assert "extracted via claude" in err
+
+
+def test_youtube_with_no_steps_stores_the_transcript_and_says_how_to_go_on(monkeypatch, capsys):
+    monkeypatch.setattr(services, "youtube_video", lambda _url: yt_video())
+    monkeypatch.setattr(
+        services,
+        "import_youtube",
+        lambda repo, video, project="other", lang=None, log=None: services.ProcessResult(
+            7, 3, [], "en"
+        ),
+    )
+    monkeypatch.setattr(
+        services,
+        "run_extraction",
+        lambda *a, **k: pytest.fail("extracted despite --steps ''"),
+    )
+
+    run(monkeypatch, StubRepo(), "youtube", "https://youtu.be/abc123", "--steps", "")
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "run `vtn extract 7` for notes" in err
+
+
+def test_a_video_already_imported_is_left_alone_when_the_answer_is_no(monkeypatch, capsys):
+    stored = Memo(4, "How to think", "", 60.0, "en", "extracted", "2026-01-15")
+    monkeypatch.setattr(services, "youtube_video", lambda _url: yt_video())
+    monkeypatch.setattr(services, "find_youtube_duplicate", lambda repo, video: stored)
+    monkeypatch.setattr(
+        services, "import_youtube", lambda *a, **k: pytest.fail("imported after a no")
+    )
+    monkeypatch.setattr("builtins.input", lambda: "n")
+
+    run(monkeypatch, StubRepo(), "youtube", "https://youtu.be/abc123")
+
+    err = capsys.readouterr().err
+    assert "memo 4 — How to think" in err
+    assert err.endswith("skipped\n")
+
+
+def test_youtube_with_an_unknown_template_never_touches_the_network(monkeypatch, capsys):
+    monkeypatch.setattr(
+        services, "youtube_video", lambda _url: pytest.fail("fetched despite a bad template")
+    )
+
+    with pytest.raises(SystemExit) as err:
+        run(monkeypatch, StubRepo(), "youtube", "https://youtu.be/abc123", "--template", "bogus")
+
+    assert "unknown note template" in str(err.value.code)
+
+
+def test_youtube_passes_the_chosen_options_through_to_the_import(monkeypatch, capsys):
+    seen = {}
+
+    def import_youtube(repo, video, project="other", lang=None, log=None):
+        seen["call"] = (video.video_id, project, lang)
+        return services.ProcessResult(7, 3, [], "de")
+
+    monkeypatch.setattr(services, "youtube_video", lambda _url: yt_video())
+    monkeypatch.setattr(services, "import_youtube", import_youtube)
+
+    run(
+        monkeypatch, StubRepo(), "youtube", "https://youtu.be/abc123",
+        "--project", "learning", "--lang", "de", "--steps", "",
+    )
+
+    assert seen["call"] == ("abc123", "learning", "de")

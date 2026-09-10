@@ -56,6 +56,11 @@ class StubRepo:
         before it starts, and a stub holding no memos has no other answer."""
         return None
 
+    def memo_by_source_url(self, source_url: str) -> None:
+        """Nothing was ever imported from that video, for the same reason:
+        `vtn youtube` asks before it fetches, and a stub holds no memos."""
+        return None
+
 
 @pytest.fixture
 def repo(tmp_path):

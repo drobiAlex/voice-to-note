@@ -120,6 +120,10 @@ class Memo:
     # when somebody put this memo away: hidden from the listings, still there to
     # open. Empty is the live memo, and nothing here is ever a deletion
     archived_at: str | None = None
+    # where this memo's words came from when no recording on this machine did:
+    # the canonical video URL, which is how a video offered a second time is
+    # recognised as one already imported. Empty for a memo made from audio
+    source_url: str | None = None
 
 
 @dataclass(frozen=True)

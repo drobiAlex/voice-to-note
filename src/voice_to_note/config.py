@@ -136,10 +136,30 @@ SETTINGS: dict[str, Setting] = {
         choices=("off", "on"),
     ),
     "live_chunk_s": Setting(
-        90, int, "seconds of a meeting each live transcription pass reads", kind="int"
+        180, int, "seconds of a meeting each live transcription pass reads", kind="int"
+    ),
+    "live_silence_floor": Setting(
+        1e-6,
+        float,
+        "mean power (loudness()'s 0..1 scale, ~-60 dBFS at the default) below which a live"
+        " stretch has no speech in it and is skipped rather than sent to whisper; 0 never skips",
+    ),
+    "live_beam_size": Setting(
+        1,
+        int,
+        "beams the live pass decodes with while a meeting is being recorded; 1 decodes"
+        " greedily. finish_live keeps the live segments as the archived transcript, so this"
+        " trades a little wording accuracy in the archive for several times less compute"
+        " during the meeting — set it to whisper_beam_size's value to restore today's"
+        " archival wording during live passes too",
+        kind="int",
     ),
     "live_model": Setting(
-        "", str, "whisper model live passes use; empty uses whisper_model"
+        "",
+        str,
+        "whisper model live passes use; empty uses whisper_model. A smaller model here costs"
+        " much less power and a faster live pass, at the price of a worse final transcript —"
+        " finish_live archives the live output rather than re-transcribing",
     ),
     "overlap_stages": Setting(
         "off",
@@ -215,6 +235,14 @@ SETTINGS: dict[str, Setting] = {
         "characters of transcript a chat sends along; memos past that go in as notes only",
         kind="int",
     ),
+    "youtube_lang": Setting(
+        "en",
+        str,
+        "caption languages preferred for a youtube import, in order; first available wins",
+    ),
+    "youtube_timeout_s": Setting(
+        120, int, "seconds before a stuck yt-dlp or caption download is given up on", kind="int"
+    ),
     "refine_workers": Setting(4, int, "repair windows a refine pass runs at once", kind="int"),
     "refine_window": Setting(
         20, int, "transcript lines repaired together in one refine window", kind="int"
@@ -282,6 +310,8 @@ NUM_SPEAKERS: int = _setting("num_speakers")
 SETUP_LAUNCH: str = _setting("setup_launch")
 LIVE_TRANSCRIBE: str = _setting("live_transcribe")
 LIVE_CHUNK_S: int = _setting("live_chunk_s")
+LIVE_SILENCE_FLOOR: float = _setting("live_silence_floor")
+LIVE_BEAM_SIZE: int = _setting("live_beam_size")
 LIVE_MODEL: str = _setting("live_model")
 OVERLAP_STAGES: str = _setting("overlap_stages")
 DIAR_THRESHOLD: float = _setting("diar_threshold")
@@ -305,6 +335,9 @@ GEMINI_TIMEOUT_S: int = _setting("gemini_timeout_s")
 CHAT_MODEL: str = _setting("chat_model")
 CHAT_HISTORY_TURNS: int = _setting("chat_history_turns")
 CHAT_CONTEXT_CHARS: int = _setting("chat_context_chars")
+
+YOUTUBE_LANG: str = _setting("youtube_lang")
+YOUTUBE_TIMEOUT_S: int = _setting("youtube_timeout_s")
 
 REFINE_WORKERS: int = _setting("refine_workers")
 REFINE_WINDOW: int = _setting("refine_window")

@@ -268,13 +268,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// A fresh reading from each side. These are the only clock the waveforms
-    /// have — they arrive ten a second for as long as the tape rolls — which
-    /// is why nothing here starts a timer, and why the elapsed time, the
-    /// spoken sentence and the panel's footer are left to the one that exists.
+    /// have — they arrive four a second for as long as the tape rolls (see
+    /// `reportLevels` in capture.swift) — which is why nothing here starts a
+    /// timer, and why the elapsed time, the spoken sentence and the panel's
+    /// footer are left to the one that exists.
     ///
     /// Nothing here touches the button: the mark it is wearing says a meeting
     /// is being taped and says the same thing at every loudness, so there is
-    /// nothing for ten readings a second to change about it.
+    /// nothing for four readings a second to change about it.
     private func metered(_ system: Double, _ microphone: Double) {
         systemLevels.push(system)
         microphoneLevels.push(microphone)
@@ -1466,8 +1467,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         showPreview(.idle)
     }
 
-    /// The readings a preview is fed, at the rate the recorder prints them. Ten
-    /// a second is not decoration: the waveform's span is counted in readings
+    /// The readings a preview is fed, at the rate the recorder prints them
+    /// (`Rehearsal.interval`, mirroring `reportLevels` in capture.swift). That
+    /// rate is not decoration: the waveform's span is counted in readings
     /// rather than in seconds and the silence clock counts real ones, so any
     /// other rate would draw a meeting that is not the length it says it is.
     ///
@@ -1786,8 +1788,8 @@ final class LevelHistory {
         latest = level
         if level < LevelHistory.silence {
             // only the first silent reading starts the clock: the ones behind
-            // it are the same silence going on, and restarting it ten times a
-            // second would hold the count at zero for as long as it lasted
+            // it are the same silence going on, and restarting it on every
+            // reading would hold the count at zero for as long as it lasted
             if silentSince == nil {
                 silentSince = now
             }
@@ -1850,19 +1852,33 @@ struct Rehearsal {
     }
 
     /// The rate the recorder prints readings at, and so the rate a preview has
-    /// to play them back at.
-    static let interval: TimeInterval = 0.1
+    /// to play them back at — matches the timer in capture.swift's
+    /// `reportLevels`; a mismatch here is what the doc comment on
+    /// `startRehearsing` warns about.
+    static let interval: TimeInterval = 0.25
 
     /// How much of a meeting is written before the stream starts round again.
     /// Two minutes is longer than anybody watches one meter, so the loop is
-    /// never the thing being judged.
-    private static let leastSteps = 1200
+    /// never the thing being judged — worked out from `interval` rather than
+    /// fixed as a reading count, so it stays two minutes of wall time however
+    /// often a reading actually arrives.
+    private static let leastSteps = Int(120 / interval)
 
     /// The shape of one syllable: a fast attack and a slower fall, as a
     /// fraction of the way from the silence floor up to the phrase's own peak.
-    /// Five readings is half a second, which is about what a spoken syllable
-    /// takes and what makes a waveform read as speech rather than as a fence.
-    private static let syllable: [Double] = [0.34, 0.78, 1, 0.84, 0.46]
+    /// Sized in readings, not seconds, so it has to be worked out fresh
+    /// against `interval` each time that changes: a real spoken syllable is
+    /// 200-400 ms, and two readings at the current 0.25 s interval is 0.5 s —
+    /// the closest a whole number of readings gets to that span, since one
+    /// reading alone (0.25 s) can only ever be a flat step with no fall in it
+    /// at all, and three (0.75 s) already overshoots further than two
+    /// undershoots. The attack is the first reading, all the way to the
+    /// phrase's peak — at this cadence a syllable's whole rise happens inside
+    /// one interval, so there is no second point left to spend on climbing
+    /// toward it — and the fall is the second, partway back down rather than
+    /// to the floor: the rest of the fall is left to whatever comes next,
+    /// either another syllable's own attack or the gap between phrases.
+    private static let syllable: [Double] = [1, 0.5]
 
     private let levels: [Double]
 
@@ -2041,12 +2057,13 @@ enum Meters {
 enum Waveform {
     /// Three points of bar, three of air, and a rounded cap on each end. The
     /// pitch is what decides whether a talking voice reads as syllables or as a
-    /// fence, and at six points it is syllables: one reading is 100 ms of room,
-    /// and six points is wide enough that a single one of them is a bar
-    /// somebody can watch rise and fall. Narrower fits more of the meeting into
-    /// the tray and shows less of it — a room at ordinary loudness drawn at a
-    /// four point pitch is a comb of near-equal teeth, which says a level is
-    /// arriving and nothing whatever about what it is doing.
+    /// fence, and at six points it is syllables: one reading is 250 ms of room
+    /// (`reportLevels` in capture.swift), and six points is wide enough that a
+    /// single one of them is a bar somebody can watch rise and fall. Narrower
+    /// fits more of the meeting into the tray and shows less of it — a room at
+    /// ordinary loudness drawn at a four point pitch is a comb of near-equal
+    /// teeth, which says a level is arriving and nothing whatever about what
+    /// it is doing.
     static let barWidth: CGFloat = 3
     static let gap: CGFloat = 3
     static let pitch: CGFloat = barWidth + gap
@@ -2071,11 +2088,15 @@ enum Waveform {
     /// filled rather than a signal that has gone flat.
     static let trackHeight: CGFloat = 4
 
-    /// How wide the bars have to fit, and so how many of them there are. At ten
-    /// readings a second the panel holds a little over four seconds of meeting —
-    /// long enough to see a phrase in, short enough that what is on screen is
-    /// still what is happening. Widening a bar spends history to buy legibility,
-    /// and four seconds of a meeting somebody can read beats six they cannot.
+    /// How wide the bars have to fit, and so how many of them there are. The
+    /// column count comes from the panel's width, not from the reading rate —
+    /// so slowing the recorder's meter from ten readings a second to four
+    /// (done for battery, not for this view) widened what a full tray covers
+    /// from a little over four seconds to a little over ten. That is a real
+    /// change to how far back the tray looks, not just to how it draws;
+    /// resizing the bars to hold the four-second window this comment used to
+    /// promise is a legibility call for whoever next touches this view, made
+    /// with the panel actually on screen rather than guessed at from Linux.
     static var span: CGFloat { RecordingPanelView.contentWidth - padding * 2 }
     static let columns = Int(span / pitch)
 
@@ -2116,9 +2137,12 @@ final class WaveformView: NSView {
     private static let trackInk: CGFloat = 0.1
     private static let fillInk: CGFloat = 0.9
 
-    /// Twice a second is as often as a track that only changes length is worth
-    /// redrawing, and it is what Reduce Motion is asking for.
-    private static let slowly: TimeInterval = 0.5
+    /// Once a second is as often as a track that only changes length is worth
+    /// redrawing, and it is what Reduce Motion is asking for. Four times
+    /// slower than the base metering rate (`reportLevels` in capture.swift,
+    /// 250 ms) keeps this a real cut in redraws rather than one that has
+    /// nearly caught up with it now that the base rate is itself slower.
+    private static let slowly: TimeInterval = 1.0
 
     private let reduceMotion: Bool
     private var trace: [Double] = []
@@ -2218,7 +2242,7 @@ final class WaveformView: NSView {
 
     /// The newest reading as a track filling from the left, which is what
     /// Reduce Motion leaves room for: nothing scrolls past, no column changes
-    /// ten times a second, and the one thing a meter exists to show — how loud
+    /// four times a second, and the one thing a meter exists to show — how loud
     /// this side is — is still there to be read. The scale is the whole of it,
     /// floor to ceiling, because a fill has no shape to say anything with and
     /// its length is all there is.

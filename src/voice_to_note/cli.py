@@ -13,6 +13,7 @@ from .storage.repository import Repository
 EXAMPLES = """examples:
   vtn process ~/memos/standup.m4a     transcribe, diarize, then extract notes
   vtn record --project work           tape this Mac's meeting, then process it
+  vtn youtube <url> --template lecture   import a talk's captions, then extract notes
   vtn show 3                          print memo 3's transcript
   vtn notes 3 --json > notes.json     machine-readable notes for scripting
   vtn rename 3 S1 Samantha            name a speaker; later memos match by voice
@@ -153,6 +154,30 @@ def cmd_process(args: argparse.Namespace) -> None:
         _pipeline(repo, src, args, steps, count)
 
 
+def cmd_youtube(args: argparse.Namespace) -> None:
+    """Takes a pasted YouTube link all the way to notes on screen, asking
+    first when the same video is already here. The options are checked before
+    the network is touched, and the video is named before its captions are
+    fetched, so a mispasted link is caught at the earliest line it can be."""
+    services.note_template(args.template)
+    steps = services.youtube_steps(args.steps)
+    with Repository() as repo:
+        status("fetching video info …")
+        video = services.youtube_video(args.url)
+        status(services.youtube_heading(video))
+        stored = services.find_youtube_duplicate(repo, video)
+        if stored is not None and not _confirmed(
+            f"memo {stored.id} — {stored.filename} was already imported from"
+            " this video; import it again?"
+        ):
+            status("skipped")
+            return
+        result = services.import_youtube(
+            repo, video, project=args.project, lang=args.lang, log=status
+        )
+        _finished(repo, result, args, steps)
+
+
 def _taped(track: Path) -> bool:
     """Whether a track holds anything at all. A helper that fell over before it
     opened its files leaves nothing worth merging behind."""
@@ -210,8 +235,11 @@ def cmd_record(args: argparse.Namespace) -> None:
     time, so that stopping the recording leaves the last stretch and the
     speaker pass to do rather than the whole meeting — minutes of a machine at
     full tilt, at the moment somebody wants to close the laptop and leave. A
-    live pass that cannot run costs nothing but itself: the recording is then
-    transcribed the ordinary way, from the merged file, exactly as before."""
+    live pass that cannot run, or that gives out partway through the meeting,
+    costs nothing but itself: the whole recording is then transcribed the
+    ordinary way, from the merged file, exactly as before — whatever the live
+    pass had already stored is thrown away first, so it cannot sit beside the
+    ordinary pass's segments and double the transcript."""
     if sys.platform != "darwin":
         sys.exit("meeting recording is macOS-only")
     steps, count = _checked(args)
@@ -258,25 +286,50 @@ def cmd_record(args: argparse.Namespace) -> None:
         mic_wav.unlink()
         tracks.rmdir()
         status(f"recorded {merged}")
-        if live is not None and heard is not None and heard.segment_count:
-            status(f"transcribed while recording — {heard.segment_count} segments")
-            _finished(
-                repo,
-                services.finish_live(
+        if live is not None and heard is not None:
+            if heard.failure:
+                # a stretch of the meeting the live pass never got to read is
+                # worse than none of it read live: finish_live only converts
+                # and diarizes what is already stored, so the segments after
+                # the failure point would simply be missing rather than
+                # merely late. The whole recording still exists on disk, so
+                # it is transcribed the ordinary way instead, exactly as if
+                # the live pass had never run.
+                status(
+                    "transcribing while recording stopped partway"
+                    f" ({heard.failure}) — transcribing the whole recording"
+                    " the ordinary way"
+                )
+                services.discard_live(repo, live.memo_id)
+            else:
+                # heard.failure is None: the live pass listened to the whole
+                # meeting and either stored words or, having found nothing
+                # loud enough to be speech, correctly stored none. Either way
+                # it is trusted rather than redone — segment_count == 0 here
+                # means "we heard all of it and there was nothing to
+                # transcribe", not "the live pass came up short", so sending
+                # the recording through the ordinary pipeline on top of it
+                # would spend the whole meeting's worth of whisper at
+                # archival beam size for a transcript that already exists.
+                if heard.segment_count:
+                    status(f"transcribed while recording — {heard.segment_count} segments")
+                else:
+                    status("transcribed while recording — nothing worth transcribing")
+                _finished(
                     repo,
-                    live.memo_id,
-                    merged,
-                    language=heard.language,
-                    log=status,
-                    num_speakers=count,
-                    diarize="speakers" in steps,
-                ),
-                args,
-                steps,
-            )
-            return
-        if live is not None:
-            services.discard_live(repo, live.memo_id)
+                    services.finish_live(
+                        repo,
+                        live.memo_id,
+                        merged,
+                        language=heard.language,
+                        log=status,
+                        num_speakers=count,
+                        diarize="speakers" in steps,
+                    ),
+                    args,
+                    steps,
+                )
+                return
         _pipeline(repo, merged, args, steps, count)
 
 
@@ -589,8 +642,8 @@ def cmd_template(args: argparse.Namespace) -> None:
     """Lists every prompt template: whether it is built-in or a saved
     override, and where an override file would go."""
     for name, state in services.template_rows():
-        print(f"{name:<8} {state:<10} {config.TEMPLATES_DIR / f'{name}.md'}")
-    status(f'\nwrite a custom one with: vtn template show <name> > "{config.TEMPLATES_DIR}/<name>.md"')
+        print(f"{name:<10} {state:<10} {config.TEMPLATES_DIR / f'{name}.md'}")
+    status("\ncreate a custom one with: vtn template new <name> --from notes")
 
 
 def cmd_template_show(args: argparse.Namespace) -> None:
@@ -602,6 +655,11 @@ def cmd_template_show(args: argparse.Namespace) -> None:
 def cmd_template_reset(args: argparse.Namespace) -> None:
     """Deletes a template's override file, restoring the built-in text."""
     status(services.template_reset(args.name))
+
+
+def cmd_template_new(args: argparse.Namespace) -> None:
+    """Starts a custom note template as a copy of an existing one."""
+    status(services.template_new(args.name, source=args.from_))
 
 
 def cmd_tui(args: argparse.Namespace) -> None:
@@ -701,6 +759,29 @@ def main() -> None:
         " level<TAB>system dBFS<TAB>mic dBFS",
     )
     sp.set_defaults(fn=cmd_record)
+
+    sp = sub.add_parser("youtube", help="import a YouTube video's captions as a memo")
+    sp.add_argument("url")
+    sp.add_argument("--project", default="other", help="file the memo under a project")
+    sp.add_argument(
+        "--template",
+        default="notes",
+        help="note template to extract with (see: vtn template)",
+    )
+    sp.add_argument(
+        "--lang",
+        metavar="LANG",
+        help="caption language to fetch, refused if the video lacks it"
+        " (default: the youtube_lang setting's preference order)",
+    )
+    sp.add_argument(
+        "--steps",
+        default="notes",
+        metavar="STEPS",
+        help='comma-separated optional stages to run: refine,notes'
+        ' (default: notes; "" imports just the transcript)',
+    )
+    sp.set_defaults(fn=cmd_youtube)
 
     sp = sub.add_parser("menubar", help="open the menu bar recorder")
     sp.add_argument(
@@ -898,7 +979,7 @@ def main() -> None:
     ).set_defaults(fn=cmd_config_reset)
 
     sp = sub.add_parser(
-        "template", help="list, show or reset the built-in LLM prompts: template show|reset"
+        "template", help="list, show, create or reset the LLM prompts: template show|new|reset"
     )
     sp.set_defaults(fn=cmd_template)
     template_sub = sp.add_subparsers(dest="template_cmd")
@@ -906,6 +987,19 @@ def main() -> None:
     tsp = template_sub.add_parser("show", help="print a template's effective text: template show <name>")
     tsp.add_argument("name")
     tsp.set_defaults(fn=cmd_template_show)
+
+    tsp = template_sub.add_parser(
+        "new", help="start a custom note template from an existing one: template new <name>"
+    )
+    tsp.add_argument("name")
+    tsp.add_argument(
+        "--from",
+        dest="from_",
+        default="notes",
+        metavar="NAME",
+        help="note template to copy as the starting text (default: notes)",
+    )
+    tsp.set_defaults(fn=cmd_template_new)
 
     tsp = template_sub.add_parser(
         "reset", help="restore a template to its built-in text: template reset <name>"
