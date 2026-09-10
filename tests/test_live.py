@@ -401,6 +401,11 @@ def test_the_archival_pass_keeps_its_configured_beam_while_the_live_call_site_as
     monkeypatch.setattr(whisper.config, "WHISPER_MODEL_PATH", model_path)
     monkeypatch.setattr(whisper.config, "VAD_MODEL_PATH", tmp_path / "absent-vad.bin")
     monkeypatch.setattr(whisper.config, "WHISPER_BEAM_SIZE", 5)
+    # a thread count decoding() can read straight off the setting: left unset it
+    # asks qos.performance_cores(), which on macOS shells out to sysctl — and
+    # since whisper.subprocess is the subprocess module itself, the patch below
+    # catches that probe too and puts it in `seen` beside the calls under test
+    monkeypatch.setattr(whisper.config, "WHISPER_THREADS", "4")
     monkeypatch.setattr(whisper.qos, "background", lambda cmd: cmd)
     seen: list[list[str]] = []
 
