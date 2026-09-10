@@ -282,6 +282,22 @@ The processing rim is a Core Animation arc, static under Reduce Motion and remov
 processing or when hidden. Preview's Processing scenario opens the puck directly, and
 Replay Arrival can replay the puck's spring.
 
+### Edge-tab morph
+
+At a dock edge the puck no longer reads as a circle disappearing behind the display. Its
+eight-cubic body contour turns into a tab: two concave shoulders leave the visible-frame
+boundary tangentially, meet a rounded inward tip, and join a rounded lobe that remains
+offscreen. The terminal contour is shown in [`puck-edge-morph.svg`](puck-edge-morph.svg).
+
+The dock derives the contour's amount and its boundary anchors from the frame actually
+drawn on each existing spring display-link tick. A spring overshoot therefore keeps both
+shoulders joined to the edge, and a mid-slide grab reverses from the outline that was
+visible under the pointer. The fill, shadow path, and processing rim use that one path.
+The ordinary controls fade during the morph and are hidden before the tab is reached, so
+an invisible button cannot take a click; the remaining sliver still belongs to the puck's
+drag and hover view. Reduce Motion applies the appropriate end outline with the existing
+direct frame placement and starts no animation or timer.
+
 ### Automated verification
 
 At commits `81d0b7b` through `d4a2cbe`, the remote Mac typechecked `capture.swift`,
@@ -309,3 +325,9 @@ redirects, not only ordinary tucks. Use `powermetrics` on untouched free, tucked
 windows to establish the energy result; callback teardown alone is not that measurement.
 An actual setup after changing only `springs.swift` must still be observed on the Mac to
 confirm the source-stamp rebuild end to end.
+
+For the edge-tab addition, also check that the shoulders visibly meet each of the four
+screen edges rather than looking like a clipped disc, that the processing rim follows the
+tab boundary, and that grabbing during either direction reverses the contour without a
+shape jump. The remote compiler can establish source validity only; this visual join still
+needs the preview on a real display.

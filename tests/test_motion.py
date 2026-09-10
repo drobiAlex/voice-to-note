@@ -16,9 +16,15 @@ def test_the_shipped_spring_settles_with_one_visible_overshoot_at_both_refresh_r
     # The Foundation-only constants are isolated from AppKit for this harness;
     # their contents are compiled as Swift, not asserted as source strings.
     constants = source.split("enum PuckMotion {", 1)[1].split("\n}\n", 1)[0]
+    contour = source.split("struct PuckEdgeContour {", 1)[1].split(
+        "/// The recorder as a small disc", 1
+    )[0]
     harness = (Path(__file__).parent / "motion_harness.swift").read_text()
     main = tmp_path / "main.swift"
-    main.write_text("import Foundation\nenum PuckMotion {" + constants + "\n}\n" + harness)
+    main.write_text(
+        "import Foundation\nenum PuckMotion {" + constants + "\n}\n"
+        + "struct PuckEdgeContour {" + contour + harness
+    )
     binary = tmp_path / "motion-check"
     compiled = subprocess.run(
         ["swiftc", "-O", str(native / "springs.swift"), str(main), "-o", str(binary)],

@@ -2735,6 +2735,89 @@ final class RecordingPanelView: NSView {
 
 // MARK: - the recorder puck
 
+/// Foundation-only contour data keeps the tab geometry testable on the Linux
+/// harness as well as drawable by the AppKit view. Every state has eight
+/// cubics, so an edge tab can be sampled without a second animation driver.
+struct PuckEdgeContour {
+    struct Cubic {
+        let start: CGPoint
+        let control1: CGPoint
+        let control2: CGPoint
+        let end: CGPoint
+    }
+
+    static func segments(amount: CGFloat, boundary: CGFloat) -> [Cubic] {
+        let amount = min(max(amount, 0), 1)
+        let angles: [CGFloat] = [135, 157.5, 180, 202.5, 225, 270, 360, 450]
+        let terminal = [
+            CGPoint(x: boundary, y: 60), CGPoint(x: boundary / 2, y: 30), CGPoint(x: 0, y: 0),
+            CGPoint(x: boundary / 2, y: -30), CGPoint(x: boundary, y: -60), CGPoint(x: 80, y: -70),
+            CGPoint(x: 200, y: 0), CGPoint(x: 80, y: 70),
+        ]
+        let controls: [(CGPoint, CGPoint)] = [
+            (.init(x: boundary, y: 45), .init(x: boundary * 3 / 4, y: 37.5)),
+            (.init(x: boundary / 4, y: 22.5), .init(x: 0, y: 15)),
+            (.init(x: 0, y: -15), .init(x: boundary / 4, y: -22.5)),
+            (.init(x: boundary * 3 / 4, y: -37.5), .init(x: boundary, y: -45)),
+            (.init(x: boundary, y: -75), .init(x: 60, y: -70)),
+            (.init(x: 100, y: -70), .init(x: 200, y: -38)),
+            (.init(x: 200, y: 38), .init(x: 135, y: 70)),
+            (.init(x: 25, y: 70), .init(x: boundary, y: 75)),
+        ]
+        let radius: CGFloat = 99.5
+        let centre = CGPoint(x: radius, y: 0)
+        func circle(_ degrees: CGFloat) -> CGPoint {
+            let radians = degrees * .pi / 180
+            return CGPoint(x: centre.x + radius * cos(radians), y: radius * sin(radians))
+        }
+        func tangent(_ degrees: CGFloat) -> CGPoint {
+            let radians = degrees * .pi / 180
+            return CGPoint(x: -radius * sin(radians), y: radius * cos(radians))
+        }
+        func mixed(_ circle: CGPoint, _ tab: CGPoint) -> CGPoint {
+            CGPoint(x: circle.x + (tab.x - circle.x) * amount,
+                    y: circle.y + (tab.y - circle.y) * amount)
+        }
+        return (0..<8).map { index in
+            let start = angles[index]
+            let end = index == 7 ? 495 : angles[index + 1]
+            let k = 4 / 3 * tan((end - start) * .pi / 720)
+            let a = circle(start)
+            let b = circle(end)
+            let ta = tangent(start)
+            let tb = tangent(end)
+            let c1 = CGPoint(x: a.x + ta.x * k, y: a.y + ta.y * k)
+            let c2 = CGPoint(x: b.x - tb.x * k, y: b.y - tb.y * k)
+            return Cubic(start: mixed(a, terminal[index]), control1: mixed(c1, controls[index].0),
+                         control2: mixed(c2, controls[index].1), end: mixed(b, terminal[(index + 1) % 8]))
+        }
+    }
+
+    /// Sampling the production cubics gives the rim one dash period for the
+    /// current outline without asking AppKit to flatten a path on every frame.
+    static func approximateLength(amount: CGFloat, boundary: CGFloat, samples: Int = 16) -> CGFloat {
+        func point(_ cubic: Cubic, _ t: CGFloat) -> CGPoint {
+            let inverse = 1 - t
+            let a = inverse * inverse * inverse
+            let b = 3 * inverse * inverse * t
+            let c = 3 * inverse * t * t
+            let d = t * t * t
+            return CGPoint(x: a * cubic.start.x + b * cubic.control1.x + c * cubic.control2.x + d * cubic.end.x,
+                           y: a * cubic.start.y + b * cubic.control1.y + c * cubic.control2.y + d * cubic.end.y)
+        }
+        return segments(amount: amount, boundary: boundary).reduce(CGFloat.zero) { total, cubic in
+            var length = total
+            var previous = cubic.start
+            for sample in 1...samples {
+                let next = point(cubic, CGFloat(sample) / CGFloat(samples))
+                length += hypot(next.x - previous.x, next.y - previous.y)
+                previous = next
+            }
+            return length
+        }
+    }
+}
+
 /// The recorder as a small disc of its own: the button that starts the tape
 /// and stops it in the middle, and along the lower rim three small buttons for
 /// the things a recording is made of — the microphone, the project it is filed
@@ -2777,6 +2860,7 @@ final class RecorderPuckView: NSView, Dockable {
 
     private let body = CAShapeLayer()
     private let workingRim = CAShapeLayer()
+    private var workingRimLength: CGFloat?
     private let record = RecordButton()
     private let caption = RecorderPuckView.label("Record")
     private let inputButton = ChoiceButton(symbol: "mic", label: "Microphone")
@@ -2805,6 +2889,7 @@ final class RecorderPuckView: NSView, Dockable {
     private var gripping = false
     private var pointer: NSTrackingArea?
     private var state = RecorderState.idle
+    private var edgeMorph: (edge: Dock.Edge, amount: CGFloat, boundary: CGFloat)?
 
     init(reduceMotion: Bool) {
         self.reduceMotion = reduceMotion
@@ -2854,7 +2939,95 @@ final class RecorderPuckView: NSView, Dockable {
         workingRim.strokeColor = NSColor.white.withAlphaComponent(0.65).cgColor
         workingRim.lineWidth = 2
         workingRim.lineCap = .round
-        workingRim.strokeEnd = 0.22
+        // A dash travels around the current path. Rotating a noncircular tab
+        // would visibly pull its rim away from the body during a tuck.
+        let length = PuckEdgeContour.approximateLength(amount: 0, boundary: 0)
+        workingRimLength = length
+        workingRim.lineDashPattern = [36, NSNumber(value: Double(length - 36))]
+        workingRim.lineDashPhase = 0
+    }
+
+    /// The dock's final 22-point sliver is a tab joined to the screen, not a
+    /// circle merely clipped by it.  Every version uses eight cubic segments:
+    /// Core Animation can therefore interpolate the same contour if that is
+    /// ever moved off the display link, and body, shadow and working rim stay
+    /// one exact outline today.
+    func setEdgeMorph(_ edge: Dock.Edge?, amount: CGFloat, boundary: CGFloat? = nil) {
+        guard let edge else {
+            clearEdgeMorph()
+            return
+        }
+        let amount = min(max(amount, 0), 1)
+        let boundary = boundary ?? Dock.peek
+        if let old = edgeMorph, old.edge == edge, abs(old.amount - amount) < 0.001,
+           abs(old.boundary - boundary) < 0.001 { return }
+        edgeMorph = (edge, amount, boundary)
+        let path = edgePath(edge, amount: amount, boundary: boundary)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        body.path = path
+        body.shadowPath = path
+        workingRim.path = path
+        CATransaction.commit()
+        tuneWorkingRim(PuckEdgeContour.approximateLength(amount: amount, boundary: boundary - 0.5))
+        let contentAlpha = max(0, 1 - amount * 1.25)
+        for control in [record, caption, inputButton, projectButton, outputButton] {
+            control.alphaValue = contentAlpha
+            control.isHidden = amount > 0.8
+        }
+    }
+
+    /// A free puck restores its circular outline and its real controls before
+    /// the pointer has travelled far enough for a hidden control to catch it.
+    func clearEdgeMorph() {
+        guard edgeMorph != nil else { return }
+        edgeMorph = nil
+        let round = CGPath(ellipseIn: discRect.insetBy(dx: 0.5, dy: 0.5), transform: nil)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        body.path = round
+        body.shadowPath = round
+        workingRim.path = round
+        CATransaction.commit()
+        tuneWorkingRim(PuckEdgeContour.approximateLength(amount: 0, boundary: 0))
+        for control in [record, caption, inputButton, projectButton, outputButton] {
+            control.alphaValue = 1
+            control.isHidden = false
+        }
+    }
+
+    /// Eight corresponding cubic pieces turn a circle into a smooth-union
+    /// tab. `boundary` is measured from the body's inward edge to the actual
+    /// screen edge, so a spring overshoot never tears the tab away from it.
+    private func edgePath(_ edge: Dock.Edge, amount: CGFloat, boundary: CGFloat) -> CGPath {
+        // The circular path begins half a stroke inside the disc rect. Keep
+        // that same inset here and compensate the moving screen anchor so the
+        // visible shoulders still land on the exact display boundary.
+        let segments = PuckEdgeContour.segments(amount: amount, boundary: boundary - 0.5)
+        let origin: NSPoint
+        let outward: NSPoint
+        let along: NSPoint
+        switch edge {
+        case .right:
+            origin = NSPoint(x: discRect.minX + 0.5, y: discRect.midY); outward = NSPoint(x: 1, y: 0); along = NSPoint(x: 0, y: 1)
+        case .left:
+            origin = NSPoint(x: discRect.maxX - 0.5, y: discRect.midY); outward = NSPoint(x: -1, y: 0); along = NSPoint(x: 0, y: 1)
+        case .top:
+            origin = NSPoint(x: discRect.midX, y: discRect.minY + 0.5); outward = NSPoint(x: 0, y: 1); along = NSPoint(x: 1, y: 0)
+        case .bottom:
+            origin = NSPoint(x: discRect.midX, y: discRect.maxY - 0.5); outward = NSPoint(x: 0, y: -1); along = NSPoint(x: 1, y: 0)
+        }
+        func local(_ point: NSPoint) -> NSPoint {
+            NSPoint(x: origin.x + outward.x * point.x + along.x * point.y,
+                    y: origin.y + outward.y * point.x + along.y * point.y)
+        }
+        let path = CGMutablePath()
+        path.move(to: local(segments[0].start))
+        for segment in segments {
+            path.addCurve(to: local(segment.end), control1: local(segment.control1), control2: local(segment.control2))
+        }
+        path.closeSubpath()
+        return path
     }
 
     private func layOut() {
@@ -3104,7 +3277,7 @@ final class RecorderPuckView: NSView, Dockable {
         layer.add(growing, forKey: "appear")
     }
 
-    /// Refreshing processing never restarts the render-server rotation.
+    /// Refreshing processing leaves the one render-server dash in place.
     func refreshMotion() {
         guard state == .processing, window?.isVisible == true else {
             workingRim.removeAllAnimations()
@@ -3113,12 +3286,37 @@ final class RecorderPuckView: NSView, Dockable {
         }
         if workingRim.superlayer == nil { layer?.addSublayer(workingRim) }
         guard !reduceMotion, workingRim.animation(forKey: "working") == nil else { return }
-        let rotation = CABasicAnimation(keyPath: "transform.rotation.z")
-        rotation.fromValue = 0
-        rotation.toValue = 2 * Double.pi
-        rotation.duration = 2.4
-        rotation.repeatCount = .infinity
-        workingRim.add(rotation, forKey: "working")
+        startWorkingRim(length: workingRimLength ?? PuckEdgeContour.approximateLength(amount: 0, boundary: 0))
+    }
+
+    /// A path-length period keeps exactly one highlight on both the circle and
+    /// a shorter tab. Replacing it during a morph uses wall-clock phase, so
+    /// changing the contour does not make the highlight jump back to its start.
+    private func tuneWorkingRim(_ length: CGFloat) {
+        let length = max(length, 37)
+        guard workingRimLength.map({ abs($0 - length) > 0.1 }) ?? true else { return }
+        workingRimLength = length
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        workingRim.lineDashPattern = [36, NSNumber(value: Double(length - 36))]
+        CATransaction.commit()
+        guard state == .processing, !reduceMotion, workingRim.animation(forKey: "working") != nil else { return }
+        startWorkingRim(length: length)
+    }
+
+    /// Start from the shared wall clock so replacing a changing dash period
+    /// preserves where its highlight was travelling around the rim.
+    private func startWorkingRim(length: CGFloat) {
+        let duration = 2.4
+        let now = CACurrentMediaTime()
+        let travelling = CABasicAnimation(keyPath: "lineDashPhase")
+        travelling.fromValue = 0
+        travelling.toValue = -length
+        travelling.duration = duration
+        travelling.repeatCount = .infinity
+        travelling.beginTime = now
+        travelling.timeOffset = now.truncatingRemainder(dividingBy: duration)
+        workingRim.add(travelling, forKey: "working")
     }
 
     /// Hidden views and every nonworking state release the repeating layer.
@@ -3331,6 +3529,7 @@ final class SpringMotion {
     private var destination = CGPoint.zero
     private var bound: ((CGPoint) -> CGPoint)?
     private var link: CADisplayLink?
+    private var onFrame: ((CGPoint) -> Void)?
     private let target = SpringFrameTarget()
     private var watchdog: Timer?
     private var lastTime: TimeInterval = 0
@@ -3351,18 +3550,22 @@ final class SpringMotion {
         watchdog?.invalidate()
         watchdog = nil
         accumulator = 0
+        onFrame = nil
     }
 
     /// Predicting the same fixed steps includes incoming velocity when a tuck
     /// reverses a peek; shifting its target inward preserves the visible sliver.
-    func move(to requested: CGPoint, bound: ((CGPoint) -> CGPoint)? = nil) {
+    func move(to requested: CGPoint, bound: ((CGPoint) -> CGPoint)? = nil,
+              onFrame: ((CGPoint) -> Void)? = nil) {
         guard let panel else { return }
         if link == nil {
             state = SpringMotionState(position: panel.frame.origin, velocity: .zero)
         }
         self.bound = bound
+        self.onFrame = onFrame
         destination = requested
         destination = PuckMotion.safeDestination(requested, from: state, physics: physics, bound: bound)
+        onFrame?(state.position)
         guard panel.isVisible, let view = panel.contentView else { finish(); return }
         guard link == nil else { return }
         lastTime = CACurrentMediaTime()
@@ -3398,6 +3601,7 @@ final class SpringMotion {
             accumulator -= PuckMotion.step
         }
         panel.setFrameOrigin(state.position)
+        onFrame?(state.position)
         if abs(state.velocity.horizontal) < 0.001 && abs(state.velocity.vertical) < 0.001
             && abs(state.position.x - destination.x) < 0.5
             && abs(state.position.y - destination.y) < 0.5 {
@@ -3410,7 +3614,9 @@ final class SpringMotion {
     /// Exact placement and callback teardown are shared by settling and a
     /// missing-display deadline, so neither path can leave an idle timer alive.
     private func finish() {
-        panel?.setFrameOrigin(bound?(destination) ?? destination)
+        let final = bound?(destination) ?? destination
+        panel?.setFrameOrigin(final)
+        onFrame?(final)
         interrupt()
     }
 }
@@ -3569,6 +3775,9 @@ final class Dock {
     private var grabScreen: NSScreen?
     private var pending: Timer?
     private var screensChanged: Any?
+    /// The last edge owns the reversible tab while a grab carries it back into
+    /// the screen. It clears only once the moving frame has made it round.
+    private var morphEdge: Edge?
 
     /// Told once, when the window stops hanging: whoever hung it there closes it
     /// on a click elsewhere and lights the button it hangs from, and a window that
@@ -3637,6 +3846,7 @@ final class Dock {
             panel.setFrame(tuckedFrame(edge, on: screen), display: false)
             panel.alphaValue = Dock.tuckedAlpha
             panel.orderFrontRegardless()
+            applyMorph(edge, at: panel.frame.origin, on: screen)
             return true
         }
     }
@@ -3683,7 +3893,11 @@ final class Dock {
         case let .moved(point):
             guard let grab else { return }
             leaveWherever()
-            panel.setFrameOrigin(held(at: NSPoint(x: point.x - grab.x, y: point.y - grab.y)))
+            let origin = held(at: NSPoint(x: point.x - grab.x, y: point.y - grab.y))
+            panel.setFrameOrigin(origin)
+            if let edge = morphEdge, let screen = Dock.screen(under: panel.frame) ?? NSScreen.main {
+                applyMorph(edge, at: origin, on: screen)
+            }
         case .ended:
             NSCursor.pop()
             guard grab != nil else { return }
@@ -3803,6 +4017,7 @@ final class Dock {
 
     private func tuck(_ edge: Edge, on screen: NSScreen) {
         state = .tucked(edge)
+        morphEdge = edge
         slide(to: tuckedFrame(edge, on: screen), alpha: Dock.tuckedAlpha, bound: sliverBound(edge, on: screen))
         onPlaced?(place)
     }
@@ -3810,6 +4025,7 @@ final class Dock {
     private func peek(_ edge: Edge) {
         guard let screen = Dock.screen(under: panel.frame) ?? NSScreen.main else { return }
         state = .peeking(edge)
+        morphEdge = edge
         slide(to: revealedFrame(edge, on: screen), alpha: 1, bound: sliverBound(edge, on: screen))
     }
 
@@ -3822,12 +4038,18 @@ final class Dock {
         switch state {
         case let .tucked(edge):
             panel.setFrame(tuckedFrame(edge, on: screen), display: true)
+            morphEdge = edge
+            applyMorph(edge, at: panel.frame.origin, on: screen)
         case let .peeking(edge):
             panel.setFrame(revealedFrame(edge, on: screen), display: true)
+            morphEdge = edge
+            applyMorph(edge, at: panel.frame.origin, on: screen)
         case .free:
             panel.setFrameOrigin(Dock.clamped(
                 panel.frame.origin, size: panel.frame.size, within: screen.visibleFrame
             ))
+            morphEdge = nil
+            (view as? RecorderPuckView)?.clearEdgeMorph()
         case .hanging:
             break
         }
@@ -3840,14 +4062,54 @@ final class Dock {
             motion.interrupt()
             panel.setFrame(frame, display: true)
             panel.alphaValue = alpha
+            if let edge = morphEdge, let screen = Dock.screen(under: panel.frame) ?? NSScreen.main {
+                applyMorph(edge, at: frame.origin, on: screen)
+            }
             return
         }
-        motion.move(to: frame.origin, bound: bound)
+        guard let edge = morphEdge, let screen = Dock.screen(under: frame) ?? NSScreen.main else {
+            motion.move(to: frame.origin, bound: bound)
+            return
+        }
+        motion.move(to: frame.origin, bound: bound) { [weak self, weak screen] origin in
+            guard let self, let screen else { return }
+            self.applyMorph(edge, at: origin, on: screen)
+        }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = Dock.sliding
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             panel.animator().alphaValue = alpha
         }
+    }
+
+    /// The tab is measured from the frame actually on screen, not animation
+    /// time. A spring may run past its target, but its shoulders still arrive
+    /// exactly at the visible-frame boundary and a redirected grab reverses
+    /// from the shape the pointer saw.
+    private func applyMorph(_ edge: Edge, at origin: NSPoint, on screen: NSScreen) {
+        let revealed = revealedFrame(edge, on: screen).origin
+        let tucked = tuckedFrame(edge, on: screen).origin
+        let delta = NSPoint(x: tucked.x - revealed.x, y: tucked.y - revealed.y)
+        let travelled = NSPoint(x: origin.x - revealed.x, y: origin.y - revealed.y)
+        let length = delta.x * delta.x + delta.y * delta.y
+        let amount = length > 0 ? min(max((travelled.x * delta.x + travelled.y * delta.y) / length, 0), 1) : 0
+        guard amount > 0.001 else {
+            morphEdge = nil
+            (view as? RecorderPuckView)?.clearEdgeMorph()
+            return
+        }
+        morphEdge = edge
+        let body = NSRect(x: origin.x + inset, y: origin.y + inset,
+                          width: panel.frame.width - inset * 2, height: panel.frame.height - inset * 2)
+        let area = screen.visibleFrame
+        let boundary: CGFloat
+        switch edge {
+        case .right: boundary = area.maxX - body.minX
+        case .left: boundary = body.maxX - area.minX
+        case .top: boundary = area.maxY - body.minY
+        case .bottom: boundary = body.maxY - area.minY
+        }
+        (view as? RecorderPuckView)?.setEdgeMorph(edge, amount: amount, boundary: boundary)
     }
 
     /// Half the peek remains visible even when an incoming velocity needs

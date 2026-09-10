@@ -86,3 +86,47 @@ for axis in 0...1 {
     }
 }
 print("Four edge predictions preserve at least half the peek with incoming velocity")
+
+/// The edge contour is Foundation-only production geometry. These checks make
+/// the tab's actual joints and display anchors executable without AppKit.
+func near(_ left: CGFloat, _ right: CGFloat, _ tolerance: CGFloat = 0.001) -> Bool {
+    abs(left - right) <= tolerance
+}
+func finite(_ point: CGPoint) -> Bool { point.x.isFinite && point.y.isFinite }
+for amount in [CGFloat(0), 0.5, 1] {
+    for boundary in [CGFloat(11), 22, 35] {
+        let contour = PuckEdgeContour.segments(amount: amount, boundary: boundary)
+        precondition(contour.count == 8, "Contour topology changed")
+        for index in contour.indices {
+            let segment = contour[index]
+            let next = contour[(index + 1) % contour.count]
+            precondition(finite(segment.start) && finite(segment.control1)
+                && finite(segment.control2) && finite(segment.end), "Contour contains a nonfinite point")
+            precondition(near(segment.end.x, next.start.x) && near(segment.end.y, next.start.y),
+                         "Contour is not closed")
+        }
+        if amount == 1 {
+            precondition(near(contour[0].start.x, boundary) && near(contour[4].start.x, boundary),
+                         "Tab shoulders missed the moving screen boundary")
+            for index in contour.indices {
+                let prior = contour[(index + 7) % 8]
+                let current = contour[index]
+                let incoming = CGPoint(x: current.start.x - prior.control2.x,
+                                       y: current.start.y - prior.control2.y)
+                let outgoing = CGPoint(x: current.control1.x - current.start.x,
+                                       y: current.control1.y - current.start.y)
+                precondition(near(incoming.x, outgoing.x) && near(incoming.y, outgoing.y),
+                             "Terminal contour has a cusp")
+            }
+        }
+    }
+}
+print("Edge contour is finite, closed, tangent-continuous, and boundary-anchored")
+
+let circularRim = PuckEdgeContour.approximateLength(amount: 0, boundary: 0)
+precondition(abs(circularRim - 2 * .pi * 99.5) < 1, "Circle rim length is not sampled accurately")
+for boundary in [CGFloat(11), 22, 35] {
+    let tabRim = PuckEdgeContour.approximateLength(amount: 1, boundary: boundary)
+    precondition(tabRim.isFinite && tabRim > 36, "Tab cannot carry a single rim dash")
+}
+print("Contour-length dash period keeps one continuous processing highlight")
