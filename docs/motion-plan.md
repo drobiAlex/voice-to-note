@@ -60,12 +60,12 @@ that only says "add springs" invites springs where they do not belong.
 ## The numbers, in one place
 
 The starting reference was `angularFrequency 7.5`, `dampingRatio 0.5`, MacPaw's shipped
-defaults. The implemented puck uses `32` / `0.7`, centralized in `PuckMotion` in
+defaults. The implemented puck uses `34` / `0.7`, centralized in `PuckMotion` in
 `menubar.swift`: it leaves a measured contact phase for the tab while meeting the strict
 velocity threshold and 700 ms acceptance together. The vendored defaults remain untouched.
 
 The layer animations use Core Animation's own spring, which is parameterised differently;
-the implemented spring in its terms is `mass 1`, `stiffness ω² = 1024`, `damping 2ζω = 44.8`.
+the implemented spring in its terms is `mass 1`, `stiffness ω² = 1156`, `damping 2ζω = 47.6`.
 Written once as a constant with that derivation in a comment, so the window and the layers
 are demonstrably the same spring rather than two springs that look similar.
 

@@ -3534,10 +3534,10 @@ protocol Dockable: NSView {
     var onHover: ((Bool) -> Void)? { get set }
 }
 /// One physical spring for the window and arrival layer. The upstream 7.5/.5
-/// takes seconds to stop; 32/.7 leaves a gentler contact merge while retaining
+/// takes seconds to stop; 34/.7 leaves a gentler contact merge while retaining
 /// one 4–12-point overshoot and the 700 ms settle limit.
 enum PuckMotion {
-    static let angularFrequency: Float = 32
+    static let angularFrequency: Float = 34
     static let dampingRatio: Float = 0.7
     static let step: TimeInterval = 1 / 120
     static let configuration = SpringConfiguration(
