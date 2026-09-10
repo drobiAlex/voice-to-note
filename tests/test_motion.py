@@ -20,10 +20,11 @@ def test_the_shipped_spring_settles_with_one_visible_overshoot_at_both_refresh_r
     main = tmp_path / "main.swift"
     main.write_text("import Foundation\nenum PuckMotion {" + constants + "\n}\n" + harness)
     binary = tmp_path / "motion-check"
-    subprocess.run(
+    compiled = subprocess.run(
         ["swiftc", "-O", str(native / "springs.swift"), str(main), "-o", str(binary)],
-        check=True, capture_output=True, text=True,
+        capture_output=True, text=True,
     )
+    assert compiled.returncode == 0, compiled.stderr
     result = subprocess.run([str(binary)], check=True, capture_output=True, text=True)
     print(result.stdout)
 
