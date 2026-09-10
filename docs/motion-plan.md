@@ -285,7 +285,7 @@ Replay Arrival can replay the puck's spring.
 ### Edge-tab morph
 
 At a dock edge the puck no longer reads as a circle disappearing behind the display. Its
-eight-cubic body contour stays circular until contact, then turns into a vertically
+eight-cubic body contour stays mostly round until contact, then turns into a vertically
 symmetric tab: two shoulders leave the visible-frame boundary tangentially, meet a
 rounded inward tip, and join a rounded lobe that remains offscreen. The terminal contour
 and the live boundary progression are shown in [`puck-edge-morph.svg`](puck-edge-morph.svg).
@@ -313,6 +313,11 @@ all four bounded-edge predictions at 1,800 pt/s incoming velocity. The remote ru
 quiet pytest output and captures the harness's per-case numeric lines, so those individual
 settle times are not available in its log; this is automated constraint evidence, not a
 replacement for the visual measurement below.
+
+The fixed-step geometry comparison measured the visible 10–90% morph phase at 50 ms for
+the old contour and 66.7 ms for the new contour. The corresponding settle measurements
+were approximately 542 ms and 517 ms, respectively; these are harness timings rather than
+runtime frame-rate measurements.
 
 ### Human acceptance still required
 
