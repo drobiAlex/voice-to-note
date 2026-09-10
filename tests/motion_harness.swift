@@ -46,29 +46,6 @@ for distance in [180.0, 184.0, 200.0] {
     precondition(abs(sixty - oneTwenty) / oneTwenty <= 0.05, "Refresh rates disagree")
 }
 
-/// The tab's visible contact phase is measured in the production physics steps,
-/// so display-frame quantisation cannot disguise a refresh-rate difference.
-func contactDuration() -> Double {
-    let physics = SpringMotionPhysics(configuration: PuckMotion.configuration,
-                                      timeStep: Float(PuckMotion.step))
-    var state = SpringMotionState(position: .zero, velocity: .zero)
-    var began: Double?
-    for step in 1...240 {
-        state = physics.calculateNextState(from: state, destinationPoint: CGPoint(x: 184, y: 0))
-        let travel = min(max(state.position.x / 184, 0), 1)
-        let seconds = Double(step) * PuckMotion.step
-        if travel >= 0.35, began == nil { began = seconds }
-        if travel >= 0.99, let began {
-            let duration = seconds - began
-            precondition(duration >= 0.05 && duration <= 0.15, "Contact merge is not gentle")
-            print("Fixed-step contact merge: \(duration) s")
-            return duration
-        }
-    }
-    fatalError("Motion never reached the tab")
-}
-_ = contactDuration()
-
 /// Compare the visible contour, not just the window travel: old tabs used raw
 /// travel while the new contour begins at contact. Both profiles advance the
 /// same production-sized 184-point tuck at the fixed physics timestep.
@@ -80,22 +57,23 @@ func profile(omega: Float, amount: @escaping (CGFloat) -> CGFloat) -> (morph: Do
     let destination = CGPoint(x: 184, y: 0)
     var state = SpringMotionState(position: .zero, velocity: .zero)
     var tenPercent: Double?
+    var ninetyPercent: Double?
     for step in 1...240 {
         state = physics.calculateNextState(from: state, destinationPoint: destination)
         let visible = amount(min(max(state.position.x / destination.x, 0), 1))
         let seconds = Double(step) * PuckMotion.step
         if visible >= 0.1, tenPercent == nil { tenPercent = seconds }
-        if visible >= 0.9, let tenPercent {
-            let morph = seconds - tenPercent
-            if abs(state.velocity.horizontal) < 0.001 && abs(state.position.x - destination.x) < 0.5 {
-                return (morph, seconds)
-            }
+        if visible >= 0.9, ninetyPercent == nil { ninetyPercent = seconds }
+        if let tenPercent, let ninetyPercent,
+           abs(state.velocity.horizontal) < 0.001 && abs(state.position.x - destination.x) < 0.5 {
+            return (ninetyPercent - tenPercent, seconds)
         }
     }
     fatalError("Profile never settled")
 }
 let oldProfile = profile(omega: 40) { $0 }
 let newProfile = profile(omega: PuckMotion.angularFrequency) { PuckEdgeContour.contactAmount(for: $0) }
+precondition(newProfile.morph > oldProfile.morph, "Visible morph became faster")
 print("Visible morph 10–90%: old \(oldProfile.morph) s, new \(newProfile.morph) s; fixed-step settle: old \(oldProfile.settle) s, new \(newProfile.settle) s")
 
 /// Redirection feeds the incoming velocity into the actual solver, preserving
@@ -145,7 +123,7 @@ func near(_ left: CGFloat, _ right: CGFloat, _ tolerance: CGFloat = 0.001) -> Bo
     abs(left - right) <= tolerance
 }
 func finite(_ point: CGPoint) -> Bool { point.x.isFinite && point.y.isFinite }
-precondition(PuckEdgeContour.contactAmount(for: 0.35) == 0, "Tab starts before contact")
+precondition(PuckEdgeContour.contactAmount(for: 0) == 0, "Tab starts before contact")
 precondition(PuckEdgeContour.contactAmount(for: 0.5) < 0.15, "Approach stopped reading as a circle")
 precondition(PuckEdgeContour.contactAmount(for: 1) == 1, "Tab never reaches its terminal outline")
 for amount in [CGFloat(0), 0.5, 1] {

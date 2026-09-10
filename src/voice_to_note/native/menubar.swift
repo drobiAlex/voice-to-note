@@ -2821,8 +2821,16 @@ struct PuckEdgeContour {
     /// forms its shoulders with zero slope at either end. This avoids the
     /// concave half-tab that a linear point-for-point blend briefly exposed.
     static func contactAmount(for travel: CGFloat) -> CGFloat {
-        let x = min(max((travel - 0.35) / 0.65, 0), 1)
-        return x * x * x * (x * (x * 6 - 15) + 10)
+        func smooth(_ value: CGFloat) -> CGFloat {
+            let x = min(max(value, 0), 1)
+            return x * x * x * (x * (x * 6 - 15) + 10)
+        }
+        switch travel {
+        case ..<0.2: return 0.1 * smooth(travel / 0.2)
+        case ..<0.5: return 0.1 + 0.04 * smooth((travel - 0.2) / 0.3)
+        case ..<0.95: return 0.14 + 0.76 * smooth((travel - 0.5) / 0.45)
+        default: return 0.9 + 0.1 * smooth((travel - 0.95) / 0.05)
+        }
     }
 
     /// Sampling the production cubics gives the rim one dash period for the

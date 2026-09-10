@@ -7,8 +7,17 @@ from pathlib import Path
 def segments(amount: float, boundary: float) -> list[tuple[tuple[float, float], ...]]:
     """Mirror PuckEdgeContour.segments so the checked-in review image has its exact points."""
     travel = min(max(amount, 0), 1)
-    x = min(max((travel - .35) / .65, 0), 1)
-    amount = x * x * x * (x * (x * 6 - 15) + 10)
+    def smooth(value: float) -> float:
+        x = min(max(value, 0), 1)
+        return x * x * x * (x * (x * 6 - 15) + 10)
+    if travel < .2:
+        amount = .1 * smooth(travel / .2)
+    elif travel < .5:
+        amount = .1 + .04 * smooth((travel - .2) / .3)
+    elif travel < .95:
+        amount = .14 + .76 * smooth((travel - .5) / .45)
+    else:
+        amount = .9 + .1 * smooth((travel - .95) / .05)
     angles = [135, 157.5, 180, 202.5, 225, 270, 360, 450]
     terminal = [(boundary, 60), (boundary / 2, 30), (0, 0), (boundary / 2, -30),
                 (boundary, -60), (80, -70), (200, 0), (80, 70)]
