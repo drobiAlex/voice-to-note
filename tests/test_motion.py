@@ -31,7 +31,8 @@ def test_the_shipped_spring_settles_with_one_visible_overshoot_at_both_refresh_r
         capture_output=True, text=True,
     )
     assert compiled.returncode == 0, compiled.stderr
-    result = subprocess.run([str(binary)], check=True, capture_output=True, text=True)
+    result = subprocess.run([str(binary)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
     print(result.stdout)
 
 
