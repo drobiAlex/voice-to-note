@@ -69,6 +69,35 @@ func contactDuration() -> Double {
 }
 _ = contactDuration()
 
+/// Compare the visible contour, not just the window travel: old tabs used raw
+/// travel while the new contour begins at contact. Both profiles advance the
+/// same production-sized 184-point tuck at the fixed physics timestep.
+func profile(omega: Float, amount: @escaping (CGFloat) -> CGFloat) -> (morph: Double, settle: Double) {
+    let physics = SpringMotionPhysics(
+        configuration: SpringConfiguration(angularFrequency: omega, dampingRatio: PuckMotion.dampingRatio),
+        timeStep: Float(PuckMotion.step)
+    )
+    let destination = CGPoint(x: 184, y: 0)
+    var state = SpringMotionState(position: .zero, velocity: .zero)
+    var tenPercent: Double?
+    for step in 1...240 {
+        state = physics.calculateNextState(from: state, destinationPoint: destination)
+        let visible = amount(min(max(state.position.x / destination.x, 0), 1))
+        let seconds = Double(step) * PuckMotion.step
+        if visible >= 0.1, tenPercent == nil { tenPercent = seconds }
+        if visible >= 0.9, let tenPercent {
+            let morph = seconds - tenPercent
+            if abs(state.velocity.horizontal) < 0.001 && abs(state.position.x - destination.x) < 0.5 {
+                return (morph, seconds)
+            }
+        }
+    }
+    fatalError("Profile never settled")
+}
+let oldProfile = profile(omega: 40) { $0 }
+let newProfile = profile(omega: PuckMotion.angularFrequency) { PuckEdgeContour.contactAmount(for: $0) }
+print("Visible morph 10–90%: old \(oldProfile.morph) s, new \(newProfile.morph) s; fixed-step settle: old \(oldProfile.settle) s, new \(newProfile.settle) s")
+
 /// Redirection feeds the incoming velocity into the actual solver, preserving
 /// momentum instead of resetting it when the destination changes.
 let physics = SpringMotionPhysics(configuration: PuckMotion.configuration,
