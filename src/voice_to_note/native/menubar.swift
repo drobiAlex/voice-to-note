@@ -2771,7 +2771,7 @@ struct PuckEdgeContour {
     }
 
     static func segments(amount: CGFloat, boundary: CGFloat) -> [Cubic] {
-        let amount = min(max(amount, 0), 1)
+        let amount = contactAmount(for: amount)
         let angles: [CGFloat] = [135, 157.5, 180, 202.5, 225, 270, 360, 450]
         let terminal = [
             CGPoint(x: boundary, y: 60), CGPoint(x: boundary / 2, y: 30), CGPoint(x: 0, y: 0),
@@ -2785,8 +2785,8 @@ struct PuckEdgeContour {
             (.init(x: boundary * 3 / 4, y: -37.5), .init(x: boundary, y: -45)),
             (.init(x: boundary, y: -75), .init(x: 60, y: -70)),
             (.init(x: 100, y: -70), .init(x: 200, y: -38)),
-            (.init(x: 200, y: 38), .init(x: 135, y: 70)),
-            (.init(x: 25, y: 70), .init(x: boundary, y: 75)),
+            (.init(x: 200, y: 38), .init(x: 100, y: 70)),
+            (.init(x: 60, y: 70), .init(x: boundary, y: 75)),
         ]
         let radius: CGFloat = 99.5
         let centre = CGPoint(x: radius, y: 0)
@@ -2815,6 +2815,14 @@ struct PuckEdgeContour {
             return Cubic(start: mixed(a, terminal[index]), control1: mixed(c1, controls[index].0),
                          control2: mixed(c2, controls[index].1), end: mixed(b, terminal[(index + 1) % 8]))
         }
+    }
+
+    /// The outline stays circular through the first part of a tuck, then
+    /// forms its shoulders with zero slope at either end. This avoids the
+    /// concave half-tab that a linear point-for-point blend briefly exposed.
+    static func contactAmount(for travel: CGFloat) -> CGFloat {
+        let x = min(max((travel - 0.35) / 0.65, 0), 1)
+        return x * x * x * (x * (x * 6 - 15) + 10)
     }
 
     /// Sampling the production cubics gives the rim one dash period for the
@@ -2884,6 +2892,8 @@ final class RecorderPuckView: NSView, Dockable {
 
     private let body = CAShapeLayer()
     private let workingRim = CAShapeLayer()
+    private let visibleClip = CAShapeLayer()
+    private var clippedVisibleRect: NSRect?
     private var workingRimLength: CGFloat?
     private let record = RecordButton()
     private let caption = RecorderPuckView.label("Record")
@@ -2976,13 +2986,15 @@ final class RecorderPuckView: NSView, Dockable {
     /// Core Animation can therefore interpolate the same contour if that is
     /// ever moved off the display link, and body, shadow and working rim stay
     /// one exact outline today.
-    func setEdgeMorph(_ edge: Dock.Edge?, amount: CGFloat, boundary: CGFloat? = nil) {
+    func setEdgeMorph(_ edge: Dock.Edge?, amount: CGFloat, boundary: CGFloat? = nil,
+                      visibleFrame: NSRect? = nil) {
         guard let edge else {
             clearEdgeMorph()
             return
         }
         let amount = min(max(amount, 0), 1)
         let boundary = boundary ?? Dock.peek
+        clipToVisibleFrame(visibleFrame)
         if let old = edgeMorph, old.edge == edge, abs(old.amount - amount) < 0.001,
            abs(old.boundary - boundary) < 0.001 { return }
         edgeMorph = (edge, amount, boundary)
@@ -3006,9 +3018,11 @@ final class RecorderPuckView: NSView, Dockable {
     func clearEdgeMorph() {
         guard edgeMorph != nil else { return }
         edgeMorph = nil
+        clippedVisibleRect = nil
         let round = CGPath(ellipseIn: discRect.insetBy(dx: 0.5, dy: 0.5), transform: nil)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        layer?.mask = nil
         body.path = round
         body.shadowPath = round
         workingRim.path = round
@@ -3018,6 +3032,30 @@ final class RecorderPuckView: NSView, Dockable {
             control.alphaValue = 1
             control.isHidden = false
         }
+    }
+
+    /// A tucked panel intentionally extends beyond its screen so its sliver
+    /// keeps receiving hover events. Its pixels must not follow it into the
+    /// menu bar, Dock, or a neighbouring display, so the whole view is masked
+    /// to the source screen's real visible rectangle.
+    private func clipToVisibleFrame(_ visibleFrame: NSRect?) {
+        guard let visibleFrame, let window, let layer else { return }
+        let windowRect = window.convertFromScreen(visibleFrame)
+        let localRect = convert(windowRect, from: nil).intersection(bounds)
+        clippedVisibleRect = localRect
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        visibleClip.frame = bounds
+        visibleClip.path = CGPath(rect: localRect, transform: nil)
+        layer.mask = visibleClip
+        CATransaction.commit()
+    }
+
+    /// A clipped-off part of the panel cannot be seen, so it must not consume
+    /// clicks intended for the menu bar, Dock, or another display either.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard clippedVisibleRect?.contains(point) ?? true else { return nil }
+        return super.hitTest(point)
     }
 
     /// Eight corresponding cubic pieces turn a circle into a smooth-union
@@ -3496,9 +3534,10 @@ protocol Dockable: NSView {
     var onHover: ((Bool) -> Void)? { get set }
 }
 /// One physical spring for the window and arrival layer. The upstream 7.5/.5
-/// takes seconds to stop; 40/.7 gives a 180-point slide one 8-point overshoot.
+/// takes seconds to stop; 32/.7 leaves a gentler contact merge while retaining
+/// one 4–12-point overshoot and the 700 ms settle limit.
 enum PuckMotion {
-    static let angularFrequency: Float = 40
+    static let angularFrequency: Float = 32
     static let dampingRatio: Float = 0.7
     static let step: TimeInterval = 1 / 120
     static let configuration = SpringConfiguration(
@@ -3802,6 +3841,11 @@ final class Dock {
     /// The last edge owns the reversible tab while a grab carries it back into
     /// the screen. It clears only once the moving frame has made it round.
     private var morphEdge: Edge?
+    /// The display that received the tuck owns its clipping boundary until the
+    /// move ends. Choosing by an offscreen frame's midpoint can otherwise flip
+    /// the tab across a shared display seam while the spring is in flight.
+    private var morphScreen: NSScreen?
+    private var morphDisplay: UInt32?
 
     /// Told once, when the window stops hanging: whoever hung it there closes it
     /// on a click elsewhere and lights the button it hangs from, and a window that
@@ -3867,6 +3911,7 @@ final class Dock {
             guard let screen = Dock.screen(numbered: display) else { return false }
             self.along = along
             state = .tucked(edge)
+            holdMorphScreen(screen)
             panel.setFrame(tuckedFrame(edge, on: screen), display: false)
             panel.alphaValue = Dock.tuckedAlpha
             panel.orderFrontRegardless()
@@ -3886,7 +3931,7 @@ final class Dock {
     }
 
     private var place: DockPlace {
-        let screen = Dock.screen(under: panel.frame) ?? NSScreen.main
+        let screen = currentMorphScreen() ?? Dock.screen(under: panel.frame) ?? NSScreen.main
         guard let screen, let display = Dock.number(of: screen) else { return .hanging }
         switch state {
         case .hanging:
@@ -3919,7 +3964,14 @@ final class Dock {
             leaveWherever()
             let origin = held(at: NSPoint(x: point.x - grab.x, y: point.y - grab.y))
             panel.setFrameOrigin(origin)
-            if let edge = morphEdge, let screen = Dock.screen(under: panel.frame) ?? NSScreen.main {
+            let cursorScreen = Dock.screen(containing: NSEvent.mouseLocation) ?? NSScreen.main
+            if let screen = cursorScreen, currentMorphScreen() != nil,
+               Dock.number(of: screen) != morphDisplay {
+                morphEdge = nil
+                morphDisplay = nil
+                self.morphScreen = nil
+                (view as? RecorderPuckView)?.clearEdgeMorph()
+            } else if let edge = morphEdge, let screen = currentMorphScreen() {
                 applyMorph(edge, at: origin, on: screen)
             }
         case .ended:
@@ -4042,14 +4094,16 @@ final class Dock {
     private func tuck(_ edge: Edge, on screen: NSScreen) {
         state = .tucked(edge)
         morphEdge = edge
+        holdMorphScreen(screen)
         slide(to: tuckedFrame(edge, on: screen), alpha: Dock.tuckedAlpha, bound: sliverBound(edge, on: screen))
         onPlaced?(place)
     }
 
     private func peek(_ edge: Edge) {
-        guard let screen = Dock.screen(under: panel.frame) ?? NSScreen.main else { return }
+        guard let screen = currentMorphScreen() ?? Dock.screen(under: panel.frame) ?? NSScreen.main else { return }
         state = .peeking(edge)
         morphEdge = edge
+        holdMorphScreen(screen)
         slide(to: revealedFrame(edge, on: screen), alpha: 1, bound: sliverBound(edge, on: screen))
     }
 
@@ -4058,7 +4112,8 @@ final class Dock {
     /// different one from the one it was tucked into.
     private func reanchor() {
         motion.interrupt()
-        guard let screen = Dock.screen(under: panel.frame) ?? NSScreen.main else { return }
+        guard let screen = currentMorphScreen() ?? Dock.screen(under: panel.frame) ?? NSScreen.main else { return }
+        holdMorphScreen(screen)
         switch state {
         case let .tucked(edge):
             panel.setFrame(tuckedFrame(edge, on: screen), display: true)
@@ -4073,6 +4128,8 @@ final class Dock {
                 panel.frame.origin, size: panel.frame.size, within: screen.visibleFrame
             ))
             morphEdge = nil
+            morphScreen = nil
+            morphDisplay = nil
             (view as? RecorderPuckView)?.clearEdgeMorph()
         case .hanging:
             break
@@ -4086,12 +4143,12 @@ final class Dock {
             motion.interrupt()
             panel.setFrame(frame, display: true)
             panel.alphaValue = alpha
-            if let edge = morphEdge, let screen = Dock.screen(under: panel.frame) ?? NSScreen.main {
+            if let edge = morphEdge, let screen = currentMorphScreen() ?? Dock.screen(under: panel.frame) ?? NSScreen.main {
                 applyMorph(edge, at: frame.origin, on: screen)
             }
             return
         }
-        guard let edge = morphEdge, let screen = Dock.screen(under: frame) ?? NSScreen.main else {
+        guard let edge = morphEdge, let screen = currentMorphScreen() ?? Dock.screen(under: frame) ?? NSScreen.main else {
             motion.move(to: frame.origin, bound: bound)
             return
         }
@@ -4123,6 +4180,7 @@ final class Dock {
             return
         }
         morphEdge = edge
+        holdMorphScreen(screen)
         let body = NSRect(x: origin.x + inset, y: origin.y + inset,
                           width: panel.frame.width - inset * 2, height: panel.frame.height - inset * 2)
         let area = screen.visibleFrame
@@ -4133,7 +4191,22 @@ final class Dock {
         case .top: boundary = area.maxY - body.minY
         case .bottom: boundary = body.maxY - area.minY
         }
-        (view as? RecorderPuckView)?.setEdgeMorph(edge, amount: amount, boundary: boundary)
+        (view as? RecorderPuckView)?.setEdgeMorph(
+            edge, amount: amount, boundary: boundary, visibleFrame: area
+        )
+    }
+
+    /// Keep a moving tab on the display that accepted it, unless that display
+    /// disappears. A drag that crosses displays deliberately becomes a free
+    /// puck before the new screen can decide its own edge on release.
+    private func holdMorphScreen(_ screen: NSScreen) {
+        morphScreen = screen
+        morphDisplay = Dock.number(of: screen)
+    }
+
+    private func currentMorphScreen() -> NSScreen? {
+        if let morphDisplay { return Dock.screen(numbered: morphDisplay) }
+        return morphScreen
     }
 
     /// Half the peek remains visible even when an incoming velocity needs

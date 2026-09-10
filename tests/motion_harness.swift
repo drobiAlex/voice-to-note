@@ -46,6 +46,29 @@ for distance in [180.0, 184.0, 200.0] {
     precondition(abs(sixty - oneTwenty) / oneTwenty <= 0.05, "Refresh rates disagree")
 }
 
+/// The tab's visible contact phase is measured in the production physics steps,
+/// so display-frame quantisation cannot disguise a refresh-rate difference.
+func contactDuration() -> Double {
+    let physics = SpringMotionPhysics(configuration: PuckMotion.configuration,
+                                      timeStep: Float(PuckMotion.step))
+    var state = SpringMotionState(position: .zero, velocity: .zero)
+    var began: Double?
+    for step in 1...240 {
+        state = physics.calculateNextState(from: state, destinationPoint: CGPoint(x: 184, y: 0))
+        let travel = min(max(state.position.x / 184, 0), 1)
+        let seconds = Double(step) * PuckMotion.step
+        if travel >= 0.35, began == nil { began = seconds }
+        if travel >= 0.99, let began {
+            let duration = seconds - began
+            precondition(duration >= 0.05 && duration <= 0.15, "Contact merge is not gentle")
+            print("Fixed-step contact merge: \(duration) s")
+            return duration
+        }
+    }
+    fatalError("Motion never reached the tab")
+}
+_ = contactDuration()
+
 /// Redirection feeds the incoming velocity into the actual solver, preserving
 /// momentum instead of resetting it when the destination changes.
 let physics = SpringMotionPhysics(configuration: PuckMotion.configuration,
@@ -93,6 +116,9 @@ func near(_ left: CGFloat, _ right: CGFloat, _ tolerance: CGFloat = 0.001) -> Bo
     abs(left - right) <= tolerance
 }
 func finite(_ point: CGPoint) -> Bool { point.x.isFinite && point.y.isFinite }
+precondition(PuckEdgeContour.contactAmount(for: 0.35) == 0, "Tab starts before contact")
+precondition(PuckEdgeContour.contactAmount(for: 0.5) < 0.15, "Approach stopped reading as a circle")
+precondition(PuckEdgeContour.contactAmount(for: 1) == 1, "Tab never reaches its terminal outline")
 for amount in [CGFloat(0), 0.5, 1] {
     for boundary in [CGFloat(11), 22, 35] {
         let contour = PuckEdgeContour.segments(amount: amount, boundary: boundary)
@@ -119,9 +145,19 @@ for amount in [CGFloat(0), 0.5, 1] {
                              "Terminal contour has a cusp")
             }
         }
+        for (upper, lower) in [(0, 3), (1, 2), (4, 7), (5, 6)] {
+            let top = contour[upper]
+            let bottom = contour[lower]
+            precondition(near(top.start.x, bottom.end.x) && near(top.start.y, -bottom.end.y),
+                         "Contour lost its vertical symmetry")
+            precondition(near(top.control1.x, bottom.control2.x) && near(top.control1.y, -bottom.control2.y),
+                         "Contour controls lost their vertical symmetry")
+            precondition(near(top.control2.x, bottom.control1.x) && near(top.control2.y, -bottom.control1.y),
+                         "Contour controls lost their vertical symmetry")
+        }
     }
 }
-print("Edge contour is finite, closed, tangent-continuous, and boundary-anchored")
+print("Edge contour is finite, symmetric, closed, tangent-continuous, and boundary-anchored")
 
 let circularRim = PuckEdgeContour.approximateLength(amount: 0, boundary: 0)
 precondition(abs(circularRim - 2 * .pi * 99.5) < 1, "Circle rim length is not sampled accurately")

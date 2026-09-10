@@ -60,12 +60,12 @@ that only says "add springs" invites springs where they do not belong.
 ## The numbers, in one place
 
 The starting reference was `angularFrequency 7.5`, `dampingRatio 0.5`, MacPaw's shipped
-defaults. The implemented puck uses `40` / `0.7`, centralized in `PuckMotion` in
-`menubar.swift`: the original slow spring cannot meet the strict velocity threshold and
-700 ms acceptance together. The vendored defaults remain untouched.
+defaults. The implemented puck uses `32` / `0.7`, centralized in `PuckMotion` in
+`menubar.swift`: it leaves a measured contact phase for the tab while meeting the strict
+velocity threshold and 700 ms acceptance together. The vendored defaults remain untouched.
 
 The layer animations use Core Animation's own spring, which is parameterised differently;
-the implemented spring in its terms is `mass 1`, `stiffness ω² = 1600`, `damping 2ζω = 56`.
+the implemented spring in its terms is `mass 1`, `stiffness ω² = 1024`, `damping 2ζω = 44.8`.
 Written once as a constant with that derivation in a comment, so the window and the layers
 are demonstrably the same spring rather than two springs that look similar.
 
@@ -285,14 +285,18 @@ Replay Arrival can replay the puck's spring.
 ### Edge-tab morph
 
 At a dock edge the puck no longer reads as a circle disappearing behind the display. Its
-eight-cubic body contour turns into a tab: two concave shoulders leave the visible-frame
-boundary tangentially, meet a rounded inward tip, and join a rounded lobe that remains
-offscreen. The terminal contour is shown in [`puck-edge-morph.svg`](puck-edge-morph.svg).
+eight-cubic body contour stays circular until contact, then turns into a vertically
+symmetric tab: two shoulders leave the visible-frame boundary tangentially, meet a
+rounded inward tip, and join a rounded lobe that remains offscreen. The terminal contour
+and the live boundary progression are shown in [`puck-edge-morph.svg`](puck-edge-morph.svg).
 
 The dock derives the contour's amount and its boundary anchors from the frame actually
 drawn on each existing spring display-link tick. A spring overshoot therefore keeps both
 shoulders joined to the edge, and a mid-slide grab reverses from the outline that was
-visible under the pointer. The fill, shadow path, and processing rim use that one path.
+visible under the pointer. The same tick updates a reusable mask from that display's
+`visibleFrame`, clipping the fill, shadow, processing rim, and controls before they can
+paint into the menu bar, Dock, or an adjacent display. The fill, shadow path, and
+processing rim use one outline.
 The ordinary controls fade during the morph and are hidden before the tab is reached, so
 an invisible button cannot take a click; the remaining sliver still belongs to the puck's
 drag and hover view. Reduce Motion applies the appropriate end outline with the existing
