@@ -447,3 +447,70 @@ Sources: Callahan/Hopkins/Weiser/Shneiderman CHI '88 · Hopkins DDJ 1991 · Kurt
 `MainToolbar.swift` · HIG Buttons / Accessibility / Layout / Pop-up buttons / Toolbars /
 SF Symbols / Offering help · Apple support: QuickTime, ⇧⌘5, Voice Memos, Camera ·
 NN/g visual-design principles & icon usability · WCAG 2.5.8 · asktog on Fitts.
+
+---
+
+# Part four: what Eney actually is, and what of it we can have
+
+MacPaw's Eney was raised as the animation to aspire to. Two researchers went at it; the
+first thing they found is that the premise needs correcting, and the second is that half
+of what makes it good is already built here.
+
+**It is a character, not an effect.** A pink circle with eyes, drawn by an engine MacPaw
+wrote themselves — Maksym Mova, engineering manager: "developing a custom 3D engine that
+powers our animated character — a core part of the user experience". Their senior
+character producer, writing in Smashing Magazine: "we settled on a circular figure, as it
+felt the most approachable … Its eyes are the main emotional connector — a key feature in
+showing emotions without being cartoonish." Nothing gooey, no particles, no shader toy.
+
+**It moves less than people remember.** From the same piece: "we worked to reduce Eney's
+on-screen movement to make sure it wasn't distracting or excessive", and "when working on
+a task, Eney's figure resembles a loading icon". The feel is a calm near-still idle, a
+small vocabulary of expressions, and one rotational working state. A perpetually churning
+blob is further from Eney, not closer.
+
+**Its interaction model is the one this app already has.** 9to5Mac: "It lives on the side
+of your Mac display (think something like Dynamic Island on iPhone — it integrates
+seamlessly with the side bezel)", activating "when the cursor approaches". That is the
+dock in part two — tuck to an edge, peek on hover — arrived at independently from Loop,
+Ice and Apple's own event guidance.
+
+## What transfers, given how this app is built
+
+There is no package manifest here: `capture.swift` and `menubar.swift` are compiled by
+plain `swiftc`, one file each. FluidGradient, Orb and CocoaSprings are therefore off as
+*dependencies* — but each one's technique is system API underneath, and that is the part
+worth taking.
+
+1. **Springs instead of ease-out, on the window.** MacPaw open-sourced the motion half of
+   Eney as CocoaSprings (MIT): damped springs whose whole trajectory is precomputed and
+   handed to Core Animation — `CAKeyframeAnimation` on `position`, run by the render
+   server at no main-thread cost. Their shipped defaults are `angularFrequency` 7.5 and
+   `dampingRatio` 0.5. `CASpringAnimation` has been system API since 10.11, so the feel
+   costs an import of nothing. This is the highest-value change: what people recognise as
+   "the Eney feel" is settling, not decoration.
+2. **A working state that turns.** "Resembles a loading icon" is one `CABasicAnimation`
+   rotating a `CAShapeLayer` arc — the puck already has the disc and the rim to hang it on,
+   and the menu bar mark already shimmers through processing.
+3. **Idle stays still.** Not a compromise, the actual design: MacPaw's own instruction to
+   themselves. It is also the only honest choice here — Apple: "if your app creates a
+   status item that's present in the menu bar, your app is considered visible … as long as
+   the menu bar is visible", so App Nap never engages and nothing pauses this app but this
+   app.
+4. **Optional, later: a fluid sheen while working.** FluidGradient's approach is radial
+   `CAGradientLayer` blobs moved by `CASpringAnimation` — again render-server, and again
+   no dependency needed to copy. Only while the tape rolls or notes are being made; never
+   at rest, and never under a translucent layer (Apple: opacity "over content that changes
+   frequently … energy cost is magnified").
+
+What is *not* proposed: eyes, a face, a character. Eney is a companion that talks; this is
+a recorder that gets out of the way. Borrowing its motion is sense; borrowing its
+personality would be a costume.
+
+Could not be verified, and so is not designed against: Eney's exact timings, easing,
+palette, or what its listening and thinking states look like as distinct from working.
+
+Sources: Smashing Magazine, "Digital design in the AI era" (O. Hrzhehorzhevskyi, MacPaw) ·
+Setapp, "What is Eney" (M. Mova) · 9to5Mac 2025-05-22 and 2025-01-08 · AlternativeTo ·
+MacPaw/CocoaSprings · Cindori/FluidGradient · metasidd/Orb · hackenbacker/Metaball ·
+Apple: Energy Efficiency Guide, `Shader`, `TimelineView`, `NSView.displayLink`.

@@ -1609,6 +1609,24 @@ def test_a_memo_with_no_notes_yields_markdown_that_says_so(repo, wav):
     assert "no notes" in services.notes_markdown(repo, memo_id).lower()
 
 
+def test_exporting_notes_writes_a_stable_reader_facing_markdown_file(repo, wav, tmp_path, monkeypatch):
+    memo_id = extracted_memo(repo, wav)
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+
+    path = services.export_notes(repo, memo_id)
+
+    assert path == tmp_path / "notes" / f"{memo_id}.md"
+    assert path.read_text().startswith("# Sprint sync")
+
+
+def test_exporting_a_memo_without_notes_is_refused(repo, wav, tmp_path, monkeypatch):
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Hello")])
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+
+    with pytest.raises(services.NotFound, match="no notes"):
+        services.export_notes(repo, memo_id)
+
+
 def extracted_memo(repo, wav) -> int:
     """A memo the model has already written notes for."""
     memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Ship it", speaker="S1")])
@@ -2030,7 +2048,7 @@ def _write_native_helpers() -> None:
         services._source_stamp([services.config.CAPTURE_SRC, services.config.CAPTURE_PLIST])
     )
     services.config.MENUBAR_STAMP.write_text(
-        services._source_stamp([services.config.MENUBAR_SRC, services.config.MENUBAR_PLIST])
+        services._source_stamp([services.config.MENUBAR_SRC, services.config.MENUBAR_SPRINGS, services.config.MENUBAR_PLIST])
     )
 
 
@@ -2067,7 +2085,8 @@ def stub_bootstrap(monkeypatch, *, vad_fails=False, cloned_urls: list | None = N
         calls.append("capture")
         _write_binary(dst)
 
-    def build_menubar(source, plist, app):
+    def build_menubar(sources, plist, app):
+        assert sources == [services.config.MENUBAR_SRC, services.config.MENUBAR_SPRINGS]
         calls.append("menubar")
         _write_binary(app / "Contents" / "MacOS" / "vtn-menubar")
 
@@ -2350,7 +2369,7 @@ def test_setup_stamps_a_freshly_built_native_helper_with_its_source_hash(monkeyp
         [services.config.CAPTURE_SRC, services.config.CAPTURE_PLIST]
     )
     assert services.config.MENUBAR_STAMP.read_text() == services._source_stamp(
-        [services.config.MENUBAR_SRC, services.config.MENUBAR_PLIST]
+        [services.config.MENUBAR_SRC, services.config.MENUBAR_SPRINGS, services.config.MENUBAR_PLIST]
     )
 
 
@@ -3076,3 +3095,34 @@ def test_setup_leaves_the_recorder_alone_while_a_meeting_is_being_taped(monkeypa
 
     assert "quit" not in calls and "open" not in calls
     assert "[9/9] menu bar recorder — recording underway, left as it is" in logged
+
+
+def test_setup_with_launching_switched_off_builds_the_recorder_but_never_starts_it(monkeypatch):
+    monkeypatch.setattr(services.sys, "platform", "darwin")
+    monkeypatch.setattr(services.config, "SETUP_LAUNCH", "off")
+    opened = []
+    world = services.mock_world()
+    world = dataclasses.replace(world, open_menubar=lambda app: opened.append(app))
+    logged = []
+    services.setup(log=logged.append, world=world)
+    assert "[9/9] menu bar recorder launch — off by setting, skipped" in logged
+    assert opened == []
+
+
+def test_setup_rebuilds_the_recorder_when_only_the_vendored_spring_source_changes(monkeypatch, tmp_path):
+    """Physics edits must invalidate the executable even when its entry point is unchanged."""
+    configured_paths(monkeypatch, tmp_path)
+    springs = tmp_path / "springs.swift"
+    springs.write_text("original physics")
+    monkeypatch.setattr(services.config, "MENUBAR_SPRINGS", springs)
+    _write_native_helpers()
+    calls = stub_bootstrap(monkeypatch)
+    springs.write_text("updated physics")
+
+    services.setup()
+
+    assert "menubar" in calls
+    assert "capture" not in calls
+    assert services.config.MENUBAR_STAMP.read_text() == services._source_stamp(
+        [services.config.MENUBAR_SRC, springs, services.config.MENUBAR_PLIST]
+    )

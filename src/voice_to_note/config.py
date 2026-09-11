@@ -38,6 +38,7 @@ CAPTURE_BIN = ROOT / "bin" / "vtn-capture"
 # recording is launched from, and only a bundle carries the Info.plist whose
 # wording the permission prompt then shows
 MENUBAR_SRC = NATIVE_DIR / "menubar.swift"
+MENUBAR_SPRINGS = NATIVE_DIR / "springs.swift"
 MENUBAR_PLIST = NATIVE_DIR / "menubar-Info.plist"
 MENUBAR_APP = ROOT / "bin" / "VTN Recorder.app"
 MENUBAR_BIN = MENUBAR_APP / "Contents" / "MacOS" / "vtn-menubar"
@@ -120,6 +121,13 @@ SETTINGS: dict[str, Setting] = {
         kind="int",
     ),
     "num_speakers": Setting(-1, int, "speaker count to assume; -1 auto-detects", kind="int"),
+    "setup_launch": Setting(
+        "on",
+        str,
+        "have setup start the menu bar recorder it just built; off for a build box",
+        kind="choice",
+        choices=("off", "on"),
+    ),
     "live_transcribe": Setting(
         "on",
         str,
@@ -299,6 +307,7 @@ EMB_MODEL: str = _setting("emb_model")
 EMB_MODEL_PATH = MODELS_DIR / EMB_MODEL
 
 NUM_SPEAKERS: int = _setting("num_speakers")
+SETUP_LAUNCH: str = _setting("setup_launch")
 LIVE_TRANSCRIBE: str = _setting("live_transcribe")
 LIVE_CHUNK_S: int = _setting("live_chunk_s")
 LIVE_SILENCE_FLOOR: float = _setting("live_silence_floor")

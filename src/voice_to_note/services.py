@@ -242,7 +242,7 @@ class World:
     clone: Callable[[Path, str], None]
     build: Callable[[Path], None]
     build_capture: Callable[[Path, Path, Path], None]
-    build_menubar: Callable[[Path, Path, Path], None]
+    build_menubar: Callable[[list[Path], Path, Path], None]
     script: Callable[[Path, str, list[str]], None]
     fetch: Callable[[str, Path, Callable[[int, int], None]], None]
     fetch_tar: Callable[[str, Path, Callable[[int, int], None]], None]
@@ -323,7 +323,7 @@ def mock_world(sleep: Callable[[float], None] = time.sleep) -> World:
         clone=clone,
         build=build,
         build_capture=lambda _src, _plist, _dst: None,
-        build_menubar=lambda _src, _plist, _app: None,
+        build_menubar=lambda _sources, _plist, _app: None,
         script=script,
         fetch=simulated_fetch,
         fetch_tar=simulated_fetch,
@@ -476,8 +476,8 @@ def setup(
         )
         world.write(config.CAPTURE_STAMP, capture_stamp)
 
-    menubar_sources = [config.MENUBAR_SRC, config.MENUBAR_PLIST]
-    menubar_stamp = _source_stamp(menubar_sources)
+    menubar_sources = [config.MENUBAR_SRC, config.MENUBAR_SPRINGS]
+    menubar_stamp = _source_stamp([*menubar_sources, config.MENUBAR_PLIST])
     if sys.platform != "darwin":
         log("[8/9] menu bar recorder — macOS only, skipped")
     elif world.built(config.MENUBAR_BIN) and world.read(config.MENUBAR_STAMP) == menubar_stamp:
@@ -491,13 +491,17 @@ def setup(
             8,
             "building menu bar recorder",
             lambda: world.build_menubar(
-                config.MENUBAR_SRC, config.MENUBAR_PLIST, config.MENUBAR_APP
+                menubar_sources, config.MENUBAR_PLIST, config.MENUBAR_APP
             ),
         )
         world.write(config.MENUBAR_STAMP, menubar_stamp)
 
     if sys.platform != "darwin":
         log("[9/9] menu bar recorder launch — macOS only, skipped")
+    elif config.SETUP_LAUNCH != "on":
+        # a build box compiles the recorder to prove it compiles; launching it
+        # there would put a scratch checkout's recorder in somebody's menu bar
+        log("[9/9] menu bar recorder launch — off by setting, skipped")
     elif world.recording():
         # quitting the recorder takes its capture helper down with it, and no
         # upgrade is worth ending somebody's meeting; the fresh build is
@@ -1849,6 +1853,22 @@ def notes_markdown(repo: Repository, memo_id: int) -> str:
     if not extraction:
         return "*no notes yet — run `vtn extract` on this memo*"
     return render_notes_markdown(extraction, _done_tasks(repo, memo_id))
+
+
+def export_notes(repo: Repository, memo_id: int) -> Path:
+    """Writes the reader-facing note to a stable file under VTN_HOME.
+
+    The native recorder needs a real artifact it can open after processing;
+    keeping this export inside the app's data directory avoids a temporary file
+    disappearing before the user clicks it and makes repeated opens deterministic.
+    """
+    require_memo(repo, memo_id)
+    if not repo.notes_md(memo_id) and repo.extraction(memo_id) is None:
+        raise NotFound(f"no notes for memo {memo_id} — run: vtn extract {memo_id}")
+    path = config.DATA_DIR / "notes" / f"{memo_id}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(notes_markdown(repo, memo_id) + "\n")
+    return path
 
 
 def notes_json(repo: Repository, memo_id: int) -> str:

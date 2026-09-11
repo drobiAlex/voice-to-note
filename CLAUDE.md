@@ -147,6 +147,11 @@ replaces `sys.stderr` with a capture object whose `fileno()` is -1, which `multi
 
 ## Swift on the remote Mac
 
+Puck motion is configured in `PuckMotion` in `native/menubar.swift`; window physics and
+Core Animation springs derive from the same constants. `native/springs.swift` is vendored
+CocoaSprings physics: preserve its upstream formatting and headers, and exempt it from the
+prose-docstring rule so future upstream comparisons remain meaningful.
+
 `capture.swift` / `menubar.swift` only compile on macOS. `scripts/remote-build.sh check|build|test|verify`
 pushes the committed branch to the Mac and runs it there through a pinned SSH key that
 cannot open a shell — `docs/remote-build.md` says what is allowed, what is never done
