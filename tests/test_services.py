@@ -1609,6 +1609,24 @@ def test_a_memo_with_no_notes_yields_markdown_that_says_so(repo, wav):
     assert "no notes" in services.notes_markdown(repo, memo_id).lower()
 
 
+def test_exporting_notes_writes_a_stable_reader_facing_markdown_file(repo, wav, tmp_path, monkeypatch):
+    memo_id = extracted_memo(repo, wav)
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+
+    path = services.export_notes(repo, memo_id)
+
+    assert path == tmp_path / "notes" / f"{memo_id}.md"
+    assert path.read_text().startswith("# Sprint sync")
+
+
+def test_exporting_a_memo_without_notes_is_refused(repo, wav, tmp_path, monkeypatch):
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Hello")])
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+
+    with pytest.raises(services.NotFound, match="no notes"):
+        services.export_notes(repo, memo_id)
+
+
 def extracted_memo(repo, wav) -> int:
     """A memo the model has already written notes for."""
     memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Ship it", speaker="S1")])

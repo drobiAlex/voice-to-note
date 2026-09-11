@@ -6,6 +6,7 @@
 // whether this app is still watching or not.
 
 import AppKit
+import Darwin
 import Foundation
 import UserNotifications
 
@@ -17,6 +18,68 @@ enum RecorderState {
     case starting
     case recording
     case processing
+}
+
+/// The recorder's machine-readable progress lines. They travel on stderr with
+/// human status, so the decoder keeps a partial line until the pipe supplies
+/// its newline and leaves every ordinary line for the log.
+enum RecorderEvent: Equatable {
+    case stage(String)
+    case ready(Int)
+    case transcriptReady(Int)
+    case cancellable(Int)
+    case cancelled(Int?)
+    case failed(kind: String?, memoID: Int?, message: String?)
+}
+
+struct RecorderEventDecoder {
+    static let prefix = "vtn-event "
+
+    private(set) var remainder = Data()
+
+    mutating func receive(_ data: Data) -> [(line: String, event: RecorderEvent?)] {
+        remainder.append(data)
+        var received: [(line: String, event: RecorderEvent?)] = []
+        while let newline = remainder.firstIndex(of: 0x0A) {
+            let line = String(decoding: remainder[..<newline], as: UTF8.self)
+            remainder.removeSubrange(...newline)
+            received.append((line, Self.event(in: line)))
+        }
+        return received
+    }
+
+    mutating func finish() -> (line: String, event: RecorderEvent?)? {
+        guard !remainder.isEmpty else { return nil }
+        let line = String(decoding: remainder, as: UTF8.self)
+        remainder = Data()
+        return (line, Self.event(in: line))
+    }
+
+    static func event(in line: String) -> RecorderEvent? {
+        guard line.hasPrefix(prefix),
+              let data = line.dropFirst(prefix.count).data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let name = object["event"] as? String
+        else { return nil }
+        let memoID = object["memo_id"] as? Int
+        switch name {
+        case "stage":
+            return (object["stage"] as? String).map(RecorderEvent.stage)
+        case "ready":
+            return memoID.map(RecorderEvent.ready)
+        case "transcript_ready":
+            return memoID.map(RecorderEvent.transcriptReady)
+        case "cancellable":
+            return (object["pgid"] as? Int).flatMap { $0 > 0 ? RecorderEvent.cancellable($0) : nil }
+        case "cancelled":
+            return .cancelled(memoID)
+        case "failed":
+            return .failed(kind: object["kind"] as? String, memoID: memoID,
+                           message: object["message"] as? String)
+        default:
+            return nil
+        }
+    }
 }
 
 /// A device the Mac can record, as the capture helper lists it. The name is
@@ -107,8 +170,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     private var recorder: Process?
     private var errors: Pipe?
-    private var unread = ""
+    private let stderrQueue = DispatchQueue(label: "voice-to-note.menubar.stderr")
+    private var events = RecorderEventDecoder()
+    private var activeSession: UUID?
     private var startedAt: Date?
+    private var processingStartedAt: Date?
+    private var processingStage = "Preparing recording"
+    private var cancelling = false
+    private var cancellationRequested = false
+    private var cancellationPGID: Int32?
+    private var sentCancellation = false
+    private var latestMemoID: Int?
+    private var readyFeedback = false
+    private var readyFeedbackOver: Timer?
+    private var terminalEvent: RecorderEvent?
+    private var pendingExitCode: Int32?
+    private var reachedStderrEOF = false
     private var ticker: Timer?
     private var shimmer: Timer?
     private var rehearsal: Timer?
@@ -243,19 +320,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch state {
         case .idle:
             button.image = Mark.idle
-            button.attributedTitle = NSAttributedString(string: "")
+            button.attributedTitle = readyFeedback ? label("Note ready") : NSAttributedString(string: "")
+            let ready = readyFeedback ? "Note ready — open the recorder menu to open it" : nil
+            button.toolTip = ready
+            button.setAccessibilityLabel(ready)
         case .starting:
             button.image = Mark.starting
             button.attributedTitle = label("…")
+            button.toolTip = "Starting recording"
+            button.setAccessibilityLabel("Starting recording")
         case .recording:
             speak()
             button.image = Mark.recording
             button.attributedTitle = label(elapsed())
         case .processing:
             button.image = shimmerFrames[shimmerFrame]
-            button.attributedTitle = NSAttributedString(string: "")
+            button.attributedTitle = label(processingElapsed())
+            button.toolTip = processingDetail()
+            button.setAccessibilityLabel(processingDetail())
         }
-        puckView?.show(state: state, elapsed: elapsed(), trouble: troubleNow())
+        puckView?.show(state: state, elapsed: elapsed(), trouble: troubleNow(), processing: processingDetail(),
+                       canCancel: !cancelling, noteReady: readyFeedback)
     }
 
     /// What the puck's one line should warn about right now: a side of a
@@ -336,6 +421,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return String(format: "%02d:%02d", minutes, seconds % 60)
     }
 
+    /// Processing has a clock of its own: the recording clock stops when the
+    /// microphone stops, while this one says how long the work after it has
+    /// been running without inventing a percentage the pipeline cannot know.
+    private func processingElapsed() -> String {
+        let seconds = Int(Date().timeIntervalSince(processingStartedAt ?? Date()))
+        return String(format: "%02d:%02d", seconds / 60, seconds % 60)
+    }
+
+    private func processingDetail() -> String {
+        cancelling ? "Cancelling …" : "\(processingStage) · \(processingElapsed())"
+    }
+
     private func startTicking() {
         let ticker = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.show() }
         // a tenth of a second's slack, which is what lets the system fire this
@@ -404,6 +501,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         switch state {
         case .idle:
+            if readyFeedback, latestMemoID != nil {
+                menu.addItem(note("Note ready"))
+                menu.addItem(action("Open Note", #selector(openLatestNote)))
+                menu.addItem(.separator())
+            } else if latestMemoID != nil {
+                menu.addItem(action("Open Latest Note", #selector(openLatestNote)))
+                menu.addItem(.separator())
+            }
             menu.addItem(action("Start Recording", #selector(startRecording), key: "r"))
             menu.addItem(.separator())
             menu.addItem(.sectionHeader(title: "Next Recording"))
@@ -426,7 +531,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(action("Stop Recording", #selector(stopRecording), key: "r"))
             menu.addItem(note(state == .recording ? "Recording \(elapsed())" : "Starting …"))
         case .processing:
-            menu.addItem(note("Processing memo …"))
+            menu.addItem(note(processingDetail()))
+            if !cancelling {
+                menu.addItem(action("Cancel Processing", #selector(cancelProcessing)))
+            }
         }
         menu.addItem(.separator())
         // the switch is offered in every state; the puck's own lines only when
@@ -718,6 +826,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             if self.previewing { self.showPreview(.processing) } else { self.stopRecording() }
         }
+        view.onCancel = { [weak self] in
+            guard let self else { return }
+            if self.previewing { self.showPreview(.cancelling) } else { self.cancelProcessing() }
+        }
+        view.onOpen = { [weak self] in self?.openLatestNote() }
         view.onProject = { [weak self] name in self?.pickProject(name) }
         view.onInput = { [weak self] device in self?.pickInput(device) }
         view.onOutput = { [weak self] device in self?.pickOutput(device) }
@@ -725,7 +838,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.puck = panel
         self.puckView = view
         feedPuck()
-        view.show(state: state, elapsed: elapsed())
+        view.show(state: state, elapsed: elapsed(), processing: processingDetail(),
+                  canCancel: !cancelling, noteReady: readyFeedback)
         let dock = Dock(panel: panel, view: view, inset: RecorderPuckView.inset, reduceMotion: reduceMotion)
         // carried off, the puck is no longer the menu-like thing a click
         // elsewhere dismisses, and the button it hung from lets go of it
@@ -1141,28 +1255,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let recorder = Process()
+        let session = UUID()
         recorder.executableURL = URL(fileURLWithPath: vtn)
         recorder.arguments = recordArguments()
         recorder.environment = recorderEnvironment()
         let errors = Pipe()
         recorder.standardError = errors
-        errors.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            DispatchQueue.main.async { self.heard(data) }
-        }
         recorder.terminationHandler = { finished in
             let code = finished.terminationStatus
-            DispatchQueue.main.async { self.ended(code) }
-        }
-        do {
-            try recorder.run()
-        } catch {
-            warn("vtn could not be started", error.localizedDescription)
-            return
+            DispatchQueue.main.async { self.processEnded(code, from: session) }
         }
         self.recorder = recorder
         self.errors = errors
+        activeSession = session
+        events = RecorderEventDecoder()
+        processingStartedAt = nil
+        processingStage = "Preparing recording"
+        cancelling = false
+        cancellationRequested = false
+        cancellationPGID = nil
+        sentCancellation = false
+        readyFeedback = false
+        readyFeedbackOver?.invalidate()
+        readyFeedbackOver = nil
+        terminalEvent = nil
+        pendingExitCode = nil
+        reachedStderrEOF = false
+        do {
+            try recorder.run()
+        } catch {
+            self.recorder = nil
+            self.errors = nil
+            activeSession = nil
+            warn("vtn could not be started", error.localizedDescription)
+            return
+        }
+        stderrQueue.async { [weak self, errors] in
+            while true {
+                let data = errors.fileHandleForReading.availableData
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if data.isEmpty { self.finishedReading(from: session) }
+                    else { self.heard(data, from: session) }
+                }
+                if data.isEmpty { return }
+            }
+        }
         state = .starting
         show()
     }
@@ -1176,7 +1314,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// bars for a terminal, sees a pipe here and would draw nothing at all, and
     /// the numbers it prints instead are what the panel's waveforms are made of.
     private func recordArguments() -> [String] {
-        var arguments = ["record", "--project", chosenProject, "--levels"]
+        var arguments = ["record", "--project", chosenProject, "--levels", "--events"]
         if let output = chosenOutput {
             arguments += ["--output-device", output.uid]
         }
@@ -1196,9 +1334,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // the two tracks and then spends minutes merging and transcribing them,
         // which is why stopping the tape is not the end of the session
         recorder.interrupt()
-        stopTicking()
-        state = .processing
+        beginProcessing()
         show()
+    }
+
+    private func beginProcessing() {
+        guard state != .processing else { return }
+        stopTicking()
+        processingStartedAt = Date()
+        processingStage = "Preparing recording"
+        cancelling = false
+        state = .processing
+        startTicking()
+    }
+
+    /// Cancellation is queued until the recorder has finished closing capture
+    /// and explicitly identifies its isolated process group. This keeps Stop
+    /// recording and Cancel processing distinct, and never signals a group
+    /// whose children have not yet been brought under the recorder's cleanup.
+    @objc private func cancelProcessing() {
+        guard state == .processing, !cancelling, let recorder, recorder.isRunning else { return }
+        cancelling = true
+        cancellationRequested = true
+        sendCancellationIfReady()
+        show()
+    }
+
+    private func sendCancellationIfReady() {
+        guard cancellationRequested, !sentCancellation, let pgid = cancellationPGID,
+              let recorder, recorder.isRunning, recorder.processIdentifier == pgid
+        else { return }
+        guard kill(-pgid, SIGINT) == 0 else {
+            cancelling = false
+            warn("Processing could not be cancelled", "The recorder did not accept its cancellation request.")
+            show()
+            return
+        }
+        sentCancellation = true
+    }
+
+    /// Completion stays prominent for one short visit to the menu, then the
+    /// memo remains available as the latest note without behaving like a new
+    /// alert forever.
+    private func showReadyFeedback() {
+        readyFeedbackOver?.invalidate()
+        let timer = Timer(timeInterval: 8, repeats: false) { [weak self] _ in
+            self?.readyFeedback = false
+            self?.readyFeedbackOver = nil
+            self?.show()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        readyFeedbackOver = timer
+    }
+
+    /// Exporting can take long enough to wake an idle store, so this action
+    /// starts its short-lived command off the main thread and opens only the
+    /// stable path it prints after the person explicitly chose Open Note.
+    @objc private func openLatestNote() {
+        guard !previewing else { return }
+        guard let memoID = latestMemoID, let vtn = vtnCommand() else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let printed = self.output(of: vtn, ["notes", "\(memoID)", "--export"]),
+                  let path = printed.split(separator: "\n").last, !path.isEmpty
+            else {
+                DispatchQueue.main.async {
+                    self.warn("Note could not be opened", "The saved note could not be exported.")
+                }
+                return
+            }
+            let note = URL(fileURLWithPath: String(path))
+            DispatchQueue.main.async { NSWorkspace.shared.open(note) }
+        }
     }
 
     @objc private func quit() {
@@ -1210,11 +1416,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// which is kept whole in the log and read for the one that matters here —
     /// printed only once both audio streams are live, so it is what the red dot
     /// waits for.
-    private func heard(_ data: Data) {
-        unread += String(decoding: data, as: UTF8.self)
-        while let newline = unread.firstIndex(of: "\n") {
-            let line = String(unread[..<newline])
-            unread = String(unread[unread.index(after: newline)...])
+    private func heard(_ data: Data, from session: UUID) {
+        guard activeSession == session else { return }
+        for received in events.receive(data) {
+            let line = received.line
             if let reading = levels(in: line) {
                 // ten of these a second, and none of them logged: an hour of
                 // meeting would be thirty-six thousand lines of numbers nobody
@@ -1228,12 +1433,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 continue
             }
             write(line)
+            if let event = received.event {
+                apply(event)
+                continue
+            }
             if state == .starting, line.hasPrefix("recording —") {
                 startedAt = Date()
                 state = .recording
                 startTicking()
                 show()
             }
+        }
+    }
+
+    /// Structured events change only the UI state they describe. They are
+    /// deliberately not inferred from human stderr, which may be reworded
+    /// without making a finished transcript look like a finished note.
+    private func apply(_ event: RecorderEvent) {
+        switch event {
+        case let .stage(stage):
+            beginProcessing()
+            guard state == .processing else { return }
+            processingStage = friendlyStage(stage)
+            show()
+        case let .ready(memoID):
+            latestMemoID = memoID
+            readyFeedback = true
+        case .transcriptReady:
+            // A transcript is valuable work, but it is not the note promised
+            // by the completion affordance.
+            terminalEvent = event
+            break
+        case let .cancellable(pgid):
+            beginProcessing()
+            if let pgid = Int32(exactly: pgid) {
+                cancellationPGID = pgid
+                sendCancellationIfReady()
+            }
+        case .cancelled:
+            terminalEvent = event
+            break
+        case .failed:
+            terminalEvent = event
+            break
+        }
+    }
+
+    private func friendlyStage(_ stage: String) -> String {
+        switch stage {
+        case "finalizing", "merging", "preparing audio": return "Preparing audio"
+        case "transcribing": return "Transcribing"
+        case "diarizing", "identifying speakers": return "Identifying speakers"
+        case "refining": return "Refining transcript"
+        case "extracting", "writing_notes", "writing notes": return "Writing note"
+        default: return "Processing"
         }
     }
 
@@ -1257,24 +1510,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// finished with the notes, or fallen over partway through a meeting. Either
     /// way this app is free to start another one, and the person who is not
     /// looking at the menu bar is told which of the two it was.
-    private func ended(_ code: Int32) {
-        if !unread.isEmpty {
-            write(unread)
-            unread = ""
+    private func processEnded(_ code: Int32, from session: UUID) {
+        guard activeSession == session else { return }
+        pendingExitCode = code
+        finishAfterStderrEOF(from: session)
+    }
+
+    private func finishedReading(from session: UUID) {
+        guard activeSession == session else { return }
+        reachedStderrEOF = true
+        finishAfterStderrEOF(from: session)
+    }
+
+    /// The serial reader sends each chunk before its EOF marker. Process exit
+    /// may arrive first, but the terminal UI waits for both markers so it never
+    /// loses the final event to a callback race.
+    private func finishAfterStderrEOF(from session: UUID) {
+        guard activeSession == session, reachedStderrEOF, let code = pendingExitCode else { return }
+        if let received = events.finish() {
+            write(received.line)
+            if let event = received.event { apply(event) }
         }
-        errors?.fileHandleForReading.readabilityHandler = nil
         errors = nil
         recorder = nil
+        activeSession = nil
         startedAt = nil
+        processingStartedAt = nil
         stopTicking()
+        let didReady = code == 0 && terminalEvent == nil && readyFeedback && latestMemoID != nil
+        let didTranscript: Bool
+        if case .transcriptReady = terminalEvent { didTranscript = code == 0 } else { didTranscript = false }
+        if !didReady { readyFeedback = false }
         state = .idle
         show()
         refresh()
-        if code == 0 {
-            notify("Memo processed", "The meeting is transcribed and its notes are written.")
+        if didReady {
+            showReadyFeedback()
+            notify("Note ready", "Choose Open Note from the recorder menu.")
+        } else if didTranscript {
+            notify("Transcript ready", "The recording was transcribed; notes were not requested.")
+        } else if code == 130 || cancelling || wasCancelled {
+            notify("Processing cancelled", "Your recording and completed work were kept.")
         } else {
-            notify("Recording failed", "vtn exited with code \(code) — see \(logURL.path)")
+            if case let .failed(kind, _, message) = terminalEvent {
+                notify(kind == "notes" ? "Note failed" : "Recording failed",
+                       message ?? "vtn could not finish — see \(logURL.path)")
+            } else {
+                notify("Recording failed", "vtn exited with code \(code) — see \(logURL.path)")
+            }
         }
+        cancelling = false
+    }
+
+    private var wasCancelled: Bool {
+        if case .cancelled = terminalEvent { return true }
+        return false
     }
 
     /// The vtn to run. The places an install puts it come first, in that order;
@@ -1305,6 +1595,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func recorderEnvironment() -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         environment["PATH"] = searchPath()
+        // The recorder owns a private process group only for this opt-in UI
+        // job. Its cancellation handler can then account for every worker it
+        // started without ever signalling the Finder host or the user's shell.
+        environment["VTN_JOB_PROCESS_GROUP"] = "1"
         return environment
     }
 
@@ -1325,6 +1619,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case microphoneDead
         case bothSilent
         case processing
+        case identifyingSpeakers
+        case cancelling
+        case ready
 
         var title: String {
             switch self {
@@ -1336,6 +1633,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .microphoneDead: return "Recording — microphone dead"
             case .bothSilent: return "Recording — both silent"
             case .processing: return "Processing"
+            case .identifyingSpeakers: return "Processing — identifying speakers"
+            case .cancelling: return "Cancelling processing"
+            case .ready: return "Note ready"
             }
         }
 
@@ -1350,6 +1650,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .starting: return .starting
             case .voices, .microphoneDead, .bothSilent: return .recording
             case .processing: return .processing
+            case .identifyingSpeakers: return .processing
+            case .cancelling: return .processing
+            case .ready: return .idle
             }
         }
 
@@ -1362,12 +1665,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .voices: return (.talking(seed: 7), .talking(seed: 31))
             case .microphoneDead: return (.talking(seed: 7), .quiet(seed: 5))
             case .bothSilent: return (.quiet(seed: 11), .quiet(seed: 5))
-            case .idle, .puck, .puckTucked, .starting, .processing: return nil
+            case .idle, .puck, .puckTucked, .starting, .processing, .identifyingSpeakers, .cancelling, .ready: return nil
             }
         }
 
         var isPuck: Bool {
-            self == .puck || self == .puckTucked
+            self == .puck || self == .puckTucked || self == .processing || self == .identifyingSpeakers || self == .cancelling
         }
 
         /// Where the scenario's puck is put, on the main screen: tucked into
@@ -1395,6 +1698,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 scenario.title, scenario == previewScenario, #selector(choosePreview), scenario
             ))
         }
+        if previewScenario == .ready {
+            menu.addItem(.separator())
+            menu.addItem(note("Note ready"))
+            menu.addItem(action("Open Note", #selector(openLatestNote)))
+        }
         menu.addItem(.separator())
         let rolling = previewScenario.state == .recording
         for item in [
@@ -1415,6 +1723,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// at is the app rather than an arrangement of it.
     private func showPreview(_ scenario: Scenario) {
         previewScenario = scenario
+        processingStartedAt = scenario.state == .processing ? Date().addingTimeInterval(-83) : nil
+        processingStage = scenario == .identifyingSpeakers ? "Identifying speakers"
+            : scenario == .processing || scenario == .cancelling ? "Transcribing" : "Preparing recording"
+        cancelling = scenario == .cancelling
+        latestMemoID = scenario == .ready ? 42 : nil
+        readyFeedback = scenario == .ready
+        readyFeedbackOver?.invalidate()
+        readyFeedbackOver = nil
         // whatever the last scenario left running is stopped first, and by the
         // same two calls the end of a real recording makes: a second clock
         // ticking for a tape that has been swapped out would count from the
@@ -1427,7 +1743,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             show()
             // the puck by the door it is opened from; it stays up through the
             // scenarios after this one, showing each, the way a real one would
-            if scenario.isPuck || scenario == .processing {
+            if scenario.isPuck {
                 openPuck(remembering: false, place: scenario.puckPlace)
             }
             return
@@ -2985,6 +3301,8 @@ final class RecorderPuckView: NSView, Dockable {
     var onHover: ((Bool) -> Void)?
     var onRecord: (() -> Void)?
     var onStop: (() -> Void)?
+    var onCancel: (() -> Void)?
+    var onOpen: (() -> Void)?
     var onProject: ((String) -> Void)?
     var onInput: ((AudioDevice?) -> Void)?
     var onOutput: ((AudioDevice?) -> Void)?
@@ -3000,8 +3318,10 @@ final class RecorderPuckView: NSView, Dockable {
     private var chosenOutput: AudioDevice?
 
     private var gripping = false
+    private var gripStartedAt: NSPoint?
     private var pointer: NSTrackingArea?
     private var state = RecorderState.idle
+    private var noteReady = false
     private var edgeMorph: (edge: Dock.Edge, amount: CGFloat, boundary: CGFloat)?
 
     init(reduceMotion: Bool) {
@@ -3112,6 +3432,7 @@ final class RecorderPuckView: NSView, Dockable {
             control.alphaValue = 1
             control.isHidden = false
         }
+        updateTrackingAreas()
     }
 
     /// A tucked panel intentionally extends beyond its screen so its sliver
@@ -3129,13 +3450,22 @@ final class RecorderPuckView: NSView, Dockable {
         visibleClip.path = CGPath(rect: localRect, transform: nil)
         layer.mask = visibleClip
         CATransaction.commit()
+        updateTrackingAreas()
     }
 
     /// A clipped-off part of the panel cannot be seen, so it must not consume
     /// clicks intended for the menu bar, Dock, or another display either.
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard clippedVisibleRect?.contains(point) ?? true else { return nil }
+        guard body.path?.contains(point, using: .winding, transform: .identity) ?? false else { return nil }
         return super.hitTest(point)
+    }
+
+    func isVisibleHit(at screenPoint: NSPoint) -> Bool {
+        guard let window else { return false }
+        let point = convert(window.convertPoint(fromScreen: screenPoint), from: nil)
+        return (clippedVisibleRect?.contains(point) ?? true)
+            && (body.path?.contains(point, using: .winding, transform: .identity) ?? false)
     }
 
     /// Eight corresponding cubic pieces turn a circle into a smooth-union
@@ -3192,7 +3522,7 @@ final class RecorderPuckView: NSView, Dockable {
         // the words above the button rather than under it: the lower half of
         // the disc belongs to the three choosers, and the state is glanced at
         // where a clock is — up
-        caption.frame = NSRect(x: centre.x - 75, y: centre.y + side / 2 + 7, width: 150, height: 14)
+        caption.frame = NSRect(x: centre.x - 100, y: centre.y + side / 2 + 3, width: 200, height: 28)
         caption.alignment = .center
         addSubview(caption)
 
@@ -3226,34 +3556,50 @@ final class RecorderPuckView: NSView, Dockable {
     /// shows that, in a colour that is not the rim's recording red, until
     /// sound comes back. The rim says the same thing, because the rim is all a
     /// puck tucked into an edge has left to say it with.
-    func show(state: RecorderState, elapsed: String, trouble: String? = nil) {
+    func show(state: RecorderState, elapsed: String, trouble: String? = nil,
+              processing: String = "Processing …", canCancel: Bool = false, noteReady: Bool = false) {
         self.state = state
+        self.noteReady = noteReady
         refreshMotion()
         let idle = state == .idle
-        record.rolling = state == .recording
-        record.isEnabled = idle || state == .recording
+        record.rolling = state == .recording || (state == .processing && canCancel)
+        record.isEnabled = noteReady || idle || state == .recording || (state == .processing && canCancel)
         for button in [inputButton, projectButton, outputButton] {
             button.isEnabled = idle
         }
-        switch state {
+        if noteReady {
+            caption.stringValue = "Open Note"
+            caption.maximumNumberOfLines = 1
+            caption.lineBreakMode = .byTruncatingTail
+            caption.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+            record.setAccessibilityLabel("Open note")
+        } else { switch state {
         case .idle:
             caption.stringValue = "Record"
+            caption.maximumNumberOfLines = 1
+            caption.lineBreakMode = .byTruncatingTail
             caption.font = NSFont.systemFont(ofSize: 11)
             record.setAccessibilityLabel("Start recording")
         case .starting:
             caption.stringValue = "Starting …"
+            caption.maximumNumberOfLines = 1
+            caption.lineBreakMode = .byTruncatingTail
             caption.font = NSFont.systemFont(ofSize: 11)
             record.setAccessibilityLabel("Starting")
         case .recording:
             caption.stringValue = trouble ?? elapsed
+            caption.maximumNumberOfLines = 1
+            caption.lineBreakMode = .byTruncatingTail
             caption.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
             record.setAccessibilityLabel(trouble.map { "Stop recording — \($0)" }
                 ?? "Stop recording, \(elapsed) so far")
         case .processing:
-            caption.stringValue = "Processing …"
+            caption.stringValue = canCancel ? "Cancel\n\(processing)" : processing
+            caption.maximumNumberOfLines = canCancel ? 2 : 1
+            caption.lineBreakMode = canCancel ? .byWordWrapping : .byTruncatingTail
             caption.font = NSFont.systemFont(ofSize: 11)
-            record.setAccessibilityLabel("Processing")
-        }
+            record.setAccessibilityLabel(canCancel ? "Cancel processing — \(processing)" : processing)
+        } }
         let troubled = state == .recording && trouble != nil
         caption.textColor = troubled ? RecorderPuckView.warning : .secondaryLabelColor
         // the rim goes red for the length of the tape, and amber for as long
@@ -3288,10 +3634,12 @@ final class RecorderPuckView: NSView, Dockable {
     // --- what is done to it -----------------------------------------------------------
 
     @objc private func pressed() {
+        if noteReady { onOpen?(); return }
         switch state {
         case .idle: onRecord?()
         case .recording: onStop?()
-        case .starting, .processing: break
+        case .processing: onCancel?()
+        case .starting: break
         }
     }
 
@@ -3369,34 +3717,50 @@ final class RecorderPuckView: NSView, Dockable {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     /// A press that reached this view landed on no button — they take their
-    /// own — so it is a hand on the window.
+    /// own — so it is a hand on the window.  Do not turn that press into a
+    /// grip yet: a tucked tab needs a dependable click-to-reveal action, while
+    /// moving it remains an intentional drag once the hand has travelled.
     override func mouseDown(with event: NSEvent) {
         gripping = true
-        onGrip?(.began(NSEvent.mouseLocation))
+        gripStartedAt = event.locationInWindow
+        onGrip?(.pressed)
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard gripping else { return }
+        if let start = gripStartedAt,
+           hypot(event.locationInWindow.x - start.x, event.locationInWindow.y - start.y) >= 3 {
+            gripStartedAt = nil
+            onGrip?(.began(NSEvent.mouseLocation))
+        }
+        guard gripStartedAt == nil else { return }
         onGrip?(.moved(NSEvent.mouseLocation))
     }
 
     override func mouseUp(with event: NSEvent) {
         guard gripping else { return }
         gripping = false
-        onGrip?(.ended(NSEvent.mouseLocation))
+        if gripStartedAt != nil {
+            gripStartedAt = nil
+            onGrip?(.clicked)
+        } else {
+            onGrip?(.ended(NSEvent.mouseLocation))
+        }
     }
 
     /// `.activeAlways`, because this window never becomes key and the app it
     /// belongs to is never the active one: any narrower scope would report no
-    /// crossing at all. The whole view is the area — the margin round the disc
-    /// is the slack that keeps a pointer just off the rim from counting as gone.
+    /// crossing at all. Only the visible body is tracked. The transparent
+    /// shadow margin, and the part clipped behind a display edge, are neither
+    /// a tab someone can deliberately hover nor a valid way to open it.
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let pointer {
             removeTrackingArea(pointer)
         }
+        let visible = (clippedVisibleRect ?? discRect).intersection(discRect)
         let area = NSTrackingArea(
-            rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            rect: visible, options: [.mouseEnteredAndExited, .activeAlways],
             owner: self, userInfo: nil
         )
         addTrackingArea(area)
@@ -3621,6 +3985,7 @@ final class ChoiceButton: NSButton {
 protocol Dockable: NSView {
     var onGrip: ((Dock.Grip) -> Void)? { get set }
     var onHover: ((Bool) -> Void)? { get set }
+    func isVisibleHit(at screenPoint: NSPoint) -> Bool
 }
 /// One physical spring for the window and arrival layer. The upstream 7.5/.5
 /// takes seconds to stop; 34/.7 leaves a gentler contact merge while retaining
@@ -3859,9 +4224,11 @@ final class Dock {
 
     /// A press on the view's ground, in screen points, from press to release.
     enum Grip {
+        case pressed
         case began(NSPoint)
         case moved(NSPoint)
         case ended(NSPoint)
+        case clicked
     }
 
     enum State {
@@ -4058,6 +4425,23 @@ final class Dock {
 
     private func gripped(_ grip: Grip) {
         switch grip {
+        case .pressed:
+            // Freeze a spring as soon as the hand touches it, even if the
+            // eventual gesture is a click. Starting that freeze at the drag
+            // threshold would make a re-grab visibly jump under the pointer.
+            motion.interrupt()
+            pending?.invalidate()
+        case .clicked:
+            // A complete tab is intentionally a button as well as a drag
+            // handle.  Someone who found its visible rim is asking to use the
+            // recorder, while moving it remains the distinct press-and-drag
+            // gesture below.
+            if case let .tucked(edge) = state {
+                pending?.invalidate()
+                peek(edge)
+            } else if case let .peeking(edge) = state {
+                peek(edge)
+            }
         case let .began(point):
             motion.interrupt()
             preservedGrabEdge = releaseMorph == nil ? morphEdge : nil
@@ -4247,7 +4631,7 @@ final class Dock {
     }
 
     private var pointerIsOnTheWindow: Bool {
-        panel.frame.contains(NSEvent.mouseLocation)
+        view.isVisibleHit(at: NSEvent.mouseLocation)
     }
 
     // --- the two positions at an edge ---------------------------------------------------

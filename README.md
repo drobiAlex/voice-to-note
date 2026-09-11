@@ -70,6 +70,14 @@ Running `vtn` with no command opens the TUI too, once setup has run.
 `vtn --help` lists the full set (diarize, refine, devices, projects, speaker
 naming, templates, config, …).
 
+On a Mac, `vtn menubar --preview` checks the recorder without recording or
+opening a note: choose Processing to see its elapsed stage, Cancelling
+processing to inspect the queued cancellation state, and Note ready to inspect
+the direct Open Note affordance. During a real recording, Stop changes to a
+named processing stage and clock; Cancel keeps the captured audio and any
+completed work. A puck tucked into an outer screen edge opens from a deliberate
+tab click or a short dwell, while a press-and-drag still moves it.
+
 ## Roadmap
 
 Shipped:

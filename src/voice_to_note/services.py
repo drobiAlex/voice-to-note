@@ -1855,6 +1855,22 @@ def notes_markdown(repo: Repository, memo_id: int) -> str:
     return render_notes_markdown(extraction, _done_tasks(repo, memo_id))
 
 
+def export_notes(repo: Repository, memo_id: int) -> Path:
+    """Writes the reader-facing note to a stable file under VTN_HOME.
+
+    The native recorder needs a real artifact it can open after processing;
+    keeping this export inside the app's data directory avoids a temporary file
+    disappearing before the user clicks it and makes repeated opens deterministic.
+    """
+    require_memo(repo, memo_id)
+    if not repo.notes_md(memo_id) and repo.extraction(memo_id) is None:
+        raise NotFound(f"no notes for memo {memo_id} — run: vtn extract {memo_id}")
+    path = config.DATA_DIR / "notes" / f"{memo_id}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(notes_markdown(repo, memo_id) + "\n")
+    return path
+
+
 def notes_json(repo: Repository, memo_id: int) -> str:
     """The notes as a script reads them."""
     return json.dumps(_extraction(repo, memo_id).data, ensure_ascii=False)
