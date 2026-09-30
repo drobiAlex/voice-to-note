@@ -3288,6 +3288,7 @@ final class RecorderPuckView: NSView, Dockable {
     private let body = CAShapeLayer()
     private let workingRim = CAShapeLayer()
     private let visibleClip = CAShapeLayer()
+    private let controlMasks = (0..<5).map { _ in CAShapeLayer() }
     private var clippedVisibleRect: NSRect?
     private var workingRimLength: CGFloat?
     private let record = RecordButton()
@@ -3350,6 +3351,14 @@ final class RecorderPuckView: NSView, Dockable {
         )
     }
 
+    /// The controls are AppKit subviews rather than children of `body`, so a
+    /// changing body path must be applied to their layers separately.  The
+    /// window's own display mask remains responsible for clipping at a screen
+    /// boundary; together the two masks keep controls in the visible contour.
+    private var morphControls: [NSView] {
+        [record, caption, inputButton, projectButton, outputButton]
+    }
+
     /// The disc and its shadow, one layer. The shadow's shape is given rather
     /// than read off the pixels — the window casts none, and a shape that
     /// never changes is a shape worked out once.
@@ -3407,7 +3416,8 @@ final class RecorderPuckView: NSView, Dockable {
         CATransaction.commit()
         tuneWorkingRim(PuckEdgeContour.approximateLength(of: segments))
         let contentAlpha = max(0, 1 - amount * 1.25)
-        for control in [record, caption, inputButton, projectButton, outputButton] {
+        clipControls(to: path)
+        for control in morphControls {
             control.alphaValue = contentAlpha
             control.isHidden = amount > 0.8
         }
@@ -3428,11 +3438,31 @@ final class RecorderPuckView: NSView, Dockable {
         workingRim.path = round
         CATransaction.commit()
         tuneWorkingRim(PuckEdgeContour.approximateLength(amount: 0, boundary: 0))
-        for control in [record, caption, inputButton, projectButton, outputButton] {
+        clipControls(to: nil)
+        for control in morphControls {
             control.alphaValue = 1
             control.isHidden = false
         }
         updateTrackingAreas()
+    }
+
+    /// `CALayer.mask` is evaluated in a layer's local coordinates.  Reusing
+    /// the exact body path means the fading controls cannot spill past a
+    /// partial held or release contour, while the body, its shadow and rim
+    /// retain their own unmasked drawing.
+    private func clipControls(to bodyPath: CGPath?) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for (control, mask) in zip(morphControls, controlMasks) {
+            guard let bodyPath else {
+                control.layer?.mask = nil
+                continue
+            }
+            mask.frame = control.bounds
+            mask.path = PuckControlMask.path(for: bodyPath, in: control.frame)
+            control.layer?.mask = mask
+        }
+        CATransaction.commit()
     }
 
     /// A tucked panel intentionally extends beyond its screen so its sliver
@@ -3540,6 +3570,7 @@ final class RecorderPuckView: NSView, Dockable {
             button.action = #selector(choose(_:))
             addSubview(button)
         }
+        for control in morphControls { control.wantsLayer = true }
     }
 
     // --- what it says ---------------------------------------------------------------
@@ -3848,6 +3879,17 @@ final class RecorderPuckView: NSView, Dockable {
         field.maximumNumberOfLines = 1
         field.lineBreakMode = .byTruncatingTail
         return field
+    }
+}
+
+/// A body path belongs to the puck's coordinate space; a control layer needs
+/// that same path expressed in its own local bounds before it can be masked.
+struct PuckControlMask {
+    static func path(for bodyPath: CGPath, in controlFrame: NSRect) -> CGPath {
+        var translation = CGAffineTransform(
+            translationX: -controlFrame.minX, y: -controlFrame.minY
+        )
+        return bodyPath.copy(using: &translation) ?? bodyPath
     }
 }
 
