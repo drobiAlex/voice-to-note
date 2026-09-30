@@ -6,6 +6,7 @@
 // whether this app is still watching or not.
 
 import AppKit
+import Darwin
 import Foundation
 import UserNotifications
 
@@ -17,6 +18,68 @@ enum RecorderState {
     case starting
     case recording
     case processing
+}
+
+/// The recorder's machine-readable progress lines. They travel on stderr with
+/// human status, so the decoder keeps a partial line until the pipe supplies
+/// its newline and leaves every ordinary line for the log.
+enum RecorderEvent: Equatable {
+    case stage(String)
+    case ready(Int)
+    case transcriptReady(Int)
+    case cancellable(Int)
+    case cancelled(Int?)
+    case failed(kind: String?, memoID: Int?, message: String?)
+}
+
+struct RecorderEventDecoder {
+    static let prefix = "vtn-event "
+
+    private(set) var remainder = Data()
+
+    mutating func receive(_ data: Data) -> [(line: String, event: RecorderEvent?)] {
+        remainder.append(data)
+        var received: [(line: String, event: RecorderEvent?)] = []
+        while let newline = remainder.firstIndex(of: 0x0A) {
+            let line = String(decoding: remainder[..<newline], as: UTF8.self)
+            remainder.removeSubrange(...newline)
+            received.append((line, Self.event(in: line)))
+        }
+        return received
+    }
+
+    mutating func finish() -> (line: String, event: RecorderEvent?)? {
+        guard !remainder.isEmpty else { return nil }
+        let line = String(decoding: remainder, as: UTF8.self)
+        remainder = Data()
+        return (line, Self.event(in: line))
+    }
+
+    static func event(in line: String) -> RecorderEvent? {
+        guard line.hasPrefix(prefix),
+              let data = line.dropFirst(prefix.count).data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let name = object["event"] as? String
+        else { return nil }
+        let memoID = object["memo_id"] as? Int
+        switch name {
+        case "stage":
+            return (object["stage"] as? String).map(RecorderEvent.stage)
+        case "ready":
+            return memoID.map(RecorderEvent.ready)
+        case "transcript_ready":
+            return memoID.map(RecorderEvent.transcriptReady)
+        case "cancellable":
+            return (object["pgid"] as? Int).flatMap { $0 > 0 ? RecorderEvent.cancellable($0) : nil }
+        case "cancelled":
+            return .cancelled(memoID)
+        case "failed":
+            return .failed(kind: object["kind"] as? String, memoID: memoID,
+                           message: object["message"] as? String)
+        default:
+            return nil
+        }
+    }
 }
 
 /// A device the Mac can record, as the capture helper lists it. The name is
@@ -88,7 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // the same reason the shimmer does. Emptying them on every state
             // that is not recording is also what makes each recording start
             // from silence rather than from whatever the last one ended on
-            puckView?.show(state: state, elapsed: elapsed())
+            puckView?.show(state: state, elapsed: elapsed(), trouble: troubleNow())
             if state == .recording {
                 // a preview keeps its menu through every state, where a
                 // recording gives it up for the panel: that menu is the only
@@ -107,8 +170,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     private var recorder: Process?
     private var errors: Pipe?
-    private var unread = ""
+    private let stderrQueue = DispatchQueue(label: "voice-to-note.menubar.stderr")
+    private var events = RecorderEventDecoder()
+    private var activeSession: UUID?
     private var startedAt: Date?
+    private var processingStartedAt: Date?
+    private var processingStage = "Preparing recording"
+    private var cancelling = false
+    private var cancellationRequested = false
+    private var cancellationPGID: Int32?
+    private var sentCancellation = false
+    private var latestMemoID: Int?
+    private var readyFeedback = false
+    private var readyFeedbackOver: Timer?
+    private var terminalEvent: RecorderEvent?
+    private var pendingExitCode: Int32?
+    private var reachedStderrEOF = false
     private var ticker: Timer?
     private var shimmer: Timer?
     private var rehearsal: Timer?
@@ -175,6 +252,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var clicksElsewhere: Any?
     private var clicksHere: Any?
 
+    /// Whether the status item's menu is on screen. A click that lands in it
+    /// is somebody using this app, not somebody clicking elsewhere — but the
+    /// menu is its own window and no list of ours will ever contain it, so the
+    /// monitors are told to stand down for as long as it is open.
+    private var menuIsOpen = false
+
+    func menuWillOpen(_ menu: NSMenu) {
+        menuIsOpen = true
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        menuIsOpen = false
+    }
+
     /// What the button says to a screen reader and to a pointer resting on it,
     /// composed once a second because that is as often as any of it changes.
     private var spoken = ""
@@ -229,19 +320,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch state {
         case .idle:
             button.image = Mark.idle
-            button.attributedTitle = NSAttributedString(string: "")
+            button.attributedTitle = readyFeedback ? label("Note ready") : NSAttributedString(string: "")
+            let ready = readyFeedback ? "Note ready — open the recorder menu to open it" : nil
+            button.toolTip = ready
+            button.setAccessibilityLabel(ready)
         case .starting:
             button.image = Mark.starting
             button.attributedTitle = label("…")
+            button.toolTip = "Starting recording"
+            button.setAccessibilityLabel("Starting recording")
         case .recording:
             speak()
             button.image = Mark.recording
             button.attributedTitle = label(elapsed())
         case .processing:
             button.image = shimmerFrames[shimmerFrame]
-            button.attributedTitle = NSAttributedString(string: "")
+            button.attributedTitle = label(processingElapsed())
+            button.toolTip = processingDetail()
+            button.setAccessibilityLabel(processingDetail())
         }
-        puckView?.show(state: state, elapsed: elapsed())
+        puckView?.show(state: state, elapsed: elapsed(), trouble: troubleNow(), processing: processingDetail(),
+                       canCancel: !cancelling, noteReady: readyFeedback)
+    }
+
+    /// What the puck's one line should warn about right now: a side of a
+    /// rolling tape silent past the threshold, and nothing in any other state
+    /// — the histories outlive a recording only until the next one empties
+    /// them, and a warning about a tape that has stopped would be about nobody.
+    private func troubleNow() -> String? {
+        guard state == .recording else { return nil }
+        return Meters.trouble(system: systemLevels, microphone: microphoneLevels)
     }
 
     /// A fresh reading from each side. These are the only clock the waveforms
@@ -313,6 +421,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return String(format: "%02d:%02d", minutes, seconds % 60)
     }
 
+    /// Processing has a clock of its own: the recording clock stops when the
+    /// microphone stops, while this one says how long the work after it has
+    /// been running without inventing a percentage the pipeline cannot know.
+    private func processingElapsed() -> String {
+        let seconds = Int(Date().timeIntervalSince(processingStartedAt ?? Date()))
+        return String(format: "%02d:%02d", seconds / 60, seconds % 60)
+    }
+
+    private func processingDetail() -> String {
+        cancelling ? "Cancelling …" : "\(processingStage) · \(processingElapsed())"
+    }
+
     private func startTicking() {
         let ticker = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.show() }
         // a tenth of a second's slack, which is what lets the system fire this
@@ -381,6 +501,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         switch state {
         case .idle:
+            if readyFeedback, latestMemoID != nil {
+                menu.addItem(note("Note ready"))
+                menu.addItem(action("Open Note", #selector(openLatestNote)))
+                menu.addItem(.separator())
+            } else if latestMemoID != nil {
+                menu.addItem(action("Open Latest Note", #selector(openLatestNote)))
+                menu.addItem(.separator())
+            }
             menu.addItem(action("Start Recording", #selector(startRecording), key: "r"))
             menu.addItem(.separator())
             menu.addItem(.sectionHeader(title: "Next Recording"))
@@ -403,7 +531,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(action("Stop Recording", #selector(stopRecording), key: "r"))
             menu.addItem(note(state == .recording ? "Recording \(elapsed())" : "Starting …"))
         case .processing:
-            menu.addItem(note("Processing memo …"))
+            menu.addItem(note(processingDetail()))
+            if !cancelling {
+                menu.addItem(action("Cancel Processing", #selector(cancelProcessing)))
+            }
         }
         menu.addItem(.separator())
         // the switch is offered in every state; the puck's own lines only when
@@ -550,7 +681,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.hasShadow = shadow
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        // never dragged by the system, only by us. macOS hands a window the
+        // window server is dragging to its tiler the moment the pointer meets
+        // a screen edge — the screen splits in two and the window is swallowed
+        // — and there is no way to opt a window out of that. What there is, is
+        // this: a window the system was never dragging in the first place.
+        // AppKit blesses the arrangement outright, saying an app may move a
+        // window itself from the mouse events once user dragging is off.
+        panel.isMovable = false
+        panel.isMovableByWindowBackground = false
+        // stationary keeps Mission Control from shuffling it about with the
+        // ordinary windows, and ignoresCycle keeps it out of the app switcher's
+        // ring: this is a control that sits still, not a document window
+        panel.collectionBehavior = [
+            .canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle,
+        ]
         return panel
     }
 
@@ -681,6 +826,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             if self.previewing { self.showPreview(.processing) } else { self.stopRecording() }
         }
+        view.onCancel = { [weak self] in
+            guard let self else { return }
+            if self.previewing { self.showPreview(.cancelling) } else { self.cancelProcessing() }
+        }
+        view.onOpen = { [weak self] in self?.openLatestNote() }
         view.onProject = { [weak self] name in self?.pickProject(name) }
         view.onInput = { [weak self] device in self?.pickInput(device) }
         view.onOutput = { [weak self] device in self?.pickOutput(device) }
@@ -688,7 +838,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.puck = panel
         self.puckView = view
         feedPuck()
-        view.show(state: state, elapsed: elapsed())
+        view.show(state: state, elapsed: elapsed(), processing: processingDetail(),
+                  canCancel: !cancelling, noteReady: readyFeedback)
         let dock = Dock(panel: panel, view: view, inset: RecorderPuckView.inset, reduceMotion: reduceMotion)
         // carried off, the puck is no longer the menu-like thing a click
         // elsewhere dismisses, and the button it hung from lets go of it
@@ -702,10 +853,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         self.puckDock = dock
         if dock.restore(place ?? (remembering ? rememberedPlace : .hanging)) {
+            view.refreshMotion()
             return
         }
         self.place(panel)
         arrive(panel, reduceMotion: reduceMotion) { view.appear() }
+        view.refreshMotion()
         statusItem.button?.highlight(true)
         watchForClicks()
     }
@@ -831,10 +984,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard clicksElsewhere == nil, clicksHere == nil else { return }
         let elsewhere: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
         clicksElsewhere = NSEvent.addGlobalMonitorForEvents(matching: elsewhere) { [weak self] _ in
-            self?.closeFloating()
+            guard let self, !self.menuIsOpen else { return }
+            self.closeFloating()
         }
         clicksHere = NSEvent.addLocalMonitorForEvents(matching: elsewhere) { [weak self] event in
-            guard let self else { return event }
+            guard let self, !self.menuIsOpen else { return event }
             let ours = [self.panel, self.puck, self.statusItem.button?.window]
             if !ours.contains(where: { $0 === event.window }) {
                 self.closeFloating()
@@ -1101,28 +1255,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let recorder = Process()
+        let session = UUID()
         recorder.executableURL = URL(fileURLWithPath: vtn)
         recorder.arguments = recordArguments()
         recorder.environment = recorderEnvironment()
         let errors = Pipe()
         recorder.standardError = errors
-        errors.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            DispatchQueue.main.async { self.heard(data) }
-        }
         recorder.terminationHandler = { finished in
             let code = finished.terminationStatus
-            DispatchQueue.main.async { self.ended(code) }
-        }
-        do {
-            try recorder.run()
-        } catch {
-            warn("vtn could not be started", error.localizedDescription)
-            return
+            DispatchQueue.main.async { self.processEnded(code, from: session) }
         }
         self.recorder = recorder
         self.errors = errors
+        activeSession = session
+        events = RecorderEventDecoder()
+        processingStartedAt = nil
+        processingStage = "Preparing recording"
+        cancelling = false
+        cancellationRequested = false
+        cancellationPGID = nil
+        sentCancellation = false
+        readyFeedback = false
+        readyFeedbackOver?.invalidate()
+        readyFeedbackOver = nil
+        terminalEvent = nil
+        pendingExitCode = nil
+        reachedStderrEOF = false
+        do {
+            try recorder.run()
+        } catch {
+            self.recorder = nil
+            self.errors = nil
+            activeSession = nil
+            warn("vtn could not be started", error.localizedDescription)
+            return
+        }
+        stderrQueue.async { [weak self, errors] in
+            while true {
+                let data = errors.fileHandleForReading.availableData
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if data.isEmpty { self.finishedReading(from: session) }
+                    else { self.heard(data, from: session) }
+                }
+                if data.isEmpty { return }
+            }
+        }
         state = .starting
         show()
     }
@@ -1136,7 +1314,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// bars for a terminal, sees a pipe here and would draw nothing at all, and
     /// the numbers it prints instead are what the panel's waveforms are made of.
     private func recordArguments() -> [String] {
-        var arguments = ["record", "--project", chosenProject, "--levels"]
+        var arguments = ["record", "--project", chosenProject, "--levels", "--events"]
         if let output = chosenOutput {
             arguments += ["--output-device", output.uid]
         }
@@ -1156,9 +1334,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // the two tracks and then spends minutes merging and transcribing them,
         // which is why stopping the tape is not the end of the session
         recorder.interrupt()
-        stopTicking()
-        state = .processing
+        beginProcessing()
         show()
+    }
+
+    private func beginProcessing() {
+        guard state != .processing else { return }
+        stopTicking()
+        processingStartedAt = Date()
+        processingStage = "Preparing recording"
+        cancelling = false
+        state = .processing
+        startTicking()
+    }
+
+    /// Cancellation is queued until the recorder has finished closing capture
+    /// and explicitly identifies its isolated process group. This keeps Stop
+    /// recording and Cancel processing distinct, and never signals a group
+    /// whose children have not yet been brought under the recorder's cleanup.
+    @objc private func cancelProcessing() {
+        guard state == .processing, !cancelling, let recorder, recorder.isRunning else { return }
+        cancelling = true
+        cancellationRequested = true
+        sendCancellationIfReady()
+        show()
+    }
+
+    private func sendCancellationIfReady() {
+        guard cancellationRequested, !sentCancellation, let pgid = cancellationPGID,
+              let recorder, recorder.isRunning, recorder.processIdentifier == pgid
+        else { return }
+        guard kill(-pgid, SIGINT) == 0 else {
+            cancelling = false
+            warn("Processing could not be cancelled", "The recorder did not accept its cancellation request.")
+            show()
+            return
+        }
+        sentCancellation = true
+    }
+
+    /// Completion stays prominent for one short visit to the menu, then the
+    /// memo remains available as the latest note without behaving like a new
+    /// alert forever.
+    private func showReadyFeedback() {
+        readyFeedbackOver?.invalidate()
+        let timer = Timer(timeInterval: 8, repeats: false) { [weak self] _ in
+            self?.readyFeedback = false
+            self?.readyFeedbackOver = nil
+            self?.show()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        readyFeedbackOver = timer
+    }
+
+    /// Exporting can take long enough to wake an idle store, so this action
+    /// starts its short-lived command off the main thread and opens only the
+    /// stable path it prints after the person explicitly chose Open Note.
+    @objc private func openLatestNote() {
+        guard !previewing else { return }
+        guard let memoID = latestMemoID, let vtn = vtnCommand() else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let printed = self.output(of: vtn, ["notes", "\(memoID)", "--export"]),
+                  let path = printed.split(separator: "\n").last, !path.isEmpty
+            else {
+                DispatchQueue.main.async {
+                    self.warn("Note could not be opened", "The saved note could not be exported.")
+                }
+                return
+            }
+            let note = URL(fileURLWithPath: String(path))
+            DispatchQueue.main.async { NSWorkspace.shared.open(note) }
+        }
     }
 
     @objc private func quit() {
@@ -1170,11 +1416,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// which is kept whole in the log and read for the one that matters here —
     /// printed only once both audio streams are live, so it is what the red dot
     /// waits for.
-    private func heard(_ data: Data) {
-        unread += String(decoding: data, as: UTF8.self)
-        while let newline = unread.firstIndex(of: "\n") {
-            let line = String(unread[..<newline])
-            unread = String(unread[unread.index(after: newline)...])
+    private func heard(_ data: Data, from session: UUID) {
+        guard activeSession == session else { return }
+        for received in events.receive(data) {
+            let line = received.line
             if let reading = levels(in: line) {
                 // ten of these a second, and none of them logged: an hour of
                 // meeting would be thirty-six thousand lines of numbers nobody
@@ -1188,12 +1433,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 continue
             }
             write(line)
+            if let event = received.event {
+                apply(event)
+                continue
+            }
             if state == .starting, line.hasPrefix("recording —") {
                 startedAt = Date()
                 state = .recording
                 startTicking()
                 show()
             }
+        }
+    }
+
+    /// Structured events change only the UI state they describe. They are
+    /// deliberately not inferred from human stderr, which may be reworded
+    /// without making a finished transcript look like a finished note.
+    private func apply(_ event: RecorderEvent) {
+        switch event {
+        case let .stage(stage):
+            beginProcessing()
+            guard state == .processing else { return }
+            processingStage = friendlyStage(stage)
+            show()
+        case let .ready(memoID):
+            latestMemoID = memoID
+            readyFeedback = true
+        case .transcriptReady:
+            // A transcript is valuable work, but it is not the note promised
+            // by the completion affordance.
+            terminalEvent = event
+            break
+        case let .cancellable(pgid):
+            beginProcessing()
+            if let pgid = Int32(exactly: pgid) {
+                cancellationPGID = pgid
+                sendCancellationIfReady()
+            }
+        case .cancelled:
+            terminalEvent = event
+            break
+        case .failed:
+            terminalEvent = event
+            break
+        }
+    }
+
+    private func friendlyStage(_ stage: String) -> String {
+        switch stage {
+        case "finalizing", "merging", "preparing audio": return "Preparing audio"
+        case "transcribing": return "Transcribing"
+        case "diarizing", "identifying speakers": return "Identifying speakers"
+        case "refining": return "Refining transcript"
+        case "extracting", "writing_notes", "writing notes": return "Writing note"
+        default: return "Processing"
         }
     }
 
@@ -1217,24 +1510,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// finished with the notes, or fallen over partway through a meeting. Either
     /// way this app is free to start another one, and the person who is not
     /// looking at the menu bar is told which of the two it was.
-    private func ended(_ code: Int32) {
-        if !unread.isEmpty {
-            write(unread)
-            unread = ""
+    private func processEnded(_ code: Int32, from session: UUID) {
+        guard activeSession == session else { return }
+        pendingExitCode = code
+        finishAfterStderrEOF(from: session)
+    }
+
+    private func finishedReading(from session: UUID) {
+        guard activeSession == session else { return }
+        reachedStderrEOF = true
+        finishAfterStderrEOF(from: session)
+    }
+
+    /// The serial reader sends each chunk before its EOF marker. Process exit
+    /// may arrive first, but the terminal UI waits for both markers so it never
+    /// loses the final event to a callback race.
+    private func finishAfterStderrEOF(from session: UUID) {
+        guard activeSession == session, reachedStderrEOF, let code = pendingExitCode else { return }
+        if let received = events.finish() {
+            write(received.line)
+            if let event = received.event { apply(event) }
         }
-        errors?.fileHandleForReading.readabilityHandler = nil
         errors = nil
         recorder = nil
+        activeSession = nil
         startedAt = nil
+        processingStartedAt = nil
         stopTicking()
+        let didReady = code == 0 && terminalEvent == nil && readyFeedback && latestMemoID != nil
+        let didTranscript: Bool
+        if case .transcriptReady = terminalEvent { didTranscript = code == 0 } else { didTranscript = false }
+        if !didReady { readyFeedback = false }
         state = .idle
         show()
         refresh()
-        if code == 0 {
-            notify("Memo processed", "The meeting is transcribed and its notes are written.")
+        if didReady {
+            showReadyFeedback()
+            notify("Note ready", "Choose Open Note from the recorder menu.")
+        } else if didTranscript {
+            notify("Transcript ready", "The recording was transcribed; notes were not requested.")
+        } else if code == 130 || cancelling || wasCancelled {
+            notify("Processing cancelled", "Your recording and completed work were kept.")
         } else {
-            notify("Recording failed", "vtn exited with code \(code) — see \(logURL.path)")
+            if case let .failed(kind, _, message) = terminalEvent {
+                notify(kind == "notes" ? "Note failed" : "Recording failed",
+                       message ?? "vtn could not finish — see \(logURL.path)")
+            } else {
+                notify("Recording failed", "vtn exited with code \(code) — see \(logURL.path)")
+            }
         }
+        cancelling = false
+    }
+
+    private var wasCancelled: Bool {
+        if case .cancelled = terminalEvent { return true }
+        return false
     }
 
     /// The vtn to run. The places an install puts it come first, in that order;
@@ -1265,6 +1595,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func recorderEnvironment() -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         environment["PATH"] = searchPath()
+        // The recorder owns a private process group only for this opt-in UI
+        // job. Its cancellation handler can then account for every worker it
+        // started without ever signalling the Finder host or the user's shell.
+        environment["VTN_JOB_PROCESS_GROUP"] = "1"
         return environment
     }
 
@@ -1285,6 +1619,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case microphoneDead
         case bothSilent
         case processing
+        case identifyingSpeakers
+        case cancelling
+        case ready
 
         var title: String {
             switch self {
@@ -1296,6 +1633,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .microphoneDead: return "Recording — microphone dead"
             case .bothSilent: return "Recording — both silent"
             case .processing: return "Processing"
+            case .identifyingSpeakers: return "Processing — identifying speakers"
+            case .cancelling: return "Cancelling processing"
+            case .ready: return "Note ready"
             }
         }
 
@@ -1310,6 +1650,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .starting: return .starting
             case .voices, .microphoneDead, .bothSilent: return .recording
             case .processing: return .processing
+            case .identifyingSpeakers: return .processing
+            case .cancelling: return .processing
+            case .ready: return .idle
             }
         }
 
@@ -1322,12 +1665,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .voices: return (.talking(seed: 7), .talking(seed: 31))
             case .microphoneDead: return (.talking(seed: 7), .quiet(seed: 5))
             case .bothSilent: return (.quiet(seed: 11), .quiet(seed: 5))
-            case .idle, .puck, .puckTucked, .starting, .processing: return nil
+            case .idle, .puck, .puckTucked, .starting, .processing, .identifyingSpeakers, .cancelling, .ready: return nil
             }
         }
 
         var isPuck: Bool {
-            self == .puck || self == .puckTucked
+            self == .puck || self == .puckTucked || self == .processing || self == .identifyingSpeakers || self == .cancelling
         }
 
         /// Where the scenario's puck is put, on the main screen: tucked into
@@ -1355,13 +1698,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 scenario.title, scenario == previewScenario, #selector(choosePreview), scenario
             ))
         }
+        if previewScenario == .ready {
+            menu.addItem(.separator())
+            menu.addItem(note("Note ready"))
+            menu.addItem(action("Open Note", #selector(openLatestNote)))
+        }
         menu.addItem(.separator())
         let rolling = previewScenario.state == .recording
         for item in [
             action("Show Panel", #selector(togglePanel)),
             action("Replay Arrival", #selector(replayArrival)),
         ] {
-            item.isEnabled = rolling
+            item.isEnabled = rolling || (item.action == #selector(replayArrival) && puckView != nil)
             menu.addItem(item)
         }
         menu.addItem(.separator())
@@ -1375,6 +1723,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// at is the app rather than an arrangement of it.
     private func showPreview(_ scenario: Scenario) {
         previewScenario = scenario
+        processingStartedAt = scenario.state == .processing ? Date().addingTimeInterval(-83) : nil
+        processingStage = scenario == .identifyingSpeakers ? "Identifying speakers"
+            : scenario == .processing || scenario == .cancelling ? "Transcribing" : "Preparing recording"
+        cancelling = scenario == .cancelling
+        latestMemoID = scenario == .ready ? 42 : nil
+        readyFeedback = scenario == .ready
+        readyFeedbackOver?.invalidate()
+        readyFeedbackOver = nil
         // whatever the last scenario left running is stopped first, and by the
         // same two calls the end of a real recording makes: a second clock
         // ticking for a tape that has been swapped out would count from the
@@ -1409,12 +1765,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         showPreview(scenario)
     }
 
-    /// The panel closed and opened again by the path that opens it unasked, so
-    /// that the one thing in this app which happens once and cannot be asked
-    /// for — the island arriving out of the status item — can be watched more
-    /// than once. Closing first is what makes it an arrival: `showBriefly`
-    /// opens nothing over a panel already up, and rightly so.
+    /// Replay the visible puck's spring, or reopen the recording island when
+    /// there is no puck, so both arrival styles can be inspected repeatedly.
     @objc private func replayArrival() {
+        if let puckView { puckView.appear(); return }
         closePanel()
         showBriefly()
     }
@@ -1444,6 +1798,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         stopRehearsing()
         let system = Rehearsal(sides.system)
         let microphone = Rehearsal(sides.microphone)
+        // a scripted silence arrives already old. The scenario exists to show
+        // the state, and a preview that made somebody sit out the ten real
+        // seconds the threshold asks for would be showing them a wait instead;
+        // the histories take the reading's own time for exactly this reason
+        let aged = Date().addingTimeInterval(-15)
+        if case .quiet = sides.system {
+            systemLevels.push(LevelHistory.floor, now: aged)
+        }
+        if case .quiet = sides.microphone {
+            microphoneLevels.push(LevelHistory.floor, now: aged)
+        }
         var step = 0
         let rehearsal = Timer(timeInterval: Rehearsal.interval, repeats: true) { [weak self] _ in
             self?.metered(system.level(at: step), microphone.level(at: step))
@@ -1962,6 +2327,24 @@ enum Meters {
             return "Microphone silent for \(lasting(quietMicrophone))"
         case (.none, .none):
             return "Sound arriving on both sides"
+        }
+    }
+
+    /// The same news at the puck's size, or nothing while there is none: the
+    /// puck has one short line where the island has a footer that always says
+    /// something, so here silence speaks and health stays quiet.
+    static func trouble(
+        system: LevelHistory, microphone: LevelHistory, now: Date = Date()
+    ) -> String? {
+        switch (worthSaying(system, now), worthSaying(microphone, now)) {
+        case let (.some(quietSystem), .some(quietMicrophone)):
+            return "Both sides silent \(lasting(min(quietSystem, quietMicrophone)))"
+        case let (.some(quietSystem), .none):
+            return "System audio silent \(lasting(quietSystem))"
+        case let (.none, .some(quietMicrophone)):
+            return "Microphone silent \(lasting(quietMicrophone))"
+        case (.none, .none):
+            return nil
         }
     }
 
@@ -2692,6 +3075,176 @@ final class RecordingPanelView: NSView {
 
 // MARK: - the recorder puck
 
+/// Foundation-only contour data keeps the tab geometry testable on the Linux
+/// harness as well as drawable by the AppKit view. Every state has eight
+/// cubics, so an edge tab can be sampled without a second animation driver.
+struct PuckEdgeContour {
+    struct Cubic {
+        let start: CGPoint
+        let control1: CGPoint
+        let control2: CGPoint
+        let end: CGPoint
+    }
+
+    static func segments(amount: CGFloat, boundary: CGFloat) -> [Cubic] {
+        let amount = contactAmount(for: amount)
+        let angles: [CGFloat] = [135, 157.5, 180, 202.5, 225, 270, 360, 450]
+        let terminal = [
+            CGPoint(x: boundary, y: 60), CGPoint(x: boundary / 2, y: 30), CGPoint(x: 0, y: 0),
+            CGPoint(x: boundary / 2, y: -30), CGPoint(x: boundary, y: -60), CGPoint(x: 80, y: -70),
+            CGPoint(x: 200, y: 0), CGPoint(x: 80, y: 70),
+        ]
+        let controls: [(CGPoint, CGPoint)] = [
+            (.init(x: boundary, y: 45), .init(x: boundary * 3 / 4, y: 37.5)),
+            (.init(x: boundary / 4, y: 22.5), .init(x: 0, y: 15)),
+            (.init(x: 0, y: -15), .init(x: boundary / 4, y: -22.5)),
+            (.init(x: boundary * 3 / 4, y: -37.5), .init(x: boundary, y: -45)),
+            (.init(x: boundary, y: -75), .init(x: 60, y: -70)),
+            (.init(x: 100, y: -70), .init(x: 200, y: -38)),
+            (.init(x: 200, y: 38), .init(x: 100, y: 70)),
+            (.init(x: 60, y: 70), .init(x: boundary, y: 75)),
+        ]
+        let radius: CGFloat = 99.5
+        let centre = CGPoint(x: radius, y: 0)
+        func circle(_ degrees: CGFloat) -> CGPoint {
+            let radians = degrees * .pi / 180
+            return CGPoint(x: centre.x + radius * cos(radians), y: radius * sin(radians))
+        }
+        func tangent(_ degrees: CGFloat) -> CGPoint {
+            let radians = degrees * .pi / 180
+            return CGPoint(x: -radius * sin(radians), y: radius * cos(radians))
+        }
+        func mixed(_ circle: CGPoint, _ tab: CGPoint) -> CGPoint {
+            CGPoint(x: circle.x + (tab.x - circle.x) * amount,
+                    y: circle.y + (tab.y - circle.y) * amount)
+        }
+        return (0..<8).map { index in
+            let start = angles[index]
+            let end = index == 7 ? 495 : angles[index + 1]
+            let k = 4 / 3 * tan((end - start) * .pi / 720)
+            let a = circle(start)
+            let b = circle(end)
+            let ta = tangent(start)
+            let tb = tangent(end)
+            let c1 = CGPoint(x: a.x + ta.x * k, y: a.y + ta.y * k)
+            let c2 = CGPoint(x: b.x - tb.x * k, y: b.y - tb.y * k)
+            return Cubic(start: mixed(a, terminal[index]), control1: mixed(c1, controls[index].0),
+                         control2: mixed(c2, controls[index].1), end: mixed(b, terminal[(index + 1) % 8]))
+        }
+    }
+
+    /// While a hand holds the puck inside the display, the complete tucked
+    /// contour is translated to that display's boundary and clipped there.
+    /// Its off-screen closure stays hidden; the on-screen result is the same
+    /// twenty-two point tab the release will leave behind.
+    static func heldSegments(amount: CGFloat, boundary: CGFloat) -> [Cubic] {
+        let amount = min(max(amount, 0), 1)
+        let circle = segments(amount: 0, boundary: 0)
+        let tab = segments(amount: 1, boundary: 22)
+        let shift = boundary - 22
+        func move(_ point: CGPoint) -> CGPoint { CGPoint(x: point.x + shift, y: point.y) }
+        func blend(_ left: CGPoint, _ right: CGPoint) -> CGPoint {
+            CGPoint(x: left.x + (right.x - left.x) * amount, y: left.y + (right.y - left.y) * amount)
+        }
+        return zip(circle, tab).map { left, right in
+            Cubic(start: blend(left.start, move(right.start)), control1: blend(left.control1, move(right.control1)),
+                  control2: blend(left.control2, move(right.control2)), end: blend(left.end, move(right.end)))
+        }
+    }
+
+    static func releaseSegments(heldAmount: CGFloat, tuckedAmount: CGFloat, boundary: CGFloat,
+                                transition: CGFloat) -> [Cubic] {
+        let held = heldSegments(amount: heldAmount, boundary: boundary)
+        let tucked = segments(amount: tuckedAmount, boundary: boundary)
+        let transition = min(max(transition, 0), 1)
+        func blend(_ left: CGPoint, _ right: CGPoint) -> CGPoint {
+            CGPoint(x: left.x + (right.x - left.x) * transition, y: left.y + (right.y - left.y) * transition)
+        }
+        return zip(held, tucked).map { left, right in
+            Cubic(start: blend(left.start, right.start), control1: blend(left.control1, right.control1),
+                  control2: blend(left.control2, right.control2), end: blend(left.end, right.end))
+        }
+    }
+
+    /// The outline stays circular through the first part of a tuck, then
+    /// forms its shoulders with zero slope at either end. This avoids the
+    /// concave half-tab that a linear point-for-point blend briefly exposed.
+    static func contactAmount(for travel: CGFloat) -> CGFloat {
+        func smooth(_ value: CGFloat) -> CGFloat {
+            let x = min(max(value, 0), 1)
+            return x * x * x * (x * (x * 6 - 15) + 10)
+        }
+        switch travel {
+        case ..<0.2: return 0.1 * smooth(travel / 0.2)
+        case ..<0.5: return 0.1 + 0.04 * smooth((travel - 0.2) / 0.3)
+        case ..<0.95: return 0.14 + 0.76 * smooth((travel - 0.5) / 0.45)
+        default: return 0.9 + 0.1 * smooth((travel - 0.95) / 0.05)
+        }
+    }
+
+    /// Sampling the production cubics gives the rim one dash period for the
+    /// current outline without asking AppKit to flatten a path on every frame.
+    static func approximateLength(of segments: [Cubic], samples: Int = 16) -> CGFloat {
+        func point(_ cubic: Cubic, _ t: CGFloat) -> CGPoint {
+            let inverse = 1 - t
+            let a = inverse * inverse * inverse
+            let b = 3 * inverse * inverse * t
+            let c = 3 * inverse * t * t
+            let d = t * t * t
+            return CGPoint(x: a * cubic.start.x + b * cubic.control1.x + c * cubic.control2.x + d * cubic.end.x,
+                           y: a * cubic.start.y + b * cubic.control1.y + c * cubic.control2.y + d * cubic.end.y)
+        }
+        return segments.reduce(CGFloat.zero) { total, cubic in
+            var length = total
+            var previous = cubic.start
+            for sample in 1...samples {
+                let next = point(cubic, CGFloat(sample) / CGFloat(samples))
+                length += hypot(next.x - previous.x, next.y - previous.y)
+                previous = next
+            }
+            return length
+        }
+    }
+
+    static func approximateLength(amount: CGFloat, boundary: CGFloat, samples: Int = 16) -> CGFloat {
+        approximateLength(of: segments(amount: amount, boundary: boundary), samples: samples)
+    }
+}
+
+/// Direct manipulation uses one pure policy for proximity strength and edge
+/// retention, so corners and display seams can be exercised without AppKit.
+struct PuckEdgeProximity {
+    /// The contour must meet the edge inside the window's 24-point shadow
+    /// margin; beyond it, the layer bounds would clip a live shoulder first.
+    static let outerGap: CGFloat = 24
+    static let innerGap: CGFloat = 2
+    static let cornerHysteresis: CGFloat = 8
+
+    static func amount(for gap: CGFloat) -> CGFloat {
+        min(max((outerGap - gap) / (outerGap - innerGap), 0), 1)
+    }
+
+    static func chosenIndex(distances: [CGFloat], exposed: [Bool], current: Int?,
+                            maximumGap: CGFloat = outerGap) -> Int? {
+        guard distances.count == exposed.count else { return nil }
+        let choices = distances.indices.filter { exposed[$0] && distances[$0] <= maximumGap }
+        guard let nearest = choices.min(by: { distances[$0] < distances[$1] }) else { return nil }
+        if let current, choices.contains(current), nearest != current,
+           distances[nearest] + cornerHysteresis >= distances[current] {
+            return current
+        }
+        return nearest
+    }
+
+    static func transition(from origin: CGPoint, to target: CGPoint, at point: CGPoint) -> CGFloat {
+        let dx = target.x - origin.x
+        let dy = target.y - origin.y
+        let length = dx * dx + dy * dy
+        guard length > 0 else { return 1 }
+        return min(max(((point.x - origin.x) * dx + (point.y - origin.y) * dy) / length, 0), 1)
+    }
+}
+
 /// The recorder as a small disc of its own: the button that starts the tape
 /// and stops it in the middle, and along the lower rim three small buttons for
 /// the things a recording is made of — the microphone, the project it is filed
@@ -2718,6 +3271,8 @@ final class RecorderPuckView: NSView, Dockable {
     private static let ground = NSColor(srgbRed: 30 / 255, green: 30 / 255, blue: 33 / 255, alpha: 1)
     private static let rim = NSColor.white.withAlphaComponent(0.09)
     private static let rollingRim = NSColor.systemRed.withAlphaComponent(0.7)
+    private static let troubledRim = NSColor.systemOrange.withAlphaComponent(0.85)
+    private static let warning = NSColor.systemOrange
 
     /// Where the three small buttons sit: on the lower arc, 55 degrees apart
     /// with the middle one straight down. Down is an axis, and axes are hit
@@ -2731,6 +3286,10 @@ final class RecorderPuckView: NSView, Dockable {
     private static let arcAngles: [CGFloat] = [215, 270, 325]
 
     private let body = CAShapeLayer()
+    private let workingRim = CAShapeLayer()
+    private let visibleClip = CAShapeLayer()
+    private var clippedVisibleRect: NSRect?
+    private var workingRimLength: CGFloat?
     private let record = RecordButton()
     private let caption = RecorderPuckView.label("Record")
     private let inputButton = ChoiceButton(symbol: "mic", label: "Microphone")
@@ -2742,6 +3301,8 @@ final class RecorderPuckView: NSView, Dockable {
     var onHover: ((Bool) -> Void)?
     var onRecord: (() -> Void)?
     var onStop: (() -> Void)?
+    var onCancel: (() -> Void)?
+    var onOpen: (() -> Void)?
     var onProject: ((String) -> Void)?
     var onInput: ((AudioDevice?) -> Void)?
     var onOutput: ((AudioDevice?) -> Void)?
@@ -2757,8 +3318,11 @@ final class RecorderPuckView: NSView, Dockable {
     private var chosenOutput: AudioDevice?
 
     private var gripping = false
+    private var gripStartedAt: NSPoint?
     private var pointer: NSTrackingArea?
     private var state = RecorderState.idle
+    private var noteReady = false
+    private var edgeMorph: (edge: Dock.Edge, amount: CGFloat, boundary: CGFloat)?
 
     init(reduceMotion: Bool) {
         self.reduceMotion = reduceMotion
@@ -2802,6 +3366,149 @@ final class RecorderPuckView: NSView, Dockable {
         body.shadowRadius = 14
         body.shadowOffset = CGSize(width: 0, height: -5)
         layer.addSublayer(body)
+        workingRim.frame = bounds
+        workingRim.path = round
+        workingRim.fillColor = nil
+        workingRim.strokeColor = NSColor.white.withAlphaComponent(0.65).cgColor
+        workingRim.lineWidth = 2
+        workingRim.lineCap = .round
+        // A dash travels around the current path. Rotating a noncircular tab
+        // would visibly pull its rim away from the body during a tuck.
+        let length = PuckEdgeContour.approximateLength(amount: 0, boundary: 0)
+        workingRimLength = length
+        workingRim.lineDashPattern = [36, NSNumber(value: Double(length - 36))]
+        workingRim.lineDashPhase = 0
+    }
+
+    /// The dock's final 22-point sliver is a tab joined to the screen, not a
+    /// circle merely clipped by it.  Every version uses eight cubic segments:
+    /// Core Animation can therefore interpolate the same contour if that is
+    /// ever moved off the display link, and body, shadow and working rim stay
+    /// one exact outline today.
+    func setEdgeMorph(_ edge: Dock.Edge?, amount: CGFloat, boundary: CGFloat? = nil,
+                      visibleFrame: NSRect? = nil, held: Bool = false,
+                      heldAmount: CGFloat? = nil, transition: CGFloat = 1) {
+        guard let edge else {
+            clearEdgeMorph()
+            return
+        }
+        let amount = min(max(amount, 0), 1)
+        let boundary = boundary ?? Dock.peek
+        clipToVisibleFrame(visibleFrame)
+        edgeMorph = (edge, amount, boundary)
+        let segments = edgeSegments(amount: amount, boundary: boundary, held: held,
+                                    heldAmount: heldAmount, transition: transition)
+        let path = edgePath(edge, segments: segments)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        body.path = path
+        body.shadowPath = path
+        workingRim.path = path
+        CATransaction.commit()
+        tuneWorkingRim(PuckEdgeContour.approximateLength(of: segments))
+        let contentAlpha = max(0, 1 - amount * 1.25)
+        for control in [record, caption, inputButton, projectButton, outputButton] {
+            control.alphaValue = contentAlpha
+            control.isHidden = amount > 0.8
+        }
+    }
+
+    /// A free puck restores its circular outline and its real controls before
+    /// the pointer has travelled far enough for a hidden control to catch it.
+    func clearEdgeMorph() {
+        guard edgeMorph != nil else { return }
+        edgeMorph = nil
+        clippedVisibleRect = nil
+        let round = CGPath(ellipseIn: discRect.insetBy(dx: 0.5, dy: 0.5), transform: nil)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer?.mask = nil
+        body.path = round
+        body.shadowPath = round
+        workingRim.path = round
+        CATransaction.commit()
+        tuneWorkingRim(PuckEdgeContour.approximateLength(amount: 0, boundary: 0))
+        for control in [record, caption, inputButton, projectButton, outputButton] {
+            control.alphaValue = 1
+            control.isHidden = false
+        }
+        updateTrackingAreas()
+    }
+
+    /// A tucked panel intentionally extends beyond its screen so its sliver
+    /// keeps receiving hover events. Its pixels must not follow it into the
+    /// menu bar, Dock, or a neighbouring display, so the whole view is masked
+    /// to the source screen's real visible rectangle.
+    private func clipToVisibleFrame(_ visibleFrame: NSRect?) {
+        guard let visibleFrame, let window, let layer else { return }
+        let windowRect = window.convertFromScreen(visibleFrame)
+        let localRect = convert(windowRect, from: nil).intersection(bounds)
+        clippedVisibleRect = localRect
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        visibleClip.frame = bounds
+        visibleClip.path = CGPath(rect: localRect, transform: nil)
+        layer.mask = visibleClip
+        CATransaction.commit()
+        updateTrackingAreas()
+    }
+
+    /// A clipped-off part of the panel cannot be seen, so it must not consume
+    /// clicks intended for the menu bar, Dock, or another display either.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard clippedVisibleRect?.contains(point) ?? true else { return nil }
+        guard body.path?.contains(point, using: .winding, transform: .identity) ?? false else { return nil }
+        return super.hitTest(point)
+    }
+
+    func isVisibleHit(at screenPoint: NSPoint) -> Bool {
+        guard let window else { return false }
+        let point = convert(window.convertPoint(fromScreen: screenPoint), from: nil)
+        return (clippedVisibleRect?.contains(point) ?? true)
+            && (body.path?.contains(point, using: .winding, transform: .identity) ?? false)
+    }
+
+    /// Eight corresponding cubic pieces turn a circle into a smooth-union
+    /// tab. `boundary` is measured from the body's inward edge to the actual
+    /// screen edge, so a spring overshoot never tears the tab away from it.
+    private func edgeSegments(amount: CGFloat, boundary: CGFloat, held: Bool,
+                              heldAmount: CGFloat?, transition: CGFloat) -> [PuckEdgeContour.Cubic] {
+        // The circular path begins half a stroke inside the disc rect. Keep
+        // that same inset here and compensate the moving screen anchor so the
+        // visible shoulders still land on the exact display boundary.
+        heldAmount.map {
+            PuckEdgeContour.releaseSegments(heldAmount: $0, tuckedAmount: amount,
+                                            boundary: boundary - 0.5, transition: transition)
+        } ?? (held
+            ? PuckEdgeContour.heldSegments(amount: amount, boundary: boundary - 0.5)
+            : PuckEdgeContour.segments(amount: amount, boundary: boundary - 0.5))
+    }
+
+    private func edgePath(_ edge: Dock.Edge, segments: [PuckEdgeContour.Cubic]) -> CGPath {
+        let origin: NSPoint
+        let outward: NSPoint
+        let along: NSPoint
+        switch edge {
+        case .right:
+            origin = NSPoint(x: discRect.minX + 0.5, y: discRect.midY); outward = NSPoint(x: 1, y: 0); along = NSPoint(x: 0, y: 1)
+        case .left:
+            origin = NSPoint(x: discRect.maxX - 0.5, y: discRect.midY); outward = NSPoint(x: -1, y: 0); along = NSPoint(x: 0, y: 1)
+        case .top:
+            origin = NSPoint(x: discRect.midX, y: discRect.minY + 0.5); outward = NSPoint(x: 0, y: 1); along = NSPoint(x: 1, y: 0)
+        case .bottom:
+            origin = NSPoint(x: discRect.midX, y: discRect.maxY - 0.5); outward = NSPoint(x: 0, y: -1); along = NSPoint(x: 1, y: 0)
+        }
+        func local(_ point: NSPoint) -> NSPoint {
+            NSPoint(x: origin.x + outward.x * point.x + along.x * point.y,
+                    y: origin.y + outward.y * point.x + along.y * point.y)
+        }
+        let path = CGMutablePath()
+        path.move(to: local(segments[0].start))
+        for segment in segments {
+            path.addCurve(to: local(segment.end), control1: local(segment.control1), control2: local(segment.control2))
+        }
+        path.closeSubpath()
+        return path
     }
 
     private func layOut() {
@@ -2815,7 +3522,7 @@ final class RecorderPuckView: NSView, Dockable {
         // the words above the button rather than under it: the lower half of
         // the disc belongs to the three choosers, and the state is glanced at
         // where a clock is — up
-        caption.frame = NSRect(x: centre.x - 60, y: centre.y + side / 2 + 7, width: 120, height: 14)
+        caption.frame = NSRect(x: centre.x - 100, y: centre.y + side / 2 + 3, width: 200, height: 28)
         caption.alignment = .center
         addSubview(caption)
 
@@ -2842,35 +3549,65 @@ final class RecorderPuckView: NSView, Dockable {
     /// recording is being made with, and a choice made now would be a choice
     /// for the next one, which is not what a button beside a rolling tape
     /// looks like it offers.
-    func show(state: RecorderState, elapsed: String) {
+    ///
+    /// Trouble outranks the clock. The one line above the button shows the
+    /// elapsed time until a side of the tape has been silent for long enough
+    /// to mean something broken — a muted microphone, a dead tap — and then it
+    /// shows that, in a colour that is not the rim's recording red, until
+    /// sound comes back. The rim says the same thing, because the rim is all a
+    /// puck tucked into an edge has left to say it with.
+    func show(state: RecorderState, elapsed: String, trouble: String? = nil,
+              processing: String = "Processing …", canCancel: Bool = false, noteReady: Bool = false) {
         self.state = state
+        self.noteReady = noteReady
+        refreshMotion()
         let idle = state == .idle
-        record.rolling = state == .recording
-        record.isEnabled = idle || state == .recording
+        record.rolling = state == .recording || (state == .processing && canCancel)
+        record.isEnabled = noteReady || idle || state == .recording || (state == .processing && canCancel)
         for button in [inputButton, projectButton, outputButton] {
             button.isEnabled = idle
         }
-        switch state {
+        if noteReady {
+            caption.stringValue = "Open Note"
+            caption.maximumNumberOfLines = 1
+            caption.lineBreakMode = .byTruncatingTail
+            caption.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+            record.setAccessibilityLabel("Open note")
+        } else { switch state {
         case .idle:
             caption.stringValue = "Record"
+            caption.maximumNumberOfLines = 1
+            caption.lineBreakMode = .byTruncatingTail
             caption.font = NSFont.systemFont(ofSize: 11)
             record.setAccessibilityLabel("Start recording")
         case .starting:
             caption.stringValue = "Starting …"
+            caption.maximumNumberOfLines = 1
+            caption.lineBreakMode = .byTruncatingTail
             caption.font = NSFont.systemFont(ofSize: 11)
             record.setAccessibilityLabel("Starting")
         case .recording:
-            caption.stringValue = elapsed
+            caption.stringValue = trouble ?? elapsed
+            caption.maximumNumberOfLines = 1
+            caption.lineBreakMode = .byTruncatingTail
             caption.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-            record.setAccessibilityLabel("Stop recording, \(elapsed) so far")
+            record.setAccessibilityLabel(trouble.map { "Stop recording — \($0)" }
+                ?? "Stop recording, \(elapsed) so far")
         case .processing:
-            caption.stringValue = "Processing …"
+            caption.stringValue = canCancel ? "Cancel\n\(processing)" : processing
+            caption.maximumNumberOfLines = canCancel ? 2 : 1
+            caption.lineBreakMode = canCancel ? .byWordWrapping : .byTruncatingTail
             caption.font = NSFont.systemFont(ofSize: 11)
-            record.setAccessibilityLabel("Processing")
-        }
-        // the rim goes red for the length of the tape, so that a puck tucked
-        // into an edge still says from its sliver that a meeting is being taped
-        body.strokeColor = (state == .recording ? RecorderPuckView.rollingRim : RecorderPuckView.rim).cgColor
+            record.setAccessibilityLabel(canCancel ? "Cancel processing — \(processing)" : processing)
+        } }
+        let troubled = state == .recording && trouble != nil
+        caption.textColor = troubled ? RecorderPuckView.warning : .secondaryLabelColor
+        // the rim goes red for the length of the tape, and amber for as long
+        // as a side is silent, so that a puck tucked into an edge still says
+        // from its sliver both that a meeting is being taped and that some of
+        // it is not being heard
+        body.strokeColor = (troubled ? RecorderPuckView.troubledRim
+            : state == .recording ? RecorderPuckView.rollingRim : RecorderPuckView.rim).cgColor
         body.lineWidth = state == .recording ? 1.5 : 1
     }
 
@@ -2897,10 +3634,12 @@ final class RecorderPuckView: NSView, Dockable {
     // --- what is done to it -----------------------------------------------------------
 
     @objc private func pressed() {
+        if noteReady { onOpen?(); return }
         switch state {
         case .idle: onRecord?()
         case .recording: onStop?()
-        case .starting, .processing: break
+        case .processing: onCancel?()
+        case .starting: break
         }
     }
 
@@ -2978,34 +3717,50 @@ final class RecorderPuckView: NSView, Dockable {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     /// A press that reached this view landed on no button — they take their
-    /// own — so it is a hand on the window.
+    /// own — so it is a hand on the window.  Do not turn that press into a
+    /// grip yet: a tucked tab needs a dependable click-to-reveal action, while
+    /// moving it remains an intentional drag once the hand has travelled.
     override func mouseDown(with event: NSEvent) {
         gripping = true
-        onGrip?(.began(NSEvent.mouseLocation))
+        gripStartedAt = event.locationInWindow
+        onGrip?(.pressed)
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard gripping else { return }
+        if let start = gripStartedAt,
+           hypot(event.locationInWindow.x - start.x, event.locationInWindow.y - start.y) >= 3 {
+            gripStartedAt = nil
+            onGrip?(.began(NSEvent.mouseLocation))
+        }
+        guard gripStartedAt == nil else { return }
         onGrip?(.moved(NSEvent.mouseLocation))
     }
 
     override func mouseUp(with event: NSEvent) {
         guard gripping else { return }
         gripping = false
-        onGrip?(.ended(NSEvent.mouseLocation))
+        if gripStartedAt != nil {
+            gripStartedAt = nil
+            onGrip?(.clicked)
+        } else {
+            onGrip?(.ended(NSEvent.mouseLocation))
+        }
     }
 
     /// `.activeAlways`, because this window never becomes key and the app it
     /// belongs to is never the active one: any narrower scope would report no
-    /// crossing at all. The whole view is the area — the margin round the disc
-    /// is the slack that keeps a pointer just off the rim from counting as gone.
+    /// crossing at all. Only the visible body is tracked. The transparent
+    /// shadow margin, and the part clipped behind a display edge, are neither
+    /// a tab someone can deliberately hover nor a valid way to open it.
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let pointer {
             removeTrackingArea(pointer)
         }
+        let visible = (clippedVisibleRect ?? discRect).intersection(discRect)
         let area = NSTrackingArea(
-            rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            rect: visible, options: [.mouseEnteredAndExited, .activeAlways],
             owner: self, userInfo: nil
         )
         addTrackingArea(area)
@@ -3023,13 +3778,67 @@ final class RecorderPuckView: NSView, Dockable {
     /// The disc grown into place out of the status item above it, the way the
     /// island arrives, and for the same reason: it says where the window came from.
     func appear() {
+        refreshMotion()
         guard !reduceMotion, let layer else { return }
-        let growing = CABasicAnimation(keyPath: "transform")
+        let growing = CASpringAnimation(keyPath: "transform")
+        growing.mass = 1
+        // k = mω², c = 2mζω: the layer and origin use the same spring.
+        let omega = CGFloat(PuckMotion.angularFrequency)
+        growing.stiffness = omega * omega
+        growing.damping = 2 * CGFloat(PuckMotion.dampingRatio) * omega
         growing.fromValue = NSValue(caTransform3D: RecordingPanelView.scaled(0.92, about: layer.bounds))
         growing.toValue = NSValue(caTransform3D: CATransform3DIdentity)
-        growing.duration = RecordingPanelView.appearing
-        growing.timingFunction = RecordingPanelView.easing
+        growing.duration = growing.settlingDuration
         layer.add(growing, forKey: "appear")
+    }
+
+    /// Refreshing processing leaves the one render-server dash in place.
+    func refreshMotion() {
+        guard state == .processing, window?.isVisible == true else {
+            workingRim.removeAllAnimations()
+            workingRim.removeFromSuperlayer()
+            return
+        }
+        if workingRim.superlayer == nil { layer?.addSublayer(workingRim) }
+        guard !reduceMotion, workingRim.animation(forKey: "working") == nil else { return }
+        startWorkingRim(length: workingRimLength ?? PuckEdgeContour.approximateLength(amount: 0, boundary: 0))
+    }
+
+    /// A path-length period keeps exactly one highlight on both the circle and
+    /// a shorter tab. Replacing it during a morph uses wall-clock phase, so
+    /// changing the contour does not make the highlight jump back to its start.
+    private func tuneWorkingRim(_ length: CGFloat) {
+        let length = max(length, 37)
+        guard workingRimLength.map({ abs($0 - length) > 0.1 }) ?? true else { return }
+        workingRimLength = length
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        workingRim.lineDashPattern = [36, NSNumber(value: Double(length - 36))]
+        CATransaction.commit()
+        guard state == .processing, !reduceMotion, workingRim.animation(forKey: "working") != nil else { return }
+        startWorkingRim(length: length)
+    }
+
+    /// Start from the shared wall clock so replacing a changing dash period
+    /// preserves where its highlight was travelling around the rim.
+    private func startWorkingRim(length: CGFloat) {
+        let duration = 2.4
+        let now = CACurrentMediaTime()
+        let travelling = CABasicAnimation(keyPath: "lineDashPhase")
+        travelling.fromValue = 0
+        travelling.toValue = -length
+        travelling.duration = duration
+        travelling.repeatCount = .infinity
+        travelling.beginTime = now
+        travelling.timeOffset = now.truncatingRemainder(dividingBy: duration)
+        workingRim.add(travelling, forKey: "working")
+    }
+
+    /// Hidden views and every nonworking state release the repeating layer.
+    func stopMotion() {
+        workingRim.removeAllAnimations()
+        workingRim.removeFromSuperlayer()
+        layer?.removeAnimation(forKey: "appear")
     }
 
     private static func label(_ text: String) -> NSTextField {
@@ -3176,8 +3985,174 @@ final class ChoiceButton: NSButton {
 protocol Dockable: NSView {
     var onGrip: ((Dock.Grip) -> Void)? { get set }
     var onHover: ((Bool) -> Void)? { get set }
+    func isVisibleHit(at screenPoint: NSPoint) -> Bool
 }
+/// One physical spring for the window and arrival layer. The upstream 7.5/.5
+/// takes seconds to stop; 34/.7 leaves a gentler contact merge while retaining
+/// one 4–12-point overshoot and the 700 ms settle limit.
+enum PuckMotion {
+    static let angularFrequency: Float = 34
+    static let dampingRatio: Float = 0.7
+    static let step: TimeInterval = 1 / 120
+    static let configuration = SpringConfiguration(
+        angularFrequency: angularFrequency, dampingRatio: dampingRatio
+    )
+    /// Predict the incoming trajectory and move its target inward only when
+    /// momentum would otherwise conceal the sliver; callers also guard frames.
+    static func safeDestination(_ requested: CGPoint, from state: SpringMotionState,
+                                physics: SpringMotionPhysics,
+                                bound: ((CGPoint) -> CGPoint)?) -> CGPoint {
+        var destination = requested
+        if let bound {
+            for _ in 0..<32 {
+                var probe = state
+                var correction = CGPoint.zero
+                for _ in 0..<120 {
+                    probe = physics.calculateNextState(from: probe, destinationPoint: destination)
+                    let safe = bound(probe.position)
+                    if abs(safe.x - probe.position.x) > abs(correction.x) {
+                        correction.x = safe.x - probe.position.x
+                    }
+                    if abs(safe.y - probe.position.y) > abs(correction.y) {
+                        correction.y = safe.y - probe.position.y
+                    }
+                }
+                destination.x += correction.x
+                destination.y += correction.y
+                if abs(correction.x) < 0.001 && abs(correction.y) < 0.001 { break }
+            }
+        }
+        return destination
+    }
+
+}
+
+/// A weak target breaks the display link's ownership cycle so dropping a dock
+/// immediately releases its motion even if the display has stopped delivering.
+private final class SpringFrameTarget: NSObject {
+    weak var motion: SpringMotion?
+
+    /// Display time is measured by the driver, independent of refresh rate.
+    @objc func frame(_ link: CADisplayLink) { motion?.tick() }
+}
+
+/// The sole owner of a window's moving origin; redirection keeps momentum,
+/// while grabbing, hiding and settling release every source of callbacks.
+final class SpringMotion {
+    private weak var panel: NSPanel?
+    private let physics = SpringMotionPhysics(configuration: PuckMotion.configuration,
+                                               timeStep: Float(PuckMotion.step))
+    private var state = SpringMotionState(position: .zero, velocity: .zero)
+    private var destination = CGPoint.zero
+    private var bound: ((CGPoint) -> CGPoint)?
+    private var link: CADisplayLink?
+    private var onFrame: ((CGPoint) -> Void)?
+    private let target = SpringFrameTarget()
+    private var watchdog: Timer?
+    private var lastTime: TimeInterval = 0
+    private var accumulator: TimeInterval = 0
+
+    /// The panel owns no driver, allowing dock teardown to end motion.
+    init(panel: NSPanel) {
+        self.panel = panel
+        target.motion = self
+    }
+
+    deinit { link?.invalidate(); watchdog?.invalidate() }
+
+    /// Removing the callbacks preserves the actual frame for a hand to take over.
+    func interrupt() {
+        link?.invalidate()
+        link = nil
+        watchdog?.invalidate()
+        watchdog = nil
+        accumulator = 0
+        onFrame = nil
+    }
+
+    /// Predicting the same fixed steps includes incoming velocity when a tuck
+    /// reverses a peek; shifting its target inward preserves the visible sliver.
+    func move(to requested: CGPoint, bound: ((CGPoint) -> CGPoint)? = nil,
+              onFrame: ((CGPoint) -> Void)? = nil) {
+        guard let panel else { return }
+        if link == nil {
+            state = SpringMotionState(position: panel.frame.origin, velocity: .zero)
+        }
+        self.bound = bound
+        self.onFrame = onFrame
+        destination = requested
+        destination = PuckMotion.safeDestination(requested, from: state, physics: physics, bound: bound)
+        onFrame?(state.position)
+        guard panel.isVisible, let view = panel.contentView else { finish(); return }
+        guard link == nil else { return }
+        lastTime = CACurrentMediaTime()
+        let displayLink = view.displayLink(target: target, selector: #selector(SpringFrameTarget.frame(_:)))
+        displayLink.add(to: .main, forMode: .common)
+        link = displayLink
+        armWatchdog()
+    }
+
+    /// A one-shot deadline settles hidden views even when their display link
+    /// never fires; it exists only during motion and is renewed by real frames.
+    private func armWatchdog() {
+        if let watchdog {
+            watchdog.fireDate = Date(timeIntervalSinceNow: 0.25)
+            return
+        }
+        let timer = Timer(timeInterval: 0.25, repeats: false) { [weak self] _ in self?.finish() }
+        RunLoop.main.add(timer, forMode: .common)
+        watchdog = timer
+    }
+
+    /// Elapsed wall time, accumulated in fixed steps, gives both refresh rates
+    /// the same trajectory and leaves no fractional-pixel resting position.
+    fileprivate func tick() {
+        guard let panel, panel.isVisible else { finish(); return }
+        let now = CACurrentMediaTime()
+        accumulator += now - lastTime
+        lastTime = now
+        if accumulator > 0.25 { finish(); return }
+        while accumulator >= PuckMotion.step {
+            state = physics.calculateNextState(from: state, destinationPoint: destination)
+            if let bound { state = SpringMotionState(position: bound(state.position), velocity: state.velocity) }
+            accumulator -= PuckMotion.step
+        }
+        panel.setFrameOrigin(state.position)
+        onFrame?(state.position)
+        if abs(state.velocity.horizontal) < 0.001 && abs(state.velocity.vertical) < 0.001
+            && abs(state.position.x - destination.x) < 0.5
+            && abs(state.position.y - destination.y) < 0.5 {
+            finish()
+        } else {
+            armWatchdog()
+        }
+    }
+
+    /// Exact placement and callback teardown are shared by settling and a
+    /// missing-display deadline, so neither path can leave an idle timer alive.
+    private func finish() {
+        let final = bound?(destination) ?? destination
+        panel?.setFrameOrigin(final)
+        onFrame?(final)
+        interrupt()
+    }
+}
+
 final class DockPanel: NSPanel {
+    var onMotionHidden: (() -> Void)?
+
+    /// Hiding stops callbacks before a view ceases receiving display frames.
+    override func orderOut(_ sender: Any?) {
+        onMotionHidden?()
+        super.orderOut(sender)
+    }
+
+    /// Closing also releases motion when callers bypass the ordinary fade.
+    override func close() {
+        onMotionHidden?()
+        super.close()
+    }
+
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         frameRect
     }
@@ -3249,9 +4224,11 @@ final class Dock {
 
     /// A press on the view's ground, in screen points, from press to release.
     enum Grip {
+        case pressed
         case began(NSPoint)
         case moved(NSPoint)
         case ended(NSPoint)
+        case clicked
     }
 
     enum State {
@@ -3271,8 +4248,17 @@ final class Dock {
     /// points — a window with nothing on screen gets no events at all.
     static let peek: CGFloat = 22
 
-    /// How near the pointer must be let go to an edge for the window to tuck.
-    static let snap: CGFloat = 8
+    /// How near a window's own body must come to an edge to tuck into it when
+    /// let go. It is the window that is measured and not the pointer, so that
+    /// tucking never asks anybody to shove the cursor into the side of the
+    /// screen — the gesture macOS reads as "tile this window", and the one
+    /// thing this window must never look like it is doing.
+    static let magnet: CGFloat = 28
+
+    /// The air kept between the window and the edge of the screen while it is
+    /// being dragged. It cannot be pushed through the side: what a drag can do
+    /// is put it against the edge, and what letting go there does is tuck it.
+    static let keepOff: CGFloat = 2
 
     /// The dwell before a hover reveals, and the grace after the pointer leaves
     /// before it hides again — each re-checked when it fires. A fifth of a
@@ -3293,6 +4279,7 @@ final class Dock {
     let panel: NSPanel
     let view: Dockable
     private let inset: CGFloat
+    private let motion: SpringMotion
     private let reduceMotion: Bool
     private(set) var state: State = .hanging
 
@@ -3303,8 +4290,25 @@ final class Dock {
     /// The pointer's offset from the window's origin while the window is being
     /// moved, and nothing at any other time.
     private var grab: NSPoint?
+    private var grabOrigin: NSPoint?
+    private var grabScreen: NSScreen?
     private var pending: Timer?
     private var screensChanged: Any?
+    /// The last edge owns the reversible tab while a grab carries it back into
+    /// the screen. It clears only once the moving frame has made it round.
+    private var morphEdge: Edge?
+    /// The display that received the tuck owns its clipping boundary until the
+    /// move ends. Choosing by an offscreen frame's midpoint can otherwise flip
+    /// the tab across a shared display seam while the spring is in flight.
+    private var morphScreen: NSScreen?
+    private var morphDisplay: UInt32?
+    /// The direct-manipulation tab is measured from the held body, not the
+    /// release spring's revealed-to-tucked travel.
+    private var heldMorphAmount: CGFloat?
+    private var releaseMorph: (amount: CGFloat, origin: NSPoint, target: NSPoint)?
+    /// A tuck or peek that did not start as a held proximity contour keeps its
+    /// existing geometry until the hand has carried it beyond the live band.
+    private var preservedGrabEdge: Edge?
 
     /// Told once, when the window stops hanging: whoever hung it there closes it
     /// on a click elsewhere and lights the button it hangs from, and a window that
@@ -3318,7 +4322,16 @@ final class Dock {
         self.panel = panel
         self.view = view
         self.inset = inset
+        self.motion = SpringMotion(panel: panel)
         self.reduceMotion = reduceMotion
+        (panel as? DockPanel)?.onMotionHidden = { [weak self] in
+            self?.motion.interrupt()
+            self?.pending?.invalidate()
+            self?.heldMorphAmount = nil
+            self?.releaseMorph = nil
+            self?.preservedGrabEdge = nil
+            (self?.view as? RecorderPuckView)?.stopMotion()
+        }
         view.onGrip = { [weak self] grip in self?.gripped(grip) }
         view.onHover = { [weak self] inside in self?.hovered(inside) }
         // a display arriving or leaving moves every edge; a tucked window is put
@@ -3330,6 +4343,8 @@ final class Dock {
     }
 
     deinit {
+        motion.interrupt()
+        (view as? RecorderPuckView)?.stopMotion()
         pending?.invalidate()
         if let screensChanged {
             NotificationCenter.default.removeObserver(screensChanged)
@@ -3341,6 +4356,13 @@ final class Dock {
     /// The window put back where it was left, or nothing — and then the caller
     /// hangs it under the status item — when that place is gone.
     func restore(_ place: DockPlace) -> Bool {
+        heldMorphAmount = nil
+        releaseMorph = nil
+        preservedGrabEdge = nil
+        morphEdge = nil
+        morphScreen = nil
+        morphDisplay = nil
+        (view as? RecorderPuckView)?.clearEdgeMorph()
         switch place {
         case .hanging:
             return false
@@ -3362,9 +4384,11 @@ final class Dock {
             guard let screen = Dock.screen(numbered: display) else { return false }
             self.along = along
             state = .tucked(edge)
+            holdMorphScreen(screen)
             panel.setFrame(tuckedFrame(edge, on: screen), display: false)
             panel.alphaValue = Dock.tuckedAlpha
             panel.orderFrontRegardless()
+            applyMorph(edge, at: panel.frame.origin, on: screen)
             return true
         }
     }
@@ -3380,7 +4404,7 @@ final class Dock {
     }
 
     private var place: DockPlace {
-        let screen = Dock.screen(under: panel.frame) ?? NSScreen.main
+        let screen = currentMorphScreen() ?? Dock.screen(under: panel.frame) ?? NSScreen.main
         guard let screen, let display = Dock.number(of: screen) else { return .hanging }
         switch state {
         case .hanging:
@@ -3401,19 +4425,91 @@ final class Dock {
 
     private func gripped(_ grip: Grip) {
         switch grip {
+        case .pressed:
+            // Freeze a spring as soon as the hand touches it, even if the
+            // eventual gesture is a click. Starting that freeze at the drag
+            // threshold would make a re-grab visibly jump under the pointer.
+            motion.interrupt()
+            pending?.invalidate()
+        case .clicked:
+            // A complete tab is intentionally a button as well as a drag
+            // handle.  Someone who found its visible rim is asking to use the
+            // recorder, while moving it remains the distinct press-and-drag
+            // gesture below.
+            if case let .tucked(edge) = state {
+                pending?.invalidate()
+                peek(edge)
+            } else if case let .peeking(edge) = state {
+                peek(edge)
+            }
         case let .began(point):
+            motion.interrupt()
+            preservedGrabEdge = releaseMorph == nil ? morphEdge : nil
+            grabOrigin = panel.frame.origin
+            grabScreen = Dock.screen(under: panel.frame)
             pending?.invalidate()
             grab = NSPoint(x: point.x - panel.frame.minX, y: point.y - panel.frame.minY)
             NSCursor.closedHand.push()
         case let .moved(point):
             guard let grab else { return }
             leaveWherever()
-            panel.setFrameOrigin(NSPoint(x: point.x - grab.x, y: point.y - grab.y))
-        case let .ended(point):
+            let origin = held(at: NSPoint(x: point.x - grab.x, y: point.y - grab.y))
+            panel.setFrameOrigin(origin)
+            let cursorScreen = Dock.screen(containing: NSEvent.mouseLocation) ?? NSScreen.main
+            if let screen = cursorScreen, currentMorphScreen() != nil,
+               Dock.number(of: screen) != morphDisplay {
+                morphEdge = nil
+                morphDisplay = nil
+                self.morphScreen = nil
+                heldMorphAmount = nil
+                releaseMorph = nil
+                preservedGrabEdge = nil
+                (view as? RecorderPuckView)?.clearEdgeMorph()
+            }
+            if let releaseMorph, let edge = morphEdge, let screen = currentMorphScreen() {
+                let transition = PuckEdgeProximity.transition(
+                    from: releaseMorph.origin, to: releaseMorph.target, at: origin
+                )
+                if transition > 0 {
+                    applyMorph(edge, at: origin, on: screen)
+                    return
+                }
+                self.releaseMorph = nil
+            }
+            if let edge = preservedGrabEdge, let screen = currentMorphScreen() {
+                let gap = edgeDistance(edge, from: body, to: screen.visibleFrame)
+                if gap < PuckEdgeProximity.outerGap {
+                    if morphEdge != nil { applyMorph(edge, at: origin, on: screen) }
+                    return
+                }
+                preservedGrabEdge = nil
+                morphEdge = nil
+                morphScreen = nil
+                morphDisplay = nil
+                (view as? RecorderPuckView)?.clearEdgeMorph()
+            }
+            if let screen = cursorScreen, let edge = proximityEdge(for: body, on: screen) {
+                let gap = edgeDistance(edge, from: body, to: screen.visibleFrame)
+                let amount = PuckEdgeProximity.amount(for: gap)
+                heldMorphAmount = amount
+                morphEdge = edge
+                holdMorphScreen(screen)
+                applyHeldMorph(edge, amount: amount, on: screen)
+            } else {
+                heldMorphAmount = nil
+                morphEdge = nil
+                morphScreen = nil
+                morphDisplay = nil
+                (view as? RecorderPuckView)?.clearEdgeMorph()
+            }
+        case .ended:
             NSCursor.pop()
             guard grab != nil else { return }
             grab = nil
-            release(at: point)
+            grabOrigin = nil
+            grabScreen = nil
+            preservedGrabEdge = nil
+            release()
         }
     }
 
@@ -3432,19 +4528,68 @@ final class Dock {
         panel.alphaValue = 1
     }
 
-    /// Let go: within a few points of an edge it tucks into that edge, at the
-    /// spot along it where it was dropped; anywhere else it stays.
-    private func release(at point: NSPoint) {
-        guard let screen = Dock.screen(containing: point) else {
+    /// Where a drag may put the window: on the screen the pointer is over,
+    /// and never past its edges. The window stops against the side the way a
+    /// thing pushed across a desk stops against the wall, which is what makes
+    /// tucking a push rather than a shove through.
+    ///
+    /// The pointer picks the screen, not the window, so a drag onto a second
+    /// display goes where the hand goes rather than being held back by the
+    /// edge of the display it started on.
+    private func held(at origin: NSPoint) -> NSPoint {
+        let cursor = NSEvent.mouseLocation
+        guard let screen = Dock.screen(containing: cursor) ?? NSScreen.main else { return origin }
+        var area = room(screen.visibleFrame)
+        // A tucked grab starts outside the normal drag room. Expand just far
+        // enough to include that starting frame, never farther off screen.
+        if let grabOrigin, screen == grabScreen {
+            area = area.union(NSRect(origin: grabOrigin, size: panel.frame.size))
+        }
+        return Dock.clamped(origin, size: panel.frame.size, within: area)
+    }
+
+    /// The window's own body — what is drawn, without the air its shadow is
+    /// cast into.
+    private var body: NSRect {
+        panel.frame.insetBy(dx: inset, dy: inset)
+    }
+
+    /// Where the window may sit, in frame terms: the body inside the screen
+    /// with a couple of points to spare, which is the frame overhanging it by
+    /// the width of that air.
+    private func room(_ area: NSRect) -> NSRect {
+        area.insetBy(dx: -inset + Dock.keepOff, dy: -inset + Dock.keepOff)
+    }
+
+    /// Let go: a window resting against an edge tucks into it, at the spot
+    /// along that edge where it was left; anywhere else it stays.
+    private func release() {
+        guard let screen = currentMorphScreen() ?? Dock.screen(under: panel.frame) ?? NSScreen.main else {
             state = .free
+            heldMorphAmount = nil
+            releaseMorph = nil
+            preservedGrabEdge = nil
             onPlaced?(place)
             return
         }
-        if let edge = Dock.edge(near: point, of: screen) {
+        // The edge chosen while held owns release through the live band, using
+        // its display number because AppKit may vend a new NSScreen instance.
+        if heldMorphAmount != nil, let edge = morphEdge,
+           morphDisplay != nil, Dock.number(of: screen) == morphDisplay {
+            along = Dock.along(edge, of: panel.frame, on: screen)
+            tuck(edge, on: screen)
+            return
+        }
+        if let edge = proximityEdge(for: body, on: screen, within: Dock.magnet) {
             along = Dock.along(edge, of: panel.frame, on: screen)
             tuck(edge, on: screen)
         } else {
             state = .free
+            heldMorphAmount = nil
+            morphEdge = nil
+            morphScreen = nil
+            morphDisplay = nil
+            (view as? RecorderPuckView)?.clearEdgeMorph()
             onPlaced?(place)
         }
     }
@@ -3486,56 +4631,215 @@ final class Dock {
     }
 
     private var pointerIsOnTheWindow: Bool {
-        panel.frame.contains(NSEvent.mouseLocation)
+        view.isVisibleHit(at: NSEvent.mouseLocation)
     }
 
     // --- the two positions at an edge ---------------------------------------------------
 
     private func tuck(_ edge: Edge, on screen: NSScreen) {
         state = .tucked(edge)
-        slide(to: tuckedFrame(edge, on: screen), alpha: Dock.tuckedAlpha)
+        morphEdge = edge
+        holdMorphScreen(screen)
+        let target = tuckedFrame(edge, on: screen)
+        if let heldMorphAmount {
+            releaseMorph = (heldMorphAmount, panel.frame.origin, target.origin)
+            self.heldMorphAmount = nil
+        }
+        slide(to: target, alpha: Dock.tuckedAlpha, bound: sliverBound(edge, on: screen))
         onPlaced?(place)
     }
 
     private func peek(_ edge: Edge) {
-        guard let screen = Dock.screen(under: panel.frame) ?? NSScreen.main else { return }
+        heldMorphAmount = nil
+        releaseMorph = nil
+        preservedGrabEdge = nil
+        guard let screen = currentMorphScreen() ?? Dock.screen(under: panel.frame) ?? NSScreen.main else { return }
         state = .peeking(edge)
-        slide(to: revealedFrame(edge, on: screen), alpha: 1)
+        morphEdge = edge
+        holdMorphScreen(screen)
+        slide(to: revealedFrame(edge, on: screen), alpha: 1, bound: sliverBound(edge, on: screen))
     }
 
     /// A tucked or peeking window put back against its edge after the screens
     /// changed under it — on the screen it is now nearest, which may be a
     /// different one from the one it was tucked into.
     private func reanchor() {
-        guard let screen = Dock.screen(under: panel.frame) ?? NSScreen.main else { return }
+        motion.interrupt()
+        heldMorphAmount = nil
+        releaseMorph = nil
+        preservedGrabEdge = nil
+        guard let screen = currentMorphScreen() ?? Dock.screen(under: panel.frame) ?? NSScreen.main else { return }
+        holdMorphScreen(screen)
         switch state {
         case let .tucked(edge):
             panel.setFrame(tuckedFrame(edge, on: screen), display: true)
+            morphEdge = edge
+            applyMorph(edge, at: panel.frame.origin, on: screen)
         case let .peeking(edge):
             panel.setFrame(revealedFrame(edge, on: screen), display: true)
+            morphEdge = edge
+            applyMorph(edge, at: panel.frame.origin, on: screen)
         case .free:
             panel.setFrameOrigin(Dock.clamped(
                 panel.frame.origin, size: panel.frame.size, within: screen.visibleFrame
             ))
+            morphEdge = nil
+            morphScreen = nil
+            morphDisplay = nil
+            (view as? RecorderPuckView)?.clearEdgeMorph()
         case .hanging:
             break
         }
     }
 
-    /// The window moved and dimmed in one fixed-length ease-out, or at once
-    /// under Reduce Motion: a window sliding two hundred points is the large
-    /// movement that setting asks not to see.
-    private func slide(to frame: NSRect, alpha: CGFloat) {
+    /// Spring the origin while alpha fades independently; accessibility places
+    /// the window immediately without creating a display link.
+    private func slide(to frame: NSRect, alpha: CGFloat, bound: ((CGPoint) -> CGPoint)? = nil) {
         guard !reduceMotion else {
+            motion.interrupt()
             panel.setFrame(frame, display: true)
             panel.alphaValue = alpha
+            if let edge = morphEdge, let screen = currentMorphScreen() ?? Dock.screen(under: panel.frame) ?? NSScreen.main {
+                applyMorph(edge, at: frame.origin, on: screen)
+            }
             return
+        }
+        guard let edge = morphEdge, let screen = currentMorphScreen() ?? Dock.screen(under: frame) ?? NSScreen.main else {
+            motion.move(to: frame.origin, bound: bound)
+            return
+        }
+        motion.move(to: frame.origin, bound: bound) { [weak self, weak screen] origin in
+            guard let self, let screen else { return }
+            self.applyMorph(edge, at: origin, on: screen)
         }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = Dock.sliding
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            panel.animator().setFrame(frame, display: true)
             panel.animator().alphaValue = alpha
+        }
+    }
+
+    /// The tab is measured from the frame actually on screen, not animation
+    /// time. A spring may run past its target, but its shoulders still arrive
+    /// exactly at the visible-frame boundary and a redirected grab reverses
+    /// from the shape the pointer saw.
+    private func applyMorph(_ edge: Edge, at origin: NSPoint, on screen: NSScreen) {
+        let revealed = revealedFrame(edge, on: screen).origin
+        let tucked = tuckedFrame(edge, on: screen).origin
+        let delta = NSPoint(x: tucked.x - revealed.x, y: tucked.y - revealed.y)
+        let travelled = NSPoint(x: origin.x - revealed.x, y: origin.y - revealed.y)
+        let length = delta.x * delta.x + delta.y * delta.y
+        let amount = length > 0 ? min(max((travelled.x * delta.x + travelled.y * delta.y) / length, 0), 1) : 0
+        let body = NSRect(x: origin.x + inset, y: origin.y + inset,
+                          width: panel.frame.width - inset * 2, height: panel.frame.height - inset * 2)
+        let area = screen.visibleFrame
+        let boundary: CGFloat
+        switch edge {
+        case .right: boundary = area.maxX - body.minX
+        case .left: boundary = body.maxX - area.minX
+        case .top: boundary = area.maxY - body.minY
+        case .bottom: boundary = body.maxY - area.minY
+        }
+        if let releaseMorph {
+            let transition = PuckEdgeProximity.transition(
+                from: releaseMorph.origin, to: releaseMorph.target, at: origin
+            )
+            let tucked = releaseMorph.amount + (1 - releaseMorph.amount) * transition
+            morphEdge = edge
+            holdMorphScreen(screen)
+            (view as? RecorderPuckView)?.setEdgeMorph(edge, amount: tucked, boundary: boundary,
+                visibleFrame: area, heldAmount: releaseMorph.amount, transition: transition)
+            if transition >= 1 { self.releaseMorph = nil }
+        } else {
+            guard amount > 0.001 else {
+                morphEdge = nil
+                (view as? RecorderPuckView)?.clearEdgeMorph()
+                return
+            }
+            morphEdge = edge
+            holdMorphScreen(screen)
+            (view as? RecorderPuckView)?.setEdgeMorph(edge, amount: amount, boundary: boundary, visibleFrame: area)
+        }
+    }
+
+    /// The held contour reaches the real edge through the view mask while the
+    /// window remains under the pointer, so there is no magnetic movement.
+    private func applyHeldMorph(_ edge: Edge, amount: CGFloat, on screen: NSScreen) {
+        let area = screen.visibleFrame
+        let boundary = edgeDistance(edge, from: body, to: area) + (edge == .left || edge == .right ? body.width : body.height)
+        (view as? RecorderPuckView)?.setEdgeMorph(edge, amount: amount, boundary: boundary,
+                                                   visibleFrame: area, held: true)
+    }
+
+    private func proximityEdge(for body: NSRect, on screen: NSScreen,
+                               within maximumGap: CGFloat = PuckEdgeProximity.outerGap) -> Edge? {
+        let area = screen.visibleFrame
+        let edges: [Edge] = [.left, .right, .top, .bottom]
+        let distances = [body.minX - area.minX, area.maxX - body.maxX,
+                         area.maxY - body.maxY, body.minY - area.minY]
+        let midpoint = NSPoint(x: body.midX, y: body.midY)
+        let exposed = edges.map { self.exposed($0, on: screen, at: midpoint) }
+        let current = morphEdge.flatMap { edges.firstIndex(of: $0) }
+        return PuckEdgeProximity.chosenIndex(
+            distances: distances, exposed: exposed, current: current, maximumGap: maximumGap
+        )
+            .map { edges[$0] }
+    }
+
+    private func edgeDistance(_ edge: Edge, from body: NSRect, to area: NSRect) -> CGFloat {
+        switch edge {
+        case .left: return body.minX - area.minX
+        case .right: return area.maxX - body.maxX
+        case .top: return area.maxY - body.maxY
+        case .bottom: return body.minY - area.minY
+        }
+    }
+
+    /// A neighbour across a physical display boundary owns that passage. The
+    /// outer desktop edge alone may grow a tab, preventing a drag from being
+    /// captured while it crosses between screens.
+    private func exposed(_ edge: Edge, on screen: NSScreen, at point: NSPoint) -> Bool {
+        let frame = screen.frame
+        let probe: NSPoint
+        switch edge {
+        case .left: probe = NSPoint(x: frame.minX - 1, y: point.y)
+        case .right: probe = NSPoint(x: frame.maxX + 1, y: point.y)
+        case .top: probe = NSPoint(x: point.x, y: frame.maxY + 1)
+        case .bottom: probe = NSPoint(x: point.x, y: frame.minY - 1)
+        }
+        return !NSScreen.screens.contains { other in
+            other != screen && other.frame.insetBy(dx: -1, dy: -1).contains(probe)
+        }
+    }
+
+    /// Keep a moving tab on the display that accepted it, unless that display
+    /// disappears. A drag that crosses displays deliberately becomes a free
+    /// puck before the new screen can decide its own edge on release.
+    private func holdMorphScreen(_ screen: NSScreen) {
+        morphScreen = screen
+        morphDisplay = Dock.number(of: screen)
+    }
+
+    private func currentMorphScreen() -> NSScreen? {
+        if let morphDisplay { return Dock.screen(numbered: morphDisplay) }
+        return morphScreen
+    }
+
+    /// Half the peek remains visible even when an incoming velocity needs
+    /// more room than the spring's ordinary zero-velocity overshoot.
+    private func sliverBound(_ edge: Edge, on screen: NSScreen) -> (CGPoint) -> CGPoint {
+        let area = screen.visibleFrame
+        let size = panel.frame.size
+        let inset = self.inset
+        return { point in
+            var safe = point
+            switch edge {
+            case .left: safe.x = max(safe.x, area.minX + Dock.peek / 2 - size.width + inset)
+            case .right: safe.x = min(safe.x, area.maxX - Dock.peek / 2 - inset)
+            case .bottom: safe.y = max(safe.y, area.minY + Dock.peek / 2 - size.height + inset)
+            case .top: safe.y = min(safe.y, area.maxY - Dock.peek / 2 - inset)
+            }
+            return safe
         }
     }
 
@@ -3582,16 +4886,17 @@ final class Dock {
 
     // --- screens ---------------------------------------------------------------------
 
-    /// The nearest edge within reach of a point, or nothing. Tested against the
-    /// screen's whole frame rather than the part the menu bar and Dock leave,
-    /// because a window dropped under either of them was dropped at the edge.
-    static func edge(near point: NSPoint, of screen: NSScreen) -> Edge? {
-        let frame = screen.frame
+    /// The edge a window has come to rest against, or nothing. Measured from
+    /// the body to the part of the screen the menu bar and Dock leave free,
+    /// which is the same rectangle a drag is held inside — so a window pushed
+    /// as far as it will go is always within reach of the edge it was pushed at.
+    static func edge(hugged body: NSRect, on screen: NSScreen) -> Edge? {
+        let area = screen.visibleFrame
         let distances: [(Edge, CGFloat)] = [
-            (.left, point.x - frame.minX), (.right, frame.maxX - point.x),
-            (.top, frame.maxY - point.y), (.bottom, point.y - frame.minY),
+            (.left, body.minX - area.minX), (.right, area.maxX - body.maxX),
+            (.top, area.maxY - body.maxY), (.bottom, body.minY - area.minY),
         ]
-        return distances.filter { $0.1 <= snap }.min { $0.1 < $1.1 }?.0
+        return distances.filter { $0.1 <= magnet }.min { $0.1 < $1.1 }?.0
     }
 
     /// How far along an edge a frame's middle sits, as a fraction of the screen.
@@ -3641,10 +4946,16 @@ extension NSRect {
 
 // MARK: - end of meters and marks
 
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-// accessory: this app is its menu bar item and nothing else — no Dock tile, no
-// window, and no place in the app switcher for something with nothing to show
-app.setActivationPolicy(.accessory)
-app.run()
+@main
+struct RecorderApplication {
+    /// An explicit entry point lets the app compile with vendored source files.
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        // accessory: this app is its menu bar item and nothing else — no Dock tile, no
+        // window, and no place in the app switcher for something with nothing to show
+        app.setActivationPolicy(.accessory)
+        withExtendedLifetime(delegate) { app.run() }
+    }
+}

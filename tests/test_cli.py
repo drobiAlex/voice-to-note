@@ -1,5 +1,10 @@
 import inspect
+import json
+import os
+import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -7,6 +12,7 @@ from conftest import StubRepo
 
 from voice_to_note import cli, config, services
 from voice_to_note.domain import Memo, Segment, Speaker
+from voice_to_note.gateways import GatewayError
 from voice_to_note.storage.repository import Repository
 from voice_to_note.transforms.youtube import YouTubeVideo
 
@@ -44,6 +50,41 @@ def fresh_import(monkeypatch) -> None:
     test about what the pipeline does is not also a test about the duplicate
     every `process` run asks after before it starts."""
     monkeypatch.setattr(services, "find_duplicate", lambda _repo, _src: None)
+
+
+def record_events(capsys) -> list[dict[str, object]]:
+    """The machine-only lines the menu bar consumes from a recording command."""
+    return [
+        json.loads(line.removeprefix("vtn-event "))
+        for line in capsys.readouterr().err.splitlines()
+        if line.startswith("vtn-event ")
+    ]
+
+
+class StoppedRecording:
+    """A capture helper whose first wait is the menu bar's Stop interrupt."""
+
+    def wait(self) -> int:
+        raise KeyboardInterrupt
+
+    def stop(self) -> None:
+        pass
+
+
+def fake_recording(monkeypatch, tmp_path) -> None:
+    """Makes `record` reach processing with two harmless saved tracks."""
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr(config, "RECORDINGS_DIR", tmp_path / "recordings")
+    monkeypatch.setattr(cli, "_checked", lambda _args: (frozenset({"notes"}), None))
+    monkeypatch.setattr(cli, "_meter", lambda _raw: (None, lambda: None))
+
+    def start(system, mic, **_kwargs):
+        system.parent.mkdir(parents=True)
+        system.write_bytes(b"system")
+        mic.write_bytes(b"mic")
+        return StoppedRecording()
+
+    monkeypatch.setattr(cli.capture, "start", start)
 
 
 def listing_line(memo, dur: str) -> str:
@@ -377,6 +418,14 @@ def test_the_notes_command_still_prints_the_extraction_by_default(monkeypatch, c
     assert capsys.readouterr().out == "the notes\n"
 
 
+def test_the_notes_export_command_returns_the_stable_note_path(monkeypatch, capsys):
+    monkeypatch.setattr(services, "export_notes", lambda _repo, _id: Path("/vtn/data/notes/3.md"))
+
+    run(monkeypatch, StubRepo(), "notes", "3", "--export")
+
+    assert capsys.readouterr().out == "/vtn/data/notes/3.md\n"
+
+
 def test_the_notes_for_an_archived_memo_still_print(repo, monkeypatch, capsys):
     # archiving hides a memo from listings only; its notes still read on
     memo_id = add_memo(repo, segments=[Segment(0, 1000, "Ship it", speaker="S1")])
@@ -452,6 +501,255 @@ def test_processing_without_a_project_files_it_under_other(tmp_path, monkeypatch
     run(monkeypatch, StubRepo(), "process", str(src))
 
     assert seen["project"] == "other"
+
+
+def test_events_report_friendly_pipeline_stages_and_transcript_readiness(
+    tmp_path, monkeypatch, capsys
+):
+    src = tmp_path / "standup.m4a"
+    src.write_bytes(b"fake audio")
+
+    def process_memo(_repo, _src, **kwargs):
+        kwargs["progress"](1, "converting")
+        kwargs["progress"](2, "transcribing")
+        return services.ProcessResult(7, 2, [], "en")
+
+    monkeypatch.setattr(services, "process_memo", process_memo)
+    fresh_import(monkeypatch)
+    run(monkeypatch, StubRepo(), "process", str(src), "--steps", "", "--events")
+
+    events = [json.loads(line.removeprefix("vtn-event ")) for line in capsys.readouterr().err.splitlines()
+              if line.startswith("vtn-event ")]
+    assert events == [
+        {"event": "stage", "stage": "preparing audio"},
+        {"event": "stage", "stage": "transcribing"},
+        {"event": "transcript_ready", "memo_id": 7},
+    ]
+
+
+def test_events_report_note_failure_without_claiming_ready(tmp_path, monkeypatch, capsys):
+    src = tmp_path / "standup.m4a"
+    src.write_bytes(b"fake audio")
+    monkeypatch.setattr(
+        services, "process_memo", lambda *_a, **_k: services.ProcessResult(8, 1, [], "en")
+    )
+    monkeypatch.setattr(services, "run_extraction", lambda *_a, **_k: (_ for _ in ()).throw(
+        services.ExtractionError("backend unavailable")
+    ))
+    fresh_import(monkeypatch)
+    run(monkeypatch, StubRepo(), "process", str(src), "--events")
+
+    events = [json.loads(line.removeprefix("vtn-event ")) for line in capsys.readouterr().err.splitlines()
+              if line.startswith("vtn-event ")]
+    assert events[-1]["event"] == "failed"
+    assert events[-1]["kind"] == "notes"
+    assert events[-1]["memo_id"] == 8
+    assert not any(event["event"] == "ready" for event in events)
+
+
+def test_record_events_ready_after_a_live_transcript_is_finished(tmp_path, monkeypatch, capsys):
+    fake_recording(monkeypatch, tmp_path)
+
+    class Live:
+        memo_id = 31
+
+        def stop(self):
+            return services.LiveResult(2, "en")
+
+    monkeypatch.setattr(services, "start_live", lambda *_args, **_kwargs: Live())
+    monkeypatch.setattr(
+        services.audio, "merge_tracks", lambda _system, _mic, dst: dst.write_bytes(b"m4a")
+    )
+
+    def finish_live(_repo, _memo_id, _merged, **kwargs):
+        kwargs["progress"](3, "diarizing")
+        return services.ProcessResult(31, 2, ["S1"], "en")
+
+    monkeypatch.setattr(services, "finish_live", finish_live)
+    monkeypatch.setattr(services, "run_extraction", lambda *_args, **_kwargs: "local")
+    monkeypatch.setattr(services, "notes", lambda *_args, **_kwargs: "notes")
+
+    run(monkeypatch, StubRepo(), "record", "--events")
+
+    assert record_events(capsys) == [
+        {"event": "stage", "stage": "transcribing"},
+        {"event": "stage", "stage": "preparing audio"},
+        {"event": "stage", "stage": "identifying speakers"},
+        {"event": "stage", "stage": "writing notes"},
+        {"event": "ready", "memo_id": 31},
+    ]
+
+
+def test_record_cancel_during_live_drain_keeps_the_saved_memo_and_never_readies(
+    tmp_path, monkeypatch, capsys
+):
+    fake_recording(monkeypatch, tmp_path)
+
+    class Live:
+        memo_id = 32
+
+        def stop(self):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(services, "start_live", lambda *_args, **_kwargs: Live())
+
+    with pytest.raises(SystemExit) as exited:
+        run(monkeypatch, StubRepo(), "record", "--events")
+
+    assert exited.value.code == 130
+    events = record_events(capsys)
+    assert events[-1] == {"event": "cancelled", "memo_id": 32}
+    assert not any(event["event"] in {"ready", "transcript_ready"} for event in events)
+
+
+def test_record_cancel_during_merge_keeps_raw_tracks_and_never_readies(
+    tmp_path, monkeypatch, capsys
+):
+    fake_recording(monkeypatch, tmp_path)
+
+    class Live:
+        memo_id = 33
+
+        def stop(self):
+            return services.LiveResult(0, "en", failure="live disabled")
+
+    monkeypatch.setattr(services, "start_live", lambda *_args, **_kwargs: Live())
+    monkeypatch.setattr(
+        services.audio, "merge_tracks", lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
+
+    with pytest.raises(SystemExit) as exited:
+        run(monkeypatch, StubRepo(), "record", "--events")
+
+    assert exited.value.code == 130
+    events = record_events(capsys)
+    assert events[-1] == {"event": "cancelled", "memo_id": 33}
+    assert not any(event["event"] in {"ready", "transcript_ready"} for event in events)
+    tracks = next((tmp_path / "recordings").iterdir())
+    assert (tracks / "system.wav").read_bytes() == b"system"
+    assert (tracks / "mic.wav").read_bytes() == b"mic"
+
+
+def test_record_events_report_a_processing_failure_from_merge(tmp_path, monkeypatch, capsys):
+    fake_recording(monkeypatch, tmp_path)
+
+    class Live:
+        memo_id = 34
+
+        def stop(self):
+            return services.LiveResult(0, "en", failure="live disabled")
+
+    monkeypatch.setattr(services, "start_live", lambda *_args, **_kwargs: Live())
+    monkeypatch.setattr(
+        services.audio,
+        "merge_tracks",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(GatewayError("ffmpeg unavailable")),
+    )
+
+    with pytest.raises(SystemExit) as exited:
+        run(monkeypatch, StubRepo(), "record", "--events")
+
+    assert exited.value.code == "ffmpeg unavailable"
+    assert record_events(capsys)[-1] == {
+        "event": "failed",
+        "kind": "processing",
+        "message": "ffmpeg unavailable",
+    }
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process groups need POSIX signals")
+def test_postcapture_group_cancel_stops_a_live_whisper_descendant_without_hitting_host(tmp_path):
+    """Use a child CLI process so a real group signal cannot hit pytest itself."""
+    driver = tmp_path / "record-driver.py"
+    descendant_pid = tmp_path / "descendant.pid"
+    driver.write_text(
+        '''
+import subprocess
+import sys
+import time
+from pathlib import Path
+from types import SimpleNamespace
+from voice_to_note import cli, config, services
+
+root, pid_file = map(Path, sys.argv[1:])
+cli.sys.platform = "darwin"
+config.RECORDINGS_DIR = root / "recordings"
+cli._checked = lambda _args: (frozenset(), None)
+cli._meter = lambda _raw: (None, lambda: None)
+class Repo:
+    def __enter__(self): return self
+    def __exit__(self, *_args): return False
+class Capture:
+    def wait(self): raise KeyboardInterrupt
+    def stop(self): pass
+def start(system, mic, **_kwargs):
+    system.parent.mkdir(parents=True)
+    system.write_bytes(b"system")
+    mic.write_bytes(b"mic")
+    return Capture()
+class Live:
+    memo_id = 35
+    def stop(self):
+        worker = "import subprocess,sys,time; from pathlib import Path; child=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); Path(sys.argv[1]).write_text(str(child.pid));\\ntry: time.sleep(60)\\nexcept KeyboardInterrupt: child.wait()"
+        subprocess.run([sys.executable, "-c", worker, str(pid_file)], check=False)
+        return services.LiveResult(0, "en")
+cli.Repository = lambda: Repo()
+cli.capture.start = start
+services.start_live = lambda *_args, **_kwargs: Live()
+cli.cmd_record(SimpleNamespace(events=True, levels=False, output_device=None, input_device=None, project="other", template="notes", speakers="auto", steps=""))
+'''.lstrip()
+    )
+    env = os.environ | {"VTN_JOB_PROCESS_GROUP": "1"}
+    source = str(Path(__file__).parents[1] / "src")
+    env["PYTHONPATH"] = source + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.Popen(
+        [sys.executable, str(driver), str(tmp_path), str(descendant_pid)],
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    pgid: int | None = None
+    try:
+        assert proc.stderr is not None
+        deadline = time.monotonic() + 5
+        while True:
+            line = proc.stderr.readline()
+            assert line, "record command ended before its cancellation handshake"
+            if line.startswith("vtn-event "):
+                handshake = json.loads(line.removeprefix("vtn-event "))
+                if handshake["event"] == "cancellable":
+                    break
+            assert time.monotonic() < deadline, "record command never reached processing"
+        pgid = handshake["pgid"]
+        assert isinstance(pgid, int) and pgid > 0
+        deadline = time.monotonic() + 5
+        while not descendant_pid.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert descendant_pid.exists(), "the live worker never started its subprocess child"
+
+        os.killpg(pgid, signal.SIGINT)
+        assert proc.wait(timeout=10) == 130
+        assert sentinel.poll() is None
+        child_pid = int(descendant_pid.read_text())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("the live worker's subprocess child survived group cancellation")
+    finally:
+        if pgid is not None and proc.poll() is None:
+            os.killpg(pgid, signal.SIGKILL)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        if sentinel.poll() is None:
+            sentinel.terminate()
+            sentinel.wait()
 
 
 def test_processing_with_an_unknown_template_never_reaches_the_pipeline(

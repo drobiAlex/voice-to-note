@@ -100,7 +100,7 @@ def build_capture(source: Path, plist: Path, dst: Path) -> None:
     )
 
 
-def build_menubar(source: Path, plist: Path, app: Path) -> None:
+def build_menubar(sources: list[Path], plist: Path, app: Path) -> None:
     """Compiles the menu bar recorder, which starts a meeting from the menu bar
     instead of from a terminal that has to stay open for the length of a call.
     It is assembled into an app bundle rather than left as a binary because
@@ -111,7 +111,7 @@ def build_menubar(source: Path, plist: Path, app: Path) -> None:
         raise GatewayError("missing: swiftc — install: xcode-select --install")
     binary = app / "Contents" / "MacOS" / "vtn-menubar"
     binary.parent.mkdir(parents=True, exist_ok=True)
-    _run(["swiftc", str(source), "-O", "-o", str(binary)], "building vtn-menubar")
+    _run(["swiftc", *map(str, sources), "-O", "-o", str(binary)], "building vtn-menubar")
     shutil.copyfile(plist, app / "Contents" / "Info.plist")
     # signed under a fixed identifier for the same reason the capture helper is:
     # macOS files the permissions a person grants under it, and the ad-hoc

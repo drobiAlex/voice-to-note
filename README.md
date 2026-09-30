@@ -70,6 +70,14 @@ Running `vtn` with no command opens the TUI too, once setup has run.
 `vtn --help` lists the full set (diarize, refine, devices, projects, speaker
 naming, templates, config, …).
 
+On a Mac, `vtn menubar --preview` checks the recorder without recording or
+opening a note: choose Processing to see its elapsed stage, Cancelling
+processing to inspect the queued cancellation state, and Note ready to inspect
+the direct Open Note affordance. During a real recording, Stop changes to a
+named processing stage and clock; Cancel keeps the captured audio and any
+completed work. A puck tucked into an outer screen edge opens from a deliberate
+tab click or a short dwell, while a press-and-drag still moves it.
+
 ## Roadmap
 
 Shipped:
@@ -98,6 +106,7 @@ Later:
 - [ ] To-dos on the phone via Apple Reminders — two-way: a Reminders list per project (iCloud carries it to the iPhone), checking off in vtn completes the reminder and completing it on the phone marks the to-do done, last writer wins by modification time; goes through an EventKit helper beside `capture.swift`, not AppleScript — EventKit reads all 4088 reminders here in under a second, AppleScript takes 25 s to list eight lists. Apple Notes checklists are out: no scripting interface can read or write a checkbox
 - [ ] Insights on the phone via Apple Notes — publish each memo's notes (summary, insights, decisions, open questions, dates, tags) as one note in a `vtn` folder, republished whenever the note changes, with each to-do line linking to its reminder so a tap opens the box to tick; a note edited on the phone is never overwritten
 - [ ] Chunk rollover in the recorder — have `capture.swift` close and reopen its files on a cadence and announce each finished pair on the stdout protocol it already speaks, so live transcription reads whole files instead of tracking byte cursors through ones still being written
+- [ ] Change the microphone or the sound source mid-meeting — the device pickers go quiet the moment a tape starts, because a choice made then would silently be a choice for the *next* recording; so a headset that dies twenty minutes into a call has no cure but stopping and starting again, which costs the meeting. The swap rides on chunk rollover above: `capture.swift` learns a command channel on its stdin, closes the pair of files it is writing, reopens them on the new device and announces the finished pair the way rollover already announces one — so a sample rate or a channel count that changes with the device changes a file boundary instead of corrupting a header written minutes ago. The merge concatenates the pieces and resamples where they differ, and live transcription needs nothing new, since it already reads whole finished files. It is the other half of the silence warning: amber says the microphone has gone dead, and this is what somebody does about it without losing the room. Step by step, with the why for each step, in `docs/device-swap-plan.md`
 - [ ] A two-speed transcript — a small model keeping up with the room while the meeting runs, then one pass with the full model over the archive afterwards that replaces the words; immediate text and best-effort quality from the same recording, which is what makes a heavy model usable live on a machine without a GPU
 - [ ] Background worker & job queue — durable processing that survives restarts, batch imports, and the shape a future always-on server needs; deliberately deferred until that server becomes real
 - [ ] Full-text search across transcripts and notes
@@ -114,3 +123,10 @@ uv run ruff check src tests
 ```
 
 CI runs all three on every push, with a coverage floor of 84%.
+
+## Third-party notices
+
+The spring physics in `src/voice_to_note/native/springs.swift` comes from
+[MacPaw/CocoaSprings](https://github.com/MacPaw/CocoaSprings), copyright © 2023
+MacPaw Inc., under the MIT License. The vendored file includes the full license,
+upstream headers, and the source commit; platform animation wrappers are not included.
