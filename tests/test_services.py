@@ -3100,11 +3100,24 @@ def test_setup_leaves_the_recorder_alone_while_a_meeting_is_being_taped(monkeypa
 def test_setup_with_launching_switched_off_builds_the_recorder_but_never_starts_it(monkeypatch):
     monkeypatch.setattr(services.sys, "platform", "darwin")
     monkeypatch.setattr(services.config, "SETUP_LAUNCH", "off")
+    monkeypatch.setattr(
+        services.bootstrap.shutil,
+        "which",
+        lambda tool: None if tool == "ffmpeg" else f"/usr/bin/{tool}",
+    )
+    built = []
     opened = []
-    world = services.mock_world()
-    world = dataclasses.replace(world, open_menubar=lambda app: opened.append(app))
-    logged = []
+    world = dataclasses.replace(
+        services.mock_world(sleep=lambda _s: None),
+        require_tools=lambda: None,
+        build_menubar=lambda _sources, _plist, app: built.append(app),
+        open_menubar=lambda app: opened.append(app),
+    )
+    logged: list[str] = []
+
     services.setup(log=logged.append, world=world)
+
+    assert built == [services.config.MENUBAR_APP]
     assert "[9/9] menu bar recorder launch — off by setting, skipped" in logged
     assert opened == []
 
