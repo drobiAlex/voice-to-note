@@ -3321,6 +3321,7 @@ final class RecorderPuckView: NSView, Dockable {
     private var gripping = false
     private var gripStartedAt: NSPoint?
     private var pointer: NSTrackingArea?
+    private var hoveringVisibleBody = false
     private var state = RecorderState.idle
     private var noteReady = false
     private var edgeMorph: (edge: Dock.Edge, amount: CGFloat, boundary: CGFloat)?
@@ -3443,7 +3444,6 @@ final class RecorderPuckView: NSView, Dockable {
             control.alphaValue = 1
             control.isHidden = false
         }
-        updateTrackingAreas()
     }
 
     /// `CALayer.mask` is evaluated in a layer's local coordinates.  Reusing
@@ -3480,7 +3480,6 @@ final class RecorderPuckView: NSView, Dockable {
         visibleClip.path = CGPath(rect: localRect, transform: nil)
         layer.mask = visibleClip
         CATransaction.commit()
-        updateTrackingAreas()
     }
 
     /// A clipped-off part of the panel cannot be seen, so it must not consume
@@ -3781,17 +3780,17 @@ final class RecorderPuckView: NSView, Dockable {
 
     /// `.activeAlways`, because this window never becomes key and the app it
     /// belongs to is never the active one: any narrower scope would report no
-    /// crossing at all. Only the visible body is tracked. The transparent
-    /// shadow margin, and the part clipped behind a display edge, are neither
-    /// a tab someone can deliberately hover nor a valid way to open it.
+    /// crossing at all. The fixed disc envelope stays registered while the
+    /// puck moves; rebuilding an active tracking area during each spring frame
+    /// manufactures exit/enter pairs and restarts the dwell. Mouse events then
+    /// reduce that envelope to the current contour and visible clip.
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let pointer {
             removeTrackingArea(pointer)
         }
-        let visible = (clippedVisibleRect ?? discRect).intersection(discRect)
         let area = NSTrackingArea(
-            rect: visible, options: [.mouseEnteredAndExited, .activeAlways],
+            rect: discRect, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways],
             owner: self, userInfo: nil
         )
         addTrackingArea(area)
@@ -3799,11 +3798,33 @@ final class RecorderPuckView: NSView, Dockable {
     }
 
     override func mouseEntered(with event: NSEvent) {
-        onHover?(true)
+        updateVisibleHover()
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        updateVisibleHover()
     }
 
     override func mouseExited(with event: NSEvent) {
-        onHover?(false)
+        updateVisibleHover()
+    }
+
+    /// The tracking rectangle deliberately includes the disc's transparent
+    /// corners and may include a clipped part of a tucked puck. Emit only when
+    /// the pointer crosses the visible body itself, so the dock's dwell sees
+    /// stable semantic hover rather than AppKit tracking-area churn.
+    private func updateVisibleHover() {
+        let inside = isVisibleHit(at: NSEvent.mouseLocation)
+        guard inside != hoveringVisibleBody else { return }
+        hoveringVisibleBody = inside
+        onHover?(inside)
+    }
+
+    /// A hidden panel need not receive the matching exit AppKit would normally
+    /// send. Its dock has already cancelled any pending hover timer, so reset
+    /// this local event state silently before the panel can be shown again.
+    func resetHoverTracking() {
+        hoveringVisibleBody = false
     }
 
     /// The disc grown into place out of the status item above it, the way the
@@ -4372,6 +4393,7 @@ final class Dock {
             self?.heldMorphAmount = nil
             self?.releaseMorph = nil
             self?.preservedGrabEdge = nil
+            (self?.view as? RecorderPuckView)?.resetHoverTracking()
             (self?.view as? RecorderPuckView)?.stopMotion()
         }
         view.onGrip = { [weak self] grip in self?.gripped(grip) }
