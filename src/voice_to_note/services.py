@@ -2181,13 +2181,6 @@ def delete_chat(repo: Repository, conversation_id: int) -> None:
         raise NotFound(f"no conversation with id {conversation_id}")
 
 
-def set_chat_memos(repo: Repository, conversation_id: int, memo_ids: Sequence[int]) -> None:
-    """Changes what a conversation is about, keeping what was already said."""
-    require_conversation(repo, conversation_id)
-    ids, titles = _scope(repo, memo_ids)
-    repo.set_conversation_memos(conversation_id, ids, titles)
-
-
 def chat_scope_text(convo: Conversation) -> str:
     """The memos a thread is about, as a heading says it: ids and names."""
     if not convo.memo_ids:

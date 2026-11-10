@@ -868,20 +868,6 @@ class Repository:
             ],
         )
 
-    def set_conversation_memos(
-        self, conversation_id: int, memo_ids: Sequence[int], titles: Sequence[str]
-    ) -> None:
-        """Rescopes a thread: whatever it was about, it is now about these. The
-        history stays — a question asked over the old scope is still what was
-        asked — which is why the scope is its own table and not a column on the
-        messages."""
-        with self.con:
-            self.con.execute(
-                "DELETE FROM conversation_memos WHERE conversation_id=?", (conversation_id,)
-            )
-            self._write_scope(conversation_id, memo_ids, titles)
-            self._touch_conversation(conversation_id)
-
     def _touch_conversation(self, conversation_id: int) -> None:
         """Marks a thread as changed just now, the way `_touch` marks a memo:
         a list of conversations is ordered by this, so every write a reader

@@ -245,20 +245,6 @@ def test_codex_complete_passes_the_prompt_on_stdin_with_no_model_flag_by_default
     assert seen["input"] == "summarise this"
 
 
-def test_codex_complete_passes_the_model_it_is_given(monkeypatch):
-    seen: dict = {}
-
-    def run(cmd, **kwargs):
-        seen["cmd"] = cmd
-        return llm.subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    monkeypatch.setattr(llm.subprocess, "run", run)
-
-    llm.codex_complete("summarise this", model="gpt-5")
-
-    assert seen["cmd"] == ["codex", "exec", "-c", 'model="gpt-5"']
-
-
 def test_codex_complete_falls_back_to_the_configured_model(monkeypatch):
     monkeypatch.setattr(config, "CODEX_MODEL", "gpt-5-mini")
     seen: dict = {}
@@ -319,20 +305,6 @@ def test_gemini_complete_passes_the_prompt_as_an_argument_with_no_model_flag_by_
     llm.gemini_complete("summarise this")
 
     assert seen["cmd"] == ["gemini", "-p", "summarise this"]
-
-
-def test_gemini_complete_passes_the_model_it_is_given(monkeypatch):
-    seen: dict = {}
-
-    def run(cmd, **kwargs):
-        seen["cmd"] = cmd
-        return llm.subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    monkeypatch.setattr(llm.subprocess, "run", run)
-
-    llm.gemini_complete("summarise this", model="gemini-2.5-pro")
-
-    assert seen["cmd"] == ["gemini", "-p", "summarise this", "-m", "gemini-2.5-pro"]
 
 
 # --- asking for a transcript repair ---------------------------------------

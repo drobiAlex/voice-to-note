@@ -2813,13 +2813,12 @@ def test_asking_an_unknown_chat_is_refused(repo, wav, monkeypatch):
         services.chat_history(repo, 99)
 
 
-def test_a_chat_can_be_renamed_rescoped_and_deleted(repo, wav):
-    a, b = said(repo, wav, "x", filename="a"), said(repo, wav, "y", filename="b")
+def test_a_chat_can_be_renamed_and_deleted(repo, wav):
+    a = said(repo, wav, "x", filename="a")
     cid = services.start_chat(repo, [a])
     services.rename_chat(repo, cid, " pricing ")
-    services.set_chat_memos(repo, cid, [b])
     convo = repo.conversation(cid)
-    assert (convo.title, convo.memo_ids) == ("pricing", (b,))
+    assert (convo.title, convo.memo_ids) == ("pricing", (a,))
     with pytest.raises(services.InvalidInput):
         services.rename_chat(repo, cid, "  ")
     with pytest.raises(services.NotFound):

@@ -32,20 +32,6 @@ class VideoInfo(TypedDict, total=False):
     automatic_captions: dict[str, list[CaptionTrack]]
 
 
-class Json3Seg(TypedDict, total=False):
-    """One run of caption text inside an event."""
-
-    utf8: str
-
-
-class Json3Event(TypedDict, total=False):
-    """One timed caption event in YouTube's json3 track format."""
-
-    tStartMs: int
-    dDurationMs: int
-    segs: list[Json3Seg]
-
-
 @dataclass(frozen=True)
 class YouTubeVideo:
     """One video as the fetcher reports it: what to call the memo, when to
