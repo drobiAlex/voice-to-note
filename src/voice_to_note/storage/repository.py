@@ -420,6 +420,23 @@ class Repository:
             )
         ]
 
+    def tags(self) -> list[tuple[str, int]]:
+        """Every tag the live memos' notes carry and how many memos carry it,
+        most used first, for a search to offer before anything is typed. Tags
+        are counted the way `memos` matches them — whole and in any case, from
+        any extraction a memo has had — so the number beside one is the length
+        of the list picking it opens onto."""
+        return [
+            (r["tag"], r["n"])
+            for r in self.con.execute(
+                "SELECT min(t.value) AS tag, count(DISTINCT e.memo_id) AS n"
+                " FROM extractions e JOIN json_each(e.json, '$.tags') t"
+                " JOIN memos m ON m.id = e.memo_id"
+                " WHERE m.archived_at IS NULL AND trim(t.value) <> ''"
+                " GROUP BY lower(t.value) ORDER BY n DESC, lower(t.value)"
+            )
+        ]
+
     def notes_md(self, memo_id: int) -> str | None:
         """A memo's hand-edited notes, if anyone has written any. Kept out of the
         listing projection so drawing a table of memos does not drag every note

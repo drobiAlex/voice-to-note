@@ -647,6 +647,20 @@ def test_writing_a_note_by_hand_leaves_the_tags_where_they_were(repo):
     assert [m.id for m in repo.memos(tag="release")] == [memo_id]
 
 
+def test_the_tags_on_offer_are_counted_by_memo_most_used_first(repo):
+    tag_memo(repo, "a.m4a", ["release", "hiring"])
+    tag_memo(repo, "b.m4a", ["Release", "release"])
+
+    assert repo.tags() == [("Release", 2), ("hiring", 1)]
+
+
+def test_an_archived_memo_offers_no_tags_to_search_by(repo):
+    put_away = tag_memo(repo, "a.m4a", ["release"])
+    repo.set_archived(put_away, True)
+
+    assert repo.tags() == []
+
+
 # --- when a memo was last changed -----------------------------------------
 
 

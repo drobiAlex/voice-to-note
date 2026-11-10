@@ -1870,6 +1870,11 @@ def projects(repo: Repository) -> list[tuple[str, int]]:
     return repo.projects()
 
 
+def tags(repo: Repository) -> list[tuple[str, int]]:
+    """Every tag there is to search by and how many memos carry it."""
+    return repo.tags()
+
+
 def data_version(repo: Repository) -> int:
     """What this connection's view of the stored data is numbered at, for a
     screen that has to notice writes made outside it. Meaningful only as a

@@ -18,12 +18,12 @@ beside the built-ins.
 - **Knows who is talking** — name a voice once and later memos recognise it
   across recordings.
 - **To-dos as first-class items** — action items become a per-project board
-  (`T` in the TUI, `vtn todos` outside it); checking one off survives
+  (`g` `t` in the TUI, `vtn todos` outside it); checking one off survives
   re-extraction, and the same commitment restated next week doesn't duplicate.
 - **A memo archive, not a dump** — projects, tags, rename/move/delete like a
   file system, from the TUI or the CLI; a memo you are done with goes in a
-  drawer (`h` in the TUI, `vtn archive`) that hides it and its to-dos without
-  deleting a byte, and the same key brings it back; the open TUI notices memos
+  drawer (space → `h` in the TUI, `vtn archive`) that hides it and its to-dos
+  without deleting a byte, and the same key brings it back; the open TUI notices memos
   other processes store and refreshes itself.
 - **Agent-ready** — humans get a TUI (`vtn tui`), agents get the same CLI:
   results go to stdout, progress to stderr, and `list`, `show` and `notes`
@@ -86,11 +86,11 @@ Shipped:
 - [x] Native meeting recording — system audio + microphone, from `vtn record` or the menu bar app
 - [x] Menu bar recorder with project and device pickers — system mix by default, any output or microphone by choice
 - [x] Memo management like a file system — delete, rename and move memos from the list or the command line
-- [x] To-dos as first-class items — counted per memo, reconciled through re-extraction, checked off from the board (`T`), beside a note (`c`) or the command line
+- [x] To-dos as first-class items — counted per memo, reconciled through re-extraction, checked off from the board (`g` `t`), beside a note (space → `t`) or the command line
 - [x] Live level meters in the recorder — a waveform strip per side beside the timer in the menu bar, native level indicators and a silence hint in its menu, a live meter in the terminal for `vtn record`, and `--levels` for anything else that wants the numbers
 - [x] Every memo at once — an All row above the projects in the TUI sidebar, a project column in the table, and every listing sortable by creation or last update (`s` in the TUI, `vtn list --sort`)
 - [x] Transcribing a meeting while it is still being recorded — `vtn record` reads the two growing tracks a stretch at a time, cuts each stretch where nobody is talking, and stores the words as they are said; stopping the recording leaves the last stretch and the speaker pass instead of the whole meeting. Measured over 25 minutes of speech: the wait after the last word drops from 204 s to 15 s, and the work costs the same — chunks cut at a pause were within 13% of the whole file, and at two minutes each were 10% cheaper than it, while chunks cut blind on the minute cost 160% more. `live_transcribe`, `live_chunk_s` and `live_model` in `vtn config`; a live pass that cannot run costs nothing but itself
-- [x] Archiving instead of deleting — a memo you are done with goes in a drawer under the projects (`h` in the TUI, `vtn archive`/`unarchive`, `vtn list --archived`), taking its to-dos off the board with it; nothing is rewritten, so what comes back out is exactly what went in, and opening a memo by id still works while it is away
+- [x] Archiving instead of deleting — a memo you are done with goes in a drawer under the projects (space → `h` in the TUI, `vtn archive`/`unarchive`, `vtn list --archived`), taking its to-dos off the board with it; nothing is rewritten, so what comes back out is exactly what went in, and opening a memo by id still works while it is away
 
 Later:
 - [ ] Conversations about a memo — `vtn ask` answers one question and forgets it; keep the exchange as a stored thread so follow-ups ("and who agreed to that?") carry the earlier turns, and let the TUI browse past chats beside the note
