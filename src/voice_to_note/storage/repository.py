@@ -2,7 +2,7 @@ import json
 import sqlite3
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 
@@ -16,8 +16,10 @@ from ..domain import (
     MemoListing,
     Message,
     NotesPayload,
+    RunRecord,
     Segment,
     Speaker,
+    StageRecord,
     Todo,
 )
 from ..transforms.todos import StoredTodo, reconcile, todo_items
@@ -95,6 +97,27 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages(conversation_id, id);
+CREATE TABLE IF NOT EXISTS runs (
+  id INTEGER PRIMARY KEY,
+  kind TEXT NOT NULL,
+  memo_id INTEGER,
+  started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  wall_s REAL,
+  outcome TEXT,
+  error TEXT,
+  audio_s REAL,
+  version TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS run_stages (
+  id INTEGER PRIMARY KEY,
+  run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  stage TEXT NOT NULL,
+  wall_s REAL NOT NULL,
+  cpu_s REAL,
+  outcome TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS run_stages_by_run ON run_stages(run_id);
 """
 
 MEMO_COLUMNS = (
@@ -418,6 +441,105 @@ class Repository:
                 "SELECT project, count(*) AS n FROM memos WHERE archived_at IS NULL"
                 " GROUP BY project ORDER BY project"
             )
+        ]
+
+    def start_run(self, kind: str, memo_id: int | None, version: str, keep: int) -> int:
+        """Opens the record of one piece of work and drops the oldest records
+        past `keep`, in the same transaction. Pruned on the way in rather than
+        by some later sweep, so the table is never bigger than the cap however
+        long the app goes unattended.
+
+        No foreign key to the memo, on purpose: a memo deleted afterwards does
+        not change how long the machine took over it, and that is what this
+        row is for. The stages go with their run explicitly as well as by
+        cascade, so a database opened without foreign keys enforced cannot
+        leave them behind."""
+        with self.con:
+            run_id = self.con.execute(
+                "INSERT INTO runs (kind, memo_id, version) VALUES (?, ?, ?)",
+                (kind, memo_id, version),
+            ).lastrowid
+            assert run_id is not None
+            cutoff = self.con.execute(
+                "SELECT id FROM runs ORDER BY id DESC LIMIT 1 OFFSET ?", (max(keep, 1),)
+            ).fetchone()
+            if cutoff is not None:
+                self.con.execute("DELETE FROM run_stages WHERE run_id <= ?", (cutoff["id"],))
+                self.con.execute("DELETE FROM runs WHERE id <= ?", (cutoff["id"],))
+        return run_id
+
+    def add_stage(
+        self,
+        run_id: int,
+        stage: str,
+        wall_s: float,
+        cpu_s: float | None,
+        outcome: str,
+        detail: Mapping[str, Any],
+    ) -> None:
+        """Stores how one stage of a run went, the moment it ends."""
+        with self.con:
+            self.con.execute(
+                "INSERT INTO run_stages (run_id, stage, wall_s, cpu_s, outcome, detail)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (run_id, stage, wall_s, cpu_s, outcome, json.dumps(dict(detail), default=str)),
+            )
+
+    def finish_run(
+        self,
+        run_id: int,
+        wall_s: float,
+        outcome: str,
+        error: str | None,
+        audio_s: float | None,
+        memo_id: int | None,
+    ) -> None:
+        """Closes the record of a run. The memo is written again here because
+        a pipeline only learns which memo it made once it has made it."""
+        with self.con:
+            self.con.execute(
+                "UPDATE runs SET wall_s=?, outcome=?, error=?, audio_s=?,"
+                " memo_id=COALESCE(?, memo_id) WHERE id=?",
+                (wall_s, outcome, error, audio_s, memo_id, run_id),
+            )
+
+    def runs(self, since: str | None = None, limit: int = 10_000) -> list[RunRecord]:
+        """The most recent runs, newest first, each carrying the stages it went
+        through in the order they ended. `since` is an ISO timestamp in UTC,
+        the form the runs are stamped with."""
+        where, params = ("", ()) if since is None else (" WHERE started_at >= ?", (since,))
+        rows = self.con.execute(
+            "SELECT id, kind, memo_id, started_at, wall_s, outcome, error, audio_s, version"
+            f" FROM runs{where} ORDER BY id DESC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+        stages: dict[int, list[StageRecord]] = {row["id"]: [] for row in rows}
+        if rows:
+            marks = ",".join("?" * len(rows))
+            for st in self.con.execute(
+                "SELECT run_id, stage, wall_s, cpu_s, outcome, detail FROM run_stages"
+                f" WHERE run_id IN ({marks}) ORDER BY id",
+                list(stages),
+            ):
+                stages[st["run_id"]].append(
+                    StageRecord(
+                        st["stage"], st["wall_s"], st["cpu_s"], st["outcome"], json.loads(st["detail"])
+                    )
+                )
+        return [
+            RunRecord(
+                id=row["id"],
+                kind=row["kind"],
+                memo_id=row["memo_id"],
+                started_at=row["started_at"],
+                wall_s=row["wall_s"],
+                outcome=row["outcome"],
+                error=row["error"],
+                audio_s=row["audio_s"],
+                version=row["version"],
+                stages=tuple(stages[row["id"]]),
+            )
+            for row in rows
         ]
 
     def notes_md(self, memo_id: int) -> str | None:

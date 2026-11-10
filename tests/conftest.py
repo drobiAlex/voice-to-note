@@ -76,3 +76,11 @@ def stages_take_turns(monkeypatch):
     ask otherwise, whatever a machine's own vtn.toml says. A test that means to
     exercise the overlap sets the setting itself."""
     monkeypatch.setattr(config, "OVERLAP_STAGES", "off")
+
+
+@pytest.fixture(autouse=True)
+def events_logged_aside(monkeypatch, tmp_path):
+    """Sends every event a test causes into a folder of its own. Left alone the
+    log is VTN_HOME's, which on a developer's machine is the real one — a suite
+    run would bury a week of the user's own events under its fakes."""
+    monkeypatch.setattr(config, "LOGS_DIR", tmp_path / "logs")
