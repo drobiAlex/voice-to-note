@@ -4107,6 +4107,12 @@ enum PuckMotion {
     static let dwell: TimeInterval = 0.2
     static let grace: TimeInterval = 0.4
 
+    /// How long a puck brought out without a pointer on it waits before the
+    /// ordinary grace applies. A menu item has no pointer to offer, and a
+    /// recorder that left again 0.4 s after being asked for would be useless
+    /// from one; once the pointer has been on the puck, the ordinary grace governs.
+    static let revealGrace: TimeInterval = 3
+
     /// How far along its edge the tab reaches either side of the body's middle
     /// (the outline's terminal shoulders): the footprint a pointer can find.
     static let tabHalfLength: CGFloat = 75
@@ -4296,6 +4302,7 @@ struct PuckDockModel {
     private var motionAge: TimeInterval = 0
     private var frozenFor: TimeInterval = 0
     private var dwell: TimeInterval = 0
+    private var graceLimit: TimeInterval = PuckMotion.grace
 
     /// The physics is a parameter so a harness can hand it a spring that never
     /// converges and watch the deadline do its job.
@@ -4315,6 +4322,11 @@ struct PuckDockModel {
     /// a pose whose rest position is defined, so no event can leave the model
     /// waiting on a later one to say where it is going.
     mutating func send(_ event: Event) {
+        handle(event)
+        reconcileTimers()
+    }
+
+    private mutating func handle(_ event: Event) {
         switch event {
         case .pressed: press()
         case let .dragBegan(point): beginDrag(at: point)
@@ -4343,6 +4355,44 @@ struct PuckDockModel {
         }
         if !isMotionless { stepSpring(by: seconds) }
         hover(by: seconds)
+    }
+
+    /// Whether anything is still waiting on time: a spring on its way, a press
+    /// holding one still, a pointer on a tab counting its dwell, or a peek that
+    /// nobody is pointing at counting its grace. Everything else is a puck that
+    /// would be the same a minute from now, so a driver may stop its clock; it
+    /// must ask again after every event.
+    var needsTime: Bool {
+        switch pose {
+        case .hanging, .free, .held:
+            return false
+        case let .tucked(edge, along):
+            if pressing || !isMotionless { return true }
+            guard let pointer else { return false }
+            return triggersPeek(pointer, edge, along: along)
+        case let .peeking(edge, along):
+            if pressing || !isMotionless { return true }
+            guard let pointer else { return true }
+            return !keepsPeeking(pointer, edge, along: along)
+        }
+    }
+
+    /// A level read at every event, so a timer that nobody advanced cannot
+    /// carry a stale count: a pointer that skimmed a tab and left has not been
+    /// dwelling, and one that came back to a peeking puck has ended its wait.
+    private mutating func reconcileTimers() {
+        switch pose {
+        case let .tucked(edge, along):
+            if let pointer, triggersPeek(pointer, edge, along: along) { return }
+            dwell = 0
+        case let .peeking(edge, along):
+            if let pointer, keepsPeeking(pointer, edge, along: along) {
+                dwell = 0
+                graceLimit = PuckMotion.grace
+            }
+        case .hanging, .free, .held:
+            break
+        }
     }
 
     /// Notes are handed over once, so a caller that polls cannot hear them twice.
@@ -4617,6 +4667,7 @@ struct PuckDockModel {
         if case .held = pose { heldShown = shown }
         pose = next
         dwell = 0
+        graceLimit = PuckMotion.grace
         motionAge = 0
         carry = nil
         switch next {
@@ -4734,9 +4785,10 @@ struct PuckDockModel {
         case let .peeking(edge, along):
             if let pointer, keepsPeeking(pointer, edge, along: along) {
                 dwell = 0
+                graceLimit = PuckMotion.grace
             } else {
                 dwell += seconds
-                if dwell >= PuckMotion.grace {
+                if dwell >= graceLimit {
                     move(to: .tucked(edge, along: along))
                     notes.append(.placed(place))
                 }
@@ -4759,18 +4811,29 @@ struct PuckDockModel {
     }
 
     /// A tab is a button as well as a handle: a click on it asks for the
-    /// recorder, and a click on a peeking puck gives it a fresh grace.
+    /// recorder, and a click on a peeking puck gives it a fresh grace. A click
+    /// whose pointer is somehow not on the puck gets the long first wait, like
+    /// any peek nobody is pointing at.
     private mutating func click() {
         pressing = false
         dwell = 0
-        if case let .tucked(edge, along) = pose { move(to: .peeking(edge, along: along)) }
+        if case let .tucked(edge, along) = pose {
+            move(to: .peeking(edge, along: along))
+            graceLimit = PuckMotion.revealGrace
+        }
     }
 
-    /// The menu item's way in, which needs no pointer and so is judged by the
-    /// same level as any other peek.
+    /// The menu item's way in, which needs no pointer: the puck stays out for
+    /// the long first wait, and the ordinary grace takes over once a pointer
+    /// has been on it. A puck nobody points at still always tucks eventually.
     private mutating func reveal() {
         dwell = 0
-        if case let .tucked(edge, along) = pose { move(to: .peeking(edge, along: along)) }
+        if case let .tucked(edge, along) = pose {
+            move(to: .peeking(edge, along: along))
+            graceLimit = PuckMotion.revealGrace
+        } else if case .peeking = pose {
+            graceLimit = PuckMotion.revealGrace
+        }
     }
 
     private mutating func beginDrag(at point: CGPoint) {

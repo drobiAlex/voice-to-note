@@ -117,11 +117,31 @@ func checkRest(_ model: Dock, _ context: String) {
     }
 }
 
+var idleTicks = 0
+
+/// The driver rule the app follows: time reaches the model only while it says it
+/// needs some. Every so often an idle model is also given half a second on a
+/// copy, and nothing may change, which is what makes "needs no time" a claim and
+/// not a hope.
+func tick(_ model: inout Dock, _ seconds: Double) {
+    if model.needsTime {
+        model.advance(by: seconds)
+        return
+    }
+    idleTicks += 1
+    guard idleTicks % 25 == 0 else { return }
+    var probe = model
+    for _ in 0..<30 { probe.advance(by: 1 / 30) }
+    precondition(probe.pose == model.pose && probe.position == model.position
+                 && probe.velocity.isZero == model.velocity.isZero,
+                 "an idle puck changed as time passed although needsTime was false: \(model.pose)")
+}
+
 func run(_ model: inout Dock, for seconds: Double, step: Double = 1 / 60, context: String = "",
          each: ((Dock) -> Void)? = nil) {
     var elapsed = 0.0
     while elapsed < seconds {
-        model.advance(by: step)
+        tick(&model, step)
         elapsed += step
         checkFrame(model, context)
         each?(model)
@@ -133,7 +153,7 @@ func run(_ model: inout Dock, until done: (Dock) -> Bool, limit: Double, _ messa
     var elapsed = 0.0
     while !done(model) {
         precondition(elapsed < limit, message)
-        model.advance(by: 1 / 120)
+        tick(&model, 1 / 120)
         elapsed += 1 / 120
         checkFrame(model, message)
     }
@@ -158,7 +178,7 @@ func dragAndRelease(_ model: inout Dock, toward edge: Dock.Edge, gap: CGFloat, a
         let t = CGFloat(step) / CGFloat(steps)
         model.send(.dragged(CGPoint(x: from.x + (goal.x - from.x) * t + grip.x,
                                     y: from.y + (goal.y - from.y) * t + grip.y)))
-        model.advance(by: 1 / 60)
+        tick(&model, 1 / 60)
     }
     if releasing { model.send(.released(CGPoint(x: goal.x + grip.x, y: goal.y + grip.y))) }
 }
@@ -212,7 +232,7 @@ func propertyRun(seed: UInt64, stats: inout [String: Int]) {
         switch rng.int(14) {
         case 0, 1, 2:
             for _ in 0...rng.int(6) {
-                model.advance(by: interval(&rng))
+                tick(&model, interval(&rng))
                 checkFrame(model, context)
             }
         case 3, 4:
@@ -221,7 +241,7 @@ func propertyRun(seed: UInt64, stats: inout [String: Int]) {
         case 5:
             model.send(.pointer(centre(model)))
             model.send(.pressed)
-            if rng.int(2) == 0 { model.advance(by: interval(&rng)) }
+            if rng.int(2) == 0 { tick(&model, interval(&rng)) }
             model.send(.clicked)
         case 6, 7, 8:
             model.send(.pointer(somePointer(&rng, model)))
@@ -229,7 +249,7 @@ func propertyRun(seed: UInt64, stats: inout [String: Int]) {
             model.send(.reveal)
         case 10:
             model.send(.pressed)
-            for _ in 0...rng.int(5) { model.advance(by: interval(&rng)) }
+            for _ in 0...rng.int(5) { tick(&model, interval(&rng)) }
             if rng.int(2) == 0 { model.send(.released(centre(model))) } else { model.send(.clicked) }
         case 11:
             if rng.int(4) == 0 {
@@ -248,7 +268,7 @@ func propertyRun(seed: UInt64, stats: inout [String: Int]) {
     stats["notes", default: 0] += model.drainNotes().count
     // Nothing but time from here: the hover chain is at most a dwell, a peek, a
     // grace and a tuck, each inside the deadline, and then it must stay put.
-    let horizon = PuckMotion.dwell + PuckMotion.grace + PuckMotion.deadline * 3 + 0.5
+    let horizon = PuckMotion.dwell + PuckMotion.revealGrace + PuckMotion.grace + PuckMotion.deadline * 3 + 0.5
     run(&model, for: horizon, context: context)
     checkRest(model, context)
     if let shown = edgePose(model), !shown.tucked {
@@ -319,13 +339,14 @@ if wants("reveal") {
         precondition(isPeeking(model), "reveal did not peek")
         var elapsed = 0.0
         var tuckedAt: Double?
-        while elapsed < 4 {
+        while elapsed < 6 {
             model.advance(by: 1 / 60)
             elapsed += 1 / 60
             if tuckedAt == nil, isTucked(model) { tuckedAt = elapsed }
         }
         precondition(tuckedAt != nil, "a reveal with no pointer never tucked again")
-        precondition(tuckedAt! <= PuckMotion.grace + 0.05, "tucked after \(tuckedAt!) s, later than the grace")
+        precondition(tuckedAt! <= PuckMotion.revealGrace + 0.05 && tuckedAt! >= PuckMotion.revealGrace - 0.05,
+                     "tucked after \(tuckedAt!) s, not after the reveal grace")
         checkRest(model, "reveal \(edge)")
     }
     print("reveal: a peek nobody is hovering tucks after the grace on every edge")
@@ -401,14 +422,14 @@ if wants("press_mid_spring") {
             model.send(.dragBegan(centre(model)))
             model.send(.released(centre(model)))
         }
-        run(&model, for: 4)
+        run(&model, for: 8)
         checkRest(model, "press mid spring \(release)")
     }
     var lost = makeModel(.tucked(.top, along: 0.5))
     lost.send(.reveal)
     run(&lost, for: 0.05)
     lost.send(.pressed)
-    run(&lost, for: PuckMotion.pressLimit + 4)
+    run(&lost, for: PuckMotion.pressLimit + PuckMotion.revealGrace + 4)
     checkRest(lost, "a lost mouse-up")
     print("press_mid_spring: a press frozen mid-flight settles after click, release, drag or a lost mouse-up")
 }
@@ -488,7 +509,7 @@ if wants("quiet_modes") {
     precondition(model.isAtRest && isPeeking(model), "reduce motion did not apply the end pose")
     checkRest(model, "reduce motion")
     model.send(.pointer(nil))
-    model.advance(by: PuckMotion.grace + 0.01)
+    model.advance(by: PuckMotion.revealGrace + 0.01)
     precondition(model.isAtRest && isTucked(model), "reduce motion tuck was not immediate")
     checkRest(model, "reduce motion tuck")
 
@@ -506,4 +527,86 @@ if wants("quiet_modes") {
     hanging.send(.released(CGPoint(x: 710, y: 390)))
     precondition(hanging.pose == .free, "a hanging puck carried off is not free")
     print("quiet_modes: reduce motion, click-to-peek and leaving the hanging pose")
+}
+
+if wants("needs_time") {
+    // Every kind of rest, driven by the app's rule (time only while needsTime,
+    // asked again after every event): a pointer arriving still peeks after the
+    // dwell, and one leaving still tucks after the grace.
+    func on(_ model: Dock, _ edge: Dock.Edge, along: CGFloat) -> CGPoint {
+        let rect = model.tabFootprint(edge, along: along)
+        return CGPoint(x: rect.midX, y: rect.midY)
+    }
+    for edge in Dock.Edge.allCases {
+        var idle = makeModel(.tucked(edge, along: 0.5))
+        precondition(!idle.needsTime, "a tucked puck with no pointer asked for time")
+        run(&idle, for: 5)
+        precondition(isTucked(idle), "an idle tab moved")
+        idle.send(.pointer(on(idle, edge, along: 0.5)))
+        precondition(idle.needsTime, "a pointer on a tab did not ask for time")
+        run(&idle, for: PuckMotion.dwell + 0.1)
+        precondition(isPeeking(idle), "a pointer arriving at an idle tab never peeked on \(edge)")
+        run(&idle, for: 2)
+        precondition(isPeeking(idle) && !idle.needsTime, "a peek with the pointer on it did not stay out and go idle")
+        idle.send(.pointer(nil))
+        precondition(idle.needsTime, "a peek with the pointer gone did not ask for time")
+        run(&idle, for: PuckMotion.grace - 0.1)
+        precondition(isPeeking(idle), "tucked before the grace")
+        run(&idle, for: 0.3)
+        precondition(isTucked(idle), "a pointer leaving never tucked a peek on \(edge)")
+        run(&idle, for: 2)
+        checkRest(idle, "needs time \(edge)")
+
+        // A skim that left before the dwell must not leave a count behind.
+        var skim = makeModel(.tucked(edge, along: 0.5))
+        skim.send(.pointer(on(skim, edge, along: 0.5)))
+        run(&skim, for: 0.15)
+        skim.send(.pointer(nil))
+        run(&skim, for: 1)
+        skim.send(.pointer(on(skim, edge, along: 0.5)))
+        run(&skim, for: 0.1)
+        precondition(isTucked(skim), "a stale dwell made a skim peek early")
+        run(&skim, for: 0.2)
+        precondition(isPeeking(skim), "the second visit never peeked")
+    }
+    for place in [Dock.Place.free(CGPoint(x: 300, y: 300)), .hanging(CGPoint(x: 300, y: 300))] {
+        var model = makeModel(place)
+        model.send(.pointer(CGPoint(x: 400, y: 400)))
+        precondition(!model.needsTime, "a puck that is not at an edge asked for time")
+    }
+    print("needs_time: a driver that ticks only while needsTime still peeks and tucks, and idles otherwise")
+}
+
+if wants("reveal_grace") {
+    // Nobody pointing: out for the long first wait, then gone.
+    var alone = makeModel(.tucked(.right, along: 0.5))
+    alone.send(.reveal)
+    run(&alone, for: PuckMotion.revealGrace - 0.2)
+    precondition(isPeeking(alone) && alone.needsTime, "a reveal gave up before the reveal grace")
+    run(&alone, for: 0.4)
+    precondition(isTucked(alone), "a reveal nobody pointed at never tucked")
+    run(&alone, for: 3)
+    checkRest(alone, "reveal alone")
+
+    // A pointer that has been on it hands over to the ordinary grace.
+    var used = makeModel(.tucked(.right, along: 0.5))
+    used.send(.reveal)
+    run(&used, for: 1)
+    let origin = used.revealedOrigin(.right, along: 0.5)
+    used.send(.pointer(CGPoint(x: origin.x + panelSize.width / 2, y: origin.y + panelSize.height / 2)))
+    run(&used, for: 1)
+    precondition(isPeeking(used) && !used.needsTime, "a pointer on a revealed puck did not hold it")
+    used.send(.pointer(nil))
+    run(&used, for: PuckMotion.grace + 0.1)
+    precondition(isTucked(used), "after the pointer had been on it the grace was not the ordinary one")
+
+    // A click on a tab with the pointer elsewhere gets the long wait too.
+    var click = makeModel(.tucked(.left, along: 0.5))
+    click.send(.pressed)
+    click.send(.clicked)
+    run(&click, for: PuckMotion.grace + 1)
+    precondition(isPeeking(click), "a click with no pointer on the tab was taken back at the ordinary grace")
+    run(&click, for: PuckMotion.revealGrace)
+    precondition(isTucked(click), "a click with no pointer on the tab never tucked")
+    print("reveal_grace: a menu reveal stays out for the long wait, then the ordinary grace governs")
 }

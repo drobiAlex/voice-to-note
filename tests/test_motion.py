@@ -103,6 +103,16 @@ def test_releasing_within_the_magnet_tucks_and_the_outline_continues_from_the_ha
 
 
 @needs_swift
+def test_a_driver_that_ticks_only_while_the_model_needs_time_still_peeks_and_tucks(motion_binary):
+    run_sections(motion_binary, "needs_time")
+
+
+@needs_swift
+def test_a_menu_reveal_stays_out_for_the_long_first_wait_and_then_the_ordinary_grace_governs(motion_binary):
+    run_sections(motion_binary, "reveal_grace")
+
+
+@needs_swift
 def test_reduce_motion_click_to_peek_and_leaving_the_hanging_pose_behave(motion_binary):
     run_sections(motion_binary, "quiet_modes")
 
