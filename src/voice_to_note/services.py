@@ -2124,6 +2124,11 @@ def projects(repo: Repository) -> list[tuple[str, int]]:
     return repo.projects()
 
 
+def tags(repo: Repository) -> list[tuple[str, int]]:
+    """Every tag there is to search by and how many memos carry it."""
+    return repo.tags()
+
+
 def data_version(repo: Repository) -> int:
     """What this connection's view of the stored data is numbered at, for a
     screen that has to notice writes made outside it. Meaningful only as a
@@ -2433,13 +2438,6 @@ def delete_chat(repo: Repository, conversation_id: int) -> None:
     """Removes a conversation and everything said in it."""
     if not repo.delete_conversation(conversation_id):
         raise NotFound(f"no conversation with id {conversation_id}")
-
-
-def set_chat_memos(repo: Repository, conversation_id: int, memo_ids: Sequence[int]) -> None:
-    """Changes what a conversation is about, keeping what was already said."""
-    require_conversation(repo, conversation_id)
-    ids, titles = _scope(repo, memo_ids)
-    repo.set_conversation_memos(conversation_id, ids, titles)
 
 
 def chat_scope_text(convo: Conversation) -> str:

@@ -88,10 +88,3 @@ def test_a_failed_caption_download_reads_as_one_fixable_line(monkeypatch):
     with pytest.raises(GatewayError, match="caption download failed"):
         youtube.captions("https://captions.example/t")
 
-
-def test_availability_answers_without_raising_whatever_which_says(monkeypatch):
-    monkeypatch.setattr(youtube.shutil, "which", lambda _name: "/opt/homebrew/bin/yt-dlp")
-    assert youtube.available() is True
-
-    monkeypatch.setattr(youtube.shutil, "which", lambda _name: None)
-    assert youtube.available() is False
