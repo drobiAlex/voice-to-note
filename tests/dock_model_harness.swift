@@ -50,7 +50,8 @@ func makePeeking(_ edge: Dock.Edge, along: CGFloat, on current: Dock.Screen = sc
     var model = makeModel(.tucked(edge, along: along), on: current)
     model.send(.reveal)
     let origin = model.revealedOrigin(edge, along: along)
-    model.send(.pointer(CGPoint(x: origin.x + panelSize.width / 2, y: origin.y + panelSize.height / 2)))
+    physical = CGPoint(x: origin.x + panelSize.width / 2, y: origin.y + panelSize.height / 2)
+    model.send(.pointer(physical))
     run(&model, until: { $0.isAtRest }, limit: 2, "never finished peeking")
     return model
 }
@@ -119,12 +120,31 @@ func checkRest(_ model: Dock, _ context: String) {
 
 var idleTicks = 0
 
+/// Where the pointer really is, and whether the clock re-reads it. The app's
+/// clock asks the system for the pointer on every frame it runs; events reach
+/// the model only for a pointer inside the view's tracking area, or at the one
+/// crossing of its boundary.
+var physical: CGPoint?
+var rereads = false
+
+func movePointer(_ model: inout Dock, to point: CGPoint?) {
+    let before = physical
+    physical = point
+    guard let point else {
+        model.send(.pointer(nil))
+        return
+    }
+    let crossing = before.map { model.trackedByView($0) } ?? false
+    if model.trackedByView(point) || crossing { model.send(.pointer(point)) }
+}
+
 /// The driver rule the app follows: time reaches the model only while it says it
 /// needs some. Every so often an idle model is also given half a second on a
 /// copy, and nothing may change, which is what makes "needs no time" a claim and
 /// not a hope.
 func tick(_ model: inout Dock, _ seconds: Double) {
     if model.needsTime {
+        if rereads { model.send(.pointer(physical)) }
         model.advance(by: seconds)
         return
     }
@@ -176,11 +196,14 @@ func dragAndRelease(_ model: inout Dock, toward edge: Dock.Edge, gap: CGFloat, a
     model.send(.dragBegan(CGPoint(x: from.x + grip.x, y: from.y + grip.y)))
     for step in 1...steps {
         let t = CGFloat(step) / CGFloat(steps)
-        model.send(.dragged(CGPoint(x: from.x + (goal.x - from.x) * t + grip.x,
-                                    y: from.y + (goal.y - from.y) * t + grip.y)))
+        physical = CGPoint(x: from.x + (goal.x - from.x) * t + grip.x, y: from.y + (goal.y - from.y) * t + grip.y)
+        model.send(.dragged(physical!))
         tick(&model, 1 / 60)
     }
-    if releasing { model.send(.released(CGPoint(x: goal.x + grip.x, y: goal.y + grip.y))) }
+    if releasing {
+        physical = CGPoint(x: goal.x + grip.x, y: goal.y + grip.y)
+        model.send(.released(physical!))
+    }
 }
 
 // MARK: property test
@@ -190,6 +213,9 @@ func dragAndRelease(_ model: inout Dock, toward edge: Dock.Edge, gap: CGFloat, a
 /// be one of the legal poses, to the last bit, and must stay there.
 func propertyRun(seed: UInt64, stats: inout [String: Int]) {
     var rng = TestRandom(seed)
+    physical = nil
+    rereads = true
+    defer { rereads = false }
     let widths: [CGFloat] = [1440, 1920, 900]
     let heights: [CGFloat] = [875, 1055, 700]
     var current = screen(rng.pick(widths), rng.pick(heights))
@@ -239,17 +265,18 @@ func propertyRun(seed: UInt64, stats: inout [String: Int]) {
             dragAndRelease(&model, toward: rng.pick(Dock.Edge.allCases), gap: rng.pick(gaps),
                            along: rng.unit(), steps: 1 + rng.int(8), releasing: rng.int(6) != 0)
         case 5:
-            model.send(.pointer(centre(model)))
+            movePointer(&model, to: centre(model))
             model.send(.pressed)
             if rng.int(2) == 0 { tick(&model, interval(&rng)) }
             model.send(.clicked)
         case 6, 7, 8:
-            model.send(.pointer(somePointer(&rng, model)))
+            movePointer(&model, to: somePointer(&rng, model))
         case 9:
             model.send(.reveal)
         case 10:
             model.send(.pressed)
             for _ in 0...rng.int(5) { tick(&model, interval(&rng)) }
+            physical = centre(model)
             if rng.int(2) == 0 { model.send(.released(centre(model))) } else { model.send(.clicked) }
         case 11:
             if rng.int(4) == 0 {
@@ -259,10 +286,11 @@ func propertyRun(seed: UInt64, stats: inout [String: Int]) {
         case 12:
             if rng.int(5) == 0 { model.send(.reduceMotion(rng.int(2) == 0)) }
         default:
-            model.send(.pointer(nil))
+            movePointer(&model, to: nil)
         }
         checkFrame(model, context)
     }
+    physical = centre(model)
     model.send(.released(centre(model)))
     model.send(.reduceMotion(false))
     stats["notes", default: 0] += model.drainNotes().count
@@ -273,7 +301,7 @@ func propertyRun(seed: UInt64, stats: inout [String: Int]) {
     checkRest(model, context)
     if let shown = edgePose(model), !shown.tucked {
         var keeps = false
-        if let point = model.pointer { keeps = model.keepsPeeking(point, shown.edge, along: shown.along) }
+        if let point = physical { keeps = model.keepsPeeking(point, shown.edge, along: shown.along) }
         precondition(keeps, "peeking with the pointer elsewhere never tucked \(context)")
     }
     let before = model.pose
@@ -609,4 +637,46 @@ if wants("reveal_grace") {
     run(&click, for: PuckMotion.revealGrace)
     precondition(isTucked(click), "a click with no pointer on the tab never tucked")
     print("reveal_grace: a menu reveal stays out for the long wait, then the ordinary grace governs")
+}
+
+if wants("tracking_gap") {
+    // The strip of tab nearest the screen's edge is inside the window but outside
+    // the view's tracking area, so a pointer parked there is never reported
+    // leaving. The clock must go on reading it, and must tuck once it has gone.
+    for edge in Dock.Edge.allCases {
+        rereads = true
+        defer { rereads = false }
+        var model = makeModel(.tucked(edge, along: 0.5))
+        physical = nil
+        let rect = model.tabFootprint(edge, along: 0.5)
+        var parked = CGPoint(x: rect.midX, y: rect.midY)
+        switch edge {
+        case .right: parked.x = rect.maxX - 0.5
+        case .left: parked.x = rect.minX + 0.5
+        case .top: parked.y = rect.maxY - 0.5
+        case .bottom: parked.y = rect.minY + 0.5
+        }
+        movePointer(&model, to: parked)
+        run(&model, for: PuckMotion.dwell + 2)
+        precondition(isPeeking(model), "a pointer on the tab never peeked on \(edge)")
+        precondition(model.keepsPeeking(parked, edge, along: 0.5), "the parked point is not in the keep region")
+        precondition(!model.trackedByView(parked), "the parked point was meant to be outside the tracking area on \(edge)")
+        precondition(model.needsTime, "a pointer no exit can be reported for let the clock stop on \(edge)")
+        run(&model, for: 5)
+        precondition(isPeeking(model), "the parked pointer lost its peek on \(edge)")
+        // leaves with no event, because it was never inside the tracking area
+        movePointer(&model, to: CGPoint(x: 700, y: 400))
+        run(&model, for: PuckMotion.grace + 0.3)
+        precondition(isTucked(model), "a pointer that left unannounced never tucked the peek on \(edge)")
+        run(&model, for: 2)
+        checkRest(model, "tracking gap \(edge)")
+
+        // inside the tracking area the exit is promised, so the clock may stop
+        var inside = makePeeking(edge, along: 0.5)
+        let origin = inside.revealedOrigin(edge, along: 0.5)
+        movePointer(&inside, to: CGPoint(x: origin.x + panelSize.width / 2, y: origin.y + panelSize.height / 2))
+        run(&inside, for: 1)
+        precondition(!inside.needsTime, "a pointer in the tracking area kept the clock running on \(edge)")
+    }
+    print("tracking_gap: a pointer parked where no exit is promised keeps the clock reading it")
 }

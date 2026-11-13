@@ -113,6 +113,11 @@ def test_a_menu_reveal_stays_out_for_the_long_first_wait_and_then_the_ordinary_g
 
 
 @needs_swift
+def test_a_pointer_parked_where_no_exit_event_is_promised_still_lets_the_peek_tuck(motion_binary):
+    run_sections(motion_binary, "tracking_gap")
+
+
+@needs_swift
 def test_reduce_motion_click_to_peek_and_leaving_the_hanging_pose_behave(motion_binary):
     run_sections(motion_binary, "quiet_modes")
 

@@ -4312,6 +4312,14 @@ struct PuckDockModel {
     /// nobody is pointing at counting its grace. Everything else is a puck that
     /// would be the same a minute from now, so a driver may stop its clock; it
     /// must ask again after every event.
+    ///
+    /// A resting puck may only stop waiting on a pointer that the view is sure to
+    /// report leaving, and AppKit promises that only for a pointer inside the
+    /// view's tracking area, which is the body. A peek whose pointer is in the
+    /// keep region but outside the body (the strip of tab nearest the screen's
+    /// edge) keeps asking for time, so the clock goes on reading the pointer
+    /// there. A tucked puck is woken by the pointer crossing into its tracking
+    /// area, and the whole tab footprint lies inside it.
     var needsTime: Bool {
         switch pose {
         case .hanging, .free, .held:
@@ -4323,8 +4331,15 @@ struct PuckDockModel {
         case let .peeking(edge, along):
             if pressing || !isMotionless { return true }
             guard let pointer else { return true }
-            return !keepsPeeking(pointer, edge, along: along)
+            return !keepsPeeking(pointer, edge, along: along) || !trackedByView(pointer)
         }
+    }
+
+    /// Where the view's tracking area is, in screen terms: the body at the
+    /// position the window is in now, which is where an enter, move or exit
+    /// is guaranteed to be reported.
+    func trackedByView(_ point: CGPoint) -> Bool {
+        closed(body(at: position), contains: point)
     }
 
     /// A level read at every event, so a timer that nobody advanced cannot
