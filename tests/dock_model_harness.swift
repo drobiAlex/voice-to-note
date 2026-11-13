@@ -45,6 +45,16 @@ func makeModel(_ place: Dock.Place, on current: Dock.Screen = screen(),
     return model
 }
 
+/// A puck that has finished peeking out of its edge, with the pointer left on it.
+func makePeeking(_ edge: Dock.Edge, along: CGFloat, on current: Dock.Screen = screen()) -> Dock {
+    var model = makeModel(.tucked(edge, along: along), on: current)
+    model.send(.reveal)
+    let origin = model.revealedOrigin(edge, along: along)
+    model.send(.pointer(CGPoint(x: origin.x + panelSize.width / 2, y: origin.y + panelSize.height / 2)))
+    run(&model, until: { $0.isAtRest }, limit: 2, "never finished peeking")
+    return model
+}
+
 func kind(_ pose: Dock.Pose) -> String {
     switch pose {
     case .hanging: return "hanging"
@@ -267,7 +277,7 @@ if wants("arrival") {
     // tuck is decided: whatever it does, it must end on the tucked frame and
     // never cost the sliver.
     for edge in Dock.Edge.allCases {
-        var model = makeModel(.peeking(edge, along: 0.4))
+        var model = makePeeking(edge, along: 0.4)
         model.send(.pointer(nil))
         run(&model, until: { isTucked($0) }, limit: 2, "never tucked on \(edge)")
         let outward = 6000.0
@@ -343,7 +353,7 @@ if wants("tab_end") {
 }
 
 if wants("quick_grab") {
-    var model = makeModel(.peeking(.right, along: 0.5))
+    var model = makePeeking(.right, along: 0.5)
     model.send(.pointer(nil))
     run(&model, until: { isTucked($0) }, limit: 2, "never tucked")
     run(&model, for: 0.1)
@@ -421,7 +431,7 @@ if wants("deadline") {
 }
 
 if wants("retarget") {
-    var model = makeModel(.peeking(.right, along: 0.5))
+    var model = makePeeking(.right, along: 0.5)
     model.send(.pointer(nil))
     run(&model, until: { isTucked($0) }, limit: 2, "never tucked")
     run(&model, for: 0.06)
@@ -439,7 +449,10 @@ if wants("retarget") {
 }
 
 if wants("release") {
-    for (gap, tucks) in [(CGFloat(0), true), (10, true), (24, true), (26, true), (28, true), (28.5, false), (40, false)] {
+    let cases: [(gap: CGFloat, tucks: Bool)] = [
+        (0, true), (10, true), (24, true), (26, true), (28, true), (28.5, false), (40, false),
+    ]
+    for (gap, tucks) in cases {
         var model = makeModel(.free(CGPoint(x: 500, y: 300)))
         dragAndRelease(&model, toward: .right, gap: gap, along: 0.5)
         precondition(isTucked(model) == tucks, "release at gap \(gap) should tuck: \(tucks)")

@@ -27,7 +27,10 @@ def motion_binary(tmp_path_factory):
     out = tmp_path_factory.mktemp("motion")
     main = out / "main.swift"
     main.write_text(
-        "import Foundation\nenum PuckMotion {" + constants + "\n}\n"
+        # CGRect's members and CGPoint's Equatable live in CoreGraphics, which
+        # Foundation alone does not surface on macOS; corelibs has them built in.
+        "import Foundation\n#if canImport(CoreGraphics)\nimport CoreGraphics\n#endif\n"
+        + "enum PuckMotion {" + constants + "\n}\n"
         + "struct PuckEdgeContour {" + contour
         + "struct PuckDockModel {" + model + "\n}\n"
         + harness + "\n" + dock_harness
