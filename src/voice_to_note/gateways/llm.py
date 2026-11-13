@@ -313,11 +313,11 @@ def claude_complete(prompt: str, model: str | None = None) -> str:
     return proc.stdout
 
 
-def codex_complete(prompt: str, model: str | None = None) -> str:
+def codex_complete(prompt: str) -> str:
     """Asks Codex, through the CLI the user already signed in to. Nothing
-    configured and nothing asked for here leaves the model choice to the CLI
-    itself, rather than this app guessing at one on its behalf."""
-    m = model or config.CODEX_MODEL
+    configured leaves the model choice to the CLI itself, rather than this app
+    guessing at one on its behalf."""
+    m = config.CODEX_MODEL
     cmd = ["codex", "exec", *(["-c", f'model="{m}"'] if m else [])]
     try:
         proc = subprocess.run(
@@ -333,11 +333,11 @@ def codex_complete(prompt: str, model: str | None = None) -> str:
     return proc.stdout
 
 
-def gemini_complete(prompt: str, model: str | None = None) -> str:
+def gemini_complete(prompt: str) -> str:
     """Asks Gemini, through the CLI the user already signed in to. Nothing
-    configured and nothing asked for here leaves the model choice to the CLI
-    itself, rather than this app guessing at one on its behalf."""
-    m = model or config.GEMINI_MODEL
+    configured leaves the model choice to the CLI itself, rather than this app
+    guessing at one on its behalf."""
+    m = config.GEMINI_MODEL
     cmd = ["gemini", "-p", prompt, *(["-m", m] if m else [])]
     try:
         proc = subprocess.run(
@@ -422,13 +422,11 @@ class Backend:
     chat: Callable[[str, Sequence[Message], str], str] | None = None
 
 
-def _model_label(name: str, model: str | None, configured: str) -> str:
-    """A backend's label carrying the model actually used, once some choice —
-    the caller's override, or the one it is configured with — was actually
-    made; the bare name alone once neither said anything, which leaves the
-    call running on the CLI's own default."""
-    effective = model or configured
-    return f"{name}/{effective}" if effective else name
+def _model_label(name: str, configured: str) -> str:
+    """A backend's label carrying the model it is configured with; the bare
+    name alone when nothing is, which leaves the call running on the CLI's own
+    default."""
+    return f"{name}/{configured}" if configured else name
 
 
 # every function below is looked up by its bare name at call time rather than
@@ -460,12 +458,12 @@ BACKENDS: dict[str, Backend] = {
         name="codex",
         available=lambda: codex_available(),
         complete=lambda prompt, schema, model: codex_complete(prompt),
-        describe=lambda model: _model_label("codex", None, config.CODEX_MODEL),
+        describe=lambda model: _model_label("codex", config.CODEX_MODEL),
     ),
     "gemini": Backend(
         name="gemini",
         available=lambda: gemini_available(),
         complete=lambda prompt, schema, model: gemini_complete(prompt),
-        describe=lambda model: _model_label("gemini", None, config.GEMINI_MODEL),
+        describe=lambda model: _model_label("gemini", config.GEMINI_MODEL),
     ),
 }

@@ -443,6 +443,23 @@ class Repository:
             )
         ]
 
+    def tags(self) -> list[tuple[str, int]]:
+        """Every tag the live memos' notes carry and how many memos carry it,
+        most used first, for a search to offer before anything is typed. Tags
+        are counted the way `memos` matches them — whole and in any case, from
+        any extraction a memo has had — so the number beside one is the length
+        of the list picking it opens onto."""
+        return [
+            (r["tag"], r["n"])
+            for r in self.con.execute(
+                "SELECT min(t.value) AS tag, count(DISTINCT e.memo_id) AS n"
+                " FROM extractions e JOIN json_each(e.json, '$.tags') t"
+                " JOIN memos m ON m.id = e.memo_id"
+                " WHERE m.archived_at IS NULL AND trim(t.value) <> ''"
+                " GROUP BY lower(t.value) ORDER BY n DESC, lower(t.value)"
+            )
+        ]
+
     def start_run(self, kind: str, memo_id: int | None, version: str, keep: int) -> int:
         """Opens the record of one piece of work and drops the oldest records
         past `keep`, in the same transaction. Pruned on the way in rather than
@@ -989,20 +1006,6 @@ class Repository:
                 for position, (memo_id, title) in enumerate(zip(memo_ids, titles, strict=True))
             ],
         )
-
-    def set_conversation_memos(
-        self, conversation_id: int, memo_ids: Sequence[int], titles: Sequence[str]
-    ) -> None:
-        """Rescopes a thread: whatever it was about, it is now about these. The
-        history stays — a question asked over the old scope is still what was
-        asked — which is why the scope is its own table and not a column on the
-        messages."""
-        with self.con:
-            self.con.execute(
-                "DELETE FROM conversation_memos WHERE conversation_id=?", (conversation_id,)
-            )
-            self._write_scope(conversation_id, memo_ids, titles)
-            self._touch_conversation(conversation_id)
 
     def _touch_conversation(self, conversation_id: int) -> None:
         """Marks a thread as changed just now, the way `_touch` marks a memo:

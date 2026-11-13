@@ -1,5 +1,4 @@
 import json
-import shutil
 import subprocess
 import urllib.error
 import urllib.request
@@ -10,13 +9,6 @@ from ..transforms.youtube import VideoInfo
 from . import GatewayError
 
 INSTALL_HINT = "install yt-dlp: brew install yt-dlp"
-
-
-def available() -> bool:
-    """Whether the fetcher is on this machine at all, answered without ever
-    raising: a probe run ahead of an import has no error worth stopping for —
-    the import itself will say what is missing."""
-    return shutil.which("yt-dlp") is not None
 
 
 def video_info(url: str) -> VideoInfo:

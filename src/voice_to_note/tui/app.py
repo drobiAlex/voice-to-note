@@ -4,7 +4,7 @@ from enum import Enum, auto
 from pathlib import Path, PurePath
 
 from rich.text import Text
-from textual import work
+from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -98,54 +98,160 @@ class NoteEditor(ModalScreen[None]):
             self.dismiss(None)
 
 
-class MoveMemo(ModalScreen[None]):
-    """Where a recording belongs. Projects are free text, so the screen offers
-    the ones already in use without insisting on them."""
+def _ranked(names: Sequence[str], typed: str) -> list[str]:
+    """The names a few typed letters could mean, best guess first: the one
+    spelled exactly that, then the ones starting with it, then the ones with a
+    word starting with it, then the ones merely containing it — case never
+    counting. Nothing typed is every name, in the order given. Letters picked
+    out of order are not a match: a project typed to be created would keep
+    turning into some longer one that happens to share its letters."""
+    wanted = typed.strip().casefold()
+    if not wanted:
+        return list(names)
 
-    BINDINGS = [("escape", "cancel", "Cancel")]
+    def rank(name: str) -> int | None:
+        """Where one name falls, or nothing when it does not match at all."""
+        folded = name.casefold()
+        if folded == wanted:
+            return 0
+        if folded.startswith(wanted):
+            return 1
+        if any(word.startswith(wanted) for word in folded.split()):
+            return 2
+        if wanted in folded:
+            return 3
+        return None
 
-    def __init__(self, projects: list[tuple[str, int]], store: Callable[[str], None]) -> None:
-        """Opens on the projects that exist and the way to file into one."""
+    ranked = [(at, order, name) for order, name in enumerate(names) if (at := rank(name)) is not None]
+    return [name for _at, _order, name in sorted(ranked)]
+
+
+class Picker(ModalScreen[None]):
+    """A line to type into over the choices it narrows, for anything picked by
+    name. Typing filters the list as it goes and keeps the best guess picked
+    out, so a name is a few letters away rather than spelled in full; the arrow
+    keys walk the list without leaving the line, enter takes what is picked
+    out, and tab writes it onto the line to be finished by hand.
+
+    With nothing left in the list, enter takes the line as typed — which is how
+    a picker that offers new names lets somebody create one."""
+
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        Binding("down", "cursor_down", "Next", show=False),
+        Binding("up", "cursor_up", "Previous", show=False),
+        # priority, or the line hands tab to focus and the cursor leaves it
+        Binding("tab", "complete", "Complete", priority=True),
+    ]
+
+    # what goes on the empty line, and the ids the line and the list carry
+    placeholder = ""
+    input_id = "picker-input"
+    list_id = "picker-choices"
+    # how the last row offers a name nobody has used yet, or nothing when only
+    # names already on the list can be picked
+    offer_new: str | None = None
+
+    def __init__(self, choices: Sequence[tuple[str, str]], store: Callable[[str], None]) -> None:
+        """Opens on what can be picked — each as the name it stands for and the
+        words its row shows — and the way to act on the pick."""
         super().__init__()
-        self.projects = projects
+        self.choices = list(choices)
+        self.labels = dict(self.choices)
         self.store = store
 
     def compose(self) -> ComposeResult:
-        """A line to type a project into, over the ones already going."""
-        yield Input(placeholder="project", id="project-name")
-        yield ListView(id="project-choices")
+        """The line to type on over the choices it narrows."""
+        yield Input(placeholder=self.placeholder, id=self.input_id)
+        yield ListView(id=self.list_id)
 
     def on_mount(self) -> None:
-        """Ready to type, with the existing projects a keypress away."""
-        choices = self.query_one("#project-choices", ListView)
-        for name, _count in self.projects:
-            choices.append(ListItem(Label(name), name=name))
-        choices.index = 0
-        self.query_one("#project-name", Input).focus()
+        """Every choice on offer, the first picked out, the cursor on the line."""
+        self._narrow("")
+        self.query_one(f"#{self.input_id}", Input).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Narrows the list to what the line could mean, as it is typed."""
+        self._narrow(event.value)
+
+    def _narrow(self, typed: str) -> None:
+        """Redraws the list for what is on the line, best guess picked out. A
+        name nobody has used yet is offered last, beneath the ones that do
+        exist, so a slip of the keyboard never creates one by accident."""
+        shown = self.query_one(f"#{self.list_id}", ListView)
+        shown.clear()
+        names = _ranked([name for name, _label in self.choices], typed)
+        for name in names:
+            shown.append(ListItem(Label(self.labels[name]), name=name))
+        fresh = typed.strip()
+        if self.offer_new and fresh and fresh.casefold() not in {n.casefold() for n in names}:
+            shown.append(ListItem(Label(f"+ {self.offer_new} “{fresh}”"), name=fresh))
+        # nothing picked out until something is typed or the arrows are used:
+        # enter on an empty line would otherwise act on whichever name happens
+        # to come first, which nobody chose
+        shown.index = 0 if fresh and shown.children else None
+
+    def _picked(self) -> str | None:
+        """The name the highlighted row stands for, if a row is highlighted."""
+        row = self.query_one(f"#{self.list_id}", ListView).highlighted_child
+        return row.name if row is not None else None
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Files the memo under whatever they typed."""
-        self._move(event.value)
+        """Takes whatever is picked out, or the line itself once the list has
+        nothing on it to pick."""
+        picked = self._picked()
+        self._take(picked if picked is not None else event.value)
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
-        """Files the memo under a project already in use."""
+        """Takes the row they clicked."""
         # the screen behind this modal listens for list selections of its own
         event.stop()
-        self._move(event.item.name or "")
+        self._take(event.item.name or "")
 
-    def _move(self, project: str) -> None:
-        """Closes only once the memo has actually moved."""
+    def action_cursor_down(self) -> None:
+        """Picks out the next row, the line keeping the cursor."""
+        self.query_one(f"#{self.list_id}", ListView).action_cursor_down()
+
+    def action_cursor_up(self) -> None:
+        """Picks out the row above, the line keeping the cursor."""
+        self.query_one(f"#{self.list_id}", ListView).action_cursor_up()
+
+    def action_complete(self) -> None:
+        """Writes the picked-out name onto the line, ready to be finished."""
+        picked = self._picked()
+        if picked is None:
+            return
+        line = self.query_one(f"#{self.input_id}", Input)
+        line.value = picked
+        line.cursor_position = len(picked)
+
+    def _take(self, name: str) -> None:
+        """Closes only once the pick has actually been acted on."""
         try:
-            self.store(project)
+            self.store(name)
         except services.InvalidInput as refused:
             self.notify(str(refused), severity="warning")
             return
         self.dismiss(None)
 
     def action_cancel(self) -> None:
-        """Leaves the memo where it was. A project name is one word, so there is
+        """Leaves everything as it was. A name is a word or two, so there is
         nothing here worth interrupting somebody to confirm."""
         self.dismiss(None)
+
+
+class MoveMemo(Picker):
+    """Where a recording belongs. Projects are free text, so the screen offers
+    the ones already in use without insisting on them."""
+
+    placeholder = "project — type to filter, or a new name"
+    input_id = "project-name"
+    list_id = "project-choices"
+    offer_new = "new project"
+
+    def __init__(self, projects: list[tuple[str, int]], store: Callable[[str], None]) -> None:
+        """Opens on the projects that exist and the way to file into one."""
+        super().__init__([(name, f"{name} ({count})") for name, count in projects], store)
 
 
 class RenameSpeaker(ModalScreen[None]):
@@ -246,6 +352,15 @@ class YouTubeOptions:
 # pass unless it is asked for
 _DEFAULT_STEPS = frozenset({"speakers", "notes"})
 
+# what each step is called on screen: the names services and the command line
+# use are the domain's, and nobody new to the app knows what refining a
+# transcript or diarizing it would do to their recording
+_STEP_WORDS = {
+    "speakers": "identify speakers",
+    "refine": "fix transcription mistakes",
+    "notes": "write notes",
+}
+
 
 class ConfirmDuplicate(ModalScreen[bool]):
     """Stands between a recording already stored and the minutes of converting,
@@ -344,7 +459,7 @@ class ProcessMemo(ModalScreen[None]):
             yield Switch(value=False, id="custom-steps")
             yield Label("custom steps", id="custom-steps-label")
         step_list = SelectionList(
-            *[(step, step, step in _DEFAULT_STEPS) for step in services.PROCESS_STEPS],
+            *[(_STEP_WORDS[step], step, step in _DEFAULT_STEPS) for step in services.PROCESS_STEPS],
             id="step-list",
         )
         step_list.display = False
@@ -477,7 +592,7 @@ class ImportYouTube(ModalScreen[None]):
             id="youtube-template",
         )
         yield SelectionList(
-            *[(step, step, step == "notes") for step in services.YOUTUBE_STEPS],
+            *[(_STEP_WORDS[step], step, step == "notes") for step in services.YOUTUBE_STEPS],
             id="youtube-steps",
         )
 
@@ -569,7 +684,7 @@ class DiarizeSpeakers(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         """A line to type a speaker count into, guessed when left blank."""
-        yield Input(placeholder="auto", id="speaker-count")
+        yield Input(placeholder="how many speakers? (blank: guess)", id="speaker-count")
 
     def on_mount(self) -> None:
         """Puts the cursor where the count goes."""
@@ -624,7 +739,8 @@ class ConfirmForce(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         """Says what would be lost, then asks."""
         yield Static(
-            "Extracting again replaces the note you wrote.  (y / n)", id="confirm-force"
+            "Writing the notes again replaces the ones you edited.  (y / n)",
+            id="confirm-force",
         )
 
     def action_force(self) -> None:
@@ -636,41 +752,19 @@ class ConfirmForce(ModalScreen[bool]):
         self.dismiss(False)
 
 
-class TagSearch(ModalScreen[None]):
+class TagSearch(Picker):
     """A tag to go looking for. Tags come from the notes an extraction wrote, so
-    this reaches across every project at once, which the sidebar cannot."""
+    this reaches across every project at once, which the sidebar cannot. The
+    tags already in use are offered most used first; one typed that no note
+    carries still runs, and finds nothing, which is the honest answer."""
 
-    BINDINGS = [("escape", "cancel", "Cancel")]
+    placeholder = "tag — type to filter"
+    input_id = "tag-search"
+    list_id = "tag-choices"
 
-    def __init__(self, store: Callable[[str], None]) -> None:
-        """Opens on the way to run a search."""
-        super().__init__()
-        self.store = store
-
-    def compose(self) -> ComposeResult:
-        """A line to type a tag into."""
-        yield Input(placeholder="tag", id="tag-search")
-
-    def on_mount(self) -> None:
-        """Puts the cursor where the tag goes."""
-        self.query_one("#tag-search", Input).focus()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Looks for whatever they typed."""
-        self._search(event.value)
-
-    def _search(self, tag: str) -> None:
-        """Closes only once the search has actually run."""
-        try:
-            self.store(tag)
-        except services.InvalidInput as refused:
-            self.notify(str(refused), severity="warning")
-            return
-        self.dismiss(None)
-
-    def action_cancel(self) -> None:
-        """Leaves the list showing whatever it was showing."""
-        self.dismiss(None)
+    def __init__(self, tags: list[tuple[str, int]], store: Callable[[str], None]) -> None:
+        """Opens on the tags there are and the way to run a search."""
+        super().__init__([(tag, f"{tag} ({count})") for tag, count in tags], store)
 
 
 class MemoDetails(ModalScreen[None]):
@@ -1090,8 +1184,10 @@ class SettingsScreen(ModalScreen[None]):
     on disk as a file meant to be edited outside the app."""
 
     BINDINGS = [
+        # lower and upper case of one letter for one idea, the one row and every
+        # row — never two unrelated actions a shift apart
         ("u", "restore_default", "Restore default"),
-        ("R", "reset_all", "Reset all"),
+        ("U", "reset_all", "Restore every default"),
         ("escape", "close", "Close"),
     ]
 
@@ -1258,7 +1354,7 @@ class TodoBoard(ModalScreen[int | None]):
 
     BINDINGS = [
         ("space", "toggle_done", "Done/undone"),
-        ("a", "show_done", "Show done"),
+        ("d", "show_done", "Show done"),
         ("o", "filter_owner", "Owner"),
         # ahead of the table, which answers enter itself with a binding of its
         # own that says nothing in the footer: leaving the table to it would
@@ -1688,82 +1784,114 @@ class ConversationList(ModalScreen[int | None]):
         self.dismiss(None)
 
 
-# every key the main screen answers about the memo being pointed at: the keys
-# that run it, the action they name, and the words for it. Both the lines of the
-# menu and the keys the menu itself answers are built from this, so it cannot
-# offer a key it would then ignore. Both delete keys are named here, unlike in
-# the footer where only one is worth the room: a menu is where somebody finds
-# out that the other one works too
-_MENU_ROWS: tuple[tuple[tuple[str, ...], str, str], ...] = (
+# one line of a menu: the keys that pick it, the action it names, and the
+# words for it. A line with no keys is picked with the arrows and enter alone
+MenuRow = tuple[tuple[str, ...], str, str]
+
+# everything that can be done to the memo being pointed at, under space. A
+# letter here means the same thing wherever else it is pressed — r renames, m
+# moves, a asks, e edits on the main screen too, and t and c are to-dos and
+# chats in the go-to menu as well — so learning one place teaches the other.
+# The rest are menu letters only: the main screen answers a handful of keys,
+# and a rarely needed action is not worth a key somebody has to remember
+_MEMO_MENU: tuple[MenuRow, ...] = (
     (("e",), "edit_notes", "Edit notes"),
-    (("i",), "memo_info", "Info"),
-    (("m",), "move_memo", "Move"),
-    (("n",), "title_memo", "Rename"),
-    (("delete", "backspace"), "delete_memo", "Delete"),
-    (("h",), "toggle_archive", "Archive / Unarchive"),
-    (("r",), "rename_speaker", "Rename speaker"),
-    (("t",), "toggle_raw", "Raw transcript"),
-    (("x",), "extract", "Extract"),
-    (("p",), "repair", "Repair"),
-    (("d",), "diarize", "Diarize"),
-    (("a",), "ask", "Ask"),
-    (("C",), "chat", "Chat"),
-    (("c",), "check_tasks", "Tasks"),
+    (("r",), "title_memo", "Rename"),
+    (("m",), "move_memo", "Move to another project"),
+    (("a",), "ask", "Ask a question about it"),
+    (("c",), "chat", "Chat about it"),
+    (("t",), "check_tasks", "To-dos from it"),
+    (("w",), "extract", "Write the notes again"),
+    (("f",), "repair", "Fix transcription mistakes"),
+    (("i",), "diarize", "Identify the speakers again"),
+    (("p",), "rename_speaker", "Name a speaker"),
+    (("o",), "toggle_raw", "Original / fixed transcript"),
+    (("d",), "memo_info", "Details"),
+    (("h",), "toggle_archive", "Archive (hide) / bring back"),
+    (("delete", "backspace"), "delete_memo", "Delete…"),
 )
 
-# how the keys of one line are written when there is more than one of them, and
-# how wide that column is: every label starts in the same place, or the list
-# reads as prose rather than as a menu
-_MENU_KEY_SEPARATOR = "/"
-_MENU_KEY_WIDTH = max(
-    len(_MENU_KEY_SEPARATOR.join(keys)) for keys, _action, _label in _MENU_ROWS
+# what can be done to the project the sidebar cursor is on, under space there
+_PROJECT_MENU: tuple[MenuRow, ...] = (
+    (("r",), "rename_project", "Rename"),
+    (("delete", "backspace"), "remove_project", "Empty it — its memos go to “other”…"),
 )
+
+# the screens of their own, under g for "go to": each was an upper case letter
+# once, one shift away from a lower case key doing something else entirely
+_GOTO_MENU: tuple[MenuRow, ...] = (
+    (("t",), "todo_board", "To-dos from every memo"),
+    (("c",), "chats", "Chats"),
+    (("s",), "settings", "Settings"),
+)
+
+# how a key is written for a person rather than for Textual
+_KEY_WORDS = {
+    "space": "space",
+    "slash": "/",
+    "question_mark": "?",
+    "delete": "del",
+    "backspace": "backspace",
+    "escape": "esc",
+    "enter": "enter",
+}
+
+
+def _key_text(keys: Sequence[str]) -> str:
+    """One menu line's key, the way the line shows it. Only the first of them:
+    the others work too, and spelling every one out would push every label in
+    the menu over to make room for the one line that has more than one."""
+    return _KEY_WORDS.get(keys[0], keys[0]) if keys else ""
 
 
 class ActionMenu(ModalScreen[str | None]):
-    """Everything that can be done to one memo, as a list to read down rather
-    than a row of keys to have memorised. The footer offers the same keys, but
-    only as far as the terminal is wide, and a key whose word has been cut off
-    the end of it is a key nobody finds.
+    """What can be done from here, as a list to read down rather than keys to
+    have memorised. Every line's letter works from inside the menu, so looking
+    an action up and running it are the same keypress — which is how the menu
+    stops being needed.
 
-    Every key still works from inside the menu, so looking one up and using it
-    are the same keypress — which is how the menu stops being needed.
-
-    It hands back the name of the action rather than running it: what these keys
-    mean belongs to the app, and a menu that acted on the memo itself would be a
+    It hands back the name of the action rather than running it: what these
+    actions do belongs to the app, and a menu that acted itself would be a
     second place for that to be decided."""
 
-    BINDINGS = [
-        *(
-            Binding(key, f"choose('{action}')", label, show=False)
-            for keys, action, label in _MENU_ROWS
-            for key in keys
-        ),
-        Binding("escape", "close", "Close"),
-    ]
+    BINDINGS = [Binding("escape", "close", "Close")]
 
-    def __init__(self, filename: str) -> None:
-        """Opens on the memo it is about. The name is on the screen because the
-        row a memo key acts on is not always the row somebody thinks they are
-        pointing at, and this is the last place to notice before one runs."""
+    def __init__(self, title: str, rows: Sequence[MenuRow]) -> None:
+        """Opens on what it is about and what can be done to it. The name is on
+        the screen because the row an action lands on is not always the row
+        somebody thinks they are pointing at, and this is the last place to
+        notice before one runs."""
         super().__init__()
-        self.filename = filename
+        self.title_text = title
+        self.rows = tuple(rows)
+        self.by_key = {key: action for keys, action, _label in self.rows for key in keys}
 
     def compose(self) -> ComposeResult:
-        """The memo's name over what can be done to it."""
-        yield Static(f"{self.filename} — actions", id="action-menu")
+        """The heading over what can be done."""
+        yield Static(self.title_text, id="action-menu")
         yield ListView(id="action-choices")
 
     def on_mount(self) -> None:
         """Fills the list and picks the first line out, keyboard and all: a menu
         opening on nothing highlighted makes its first enter do nothing, and a
-        menu is opened by people who are guessing."""
+        menu is opened by people who are guessing. Every label starts in the
+        same column, or the list reads as prose rather than as a menu."""
+        width = max(len(_key_text(keys)) for keys, _action, _label in self.rows)
         choices = self.query_one("#action-choices", ListView)
-        for keys, action, label in _MENU_ROWS:
-            shown = _MENU_KEY_SEPARATOR.join(keys).ljust(_MENU_KEY_WIDTH)
-            choices.append(ListItem(Label(f"{shown}  {label}"), name=action))
+        for keys, action, label in self.rows:
+            choices.append(ListItem(Label(f"{_key_text(keys).ljust(width)}  {label}"), name=action))
         choices.index = 0
         choices.focus()
+
+    def on_key(self, event: events.Key) -> None:
+        """Runs a line off its own key, without walking down to it. Read off the
+        rows rather than bound, because what is on offer depends on what the
+        menu was opened over."""
+        action = self.by_key.get(event.key)
+        if action is not None:
+            event.stop()
+            event.prevent_default()
+            self.dismiss(action)
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Runs whatever the cursor came to rest on."""
@@ -1771,13 +1899,36 @@ class ActionMenu(ModalScreen[str | None]):
         event.stop()
         self.dismiss(event.item.name)
 
-    def action_choose(self, action: str) -> None:
-        """Runs an action off its own key, without walking down to its line."""
-        self.dismiss(action)
+    def action_close(self) -> None:
+        """Leaves everything as it was. The menu only ever names actions, so
+        there is nothing here to confirm."""
+        self.dismiss(None)
+
+
+class KeysHelp(ModalScreen[None]):
+    """Every key there is, in one place, under ?. The footer names only the
+    few that matter for where the cursor is; this is where the rest are."""
+
+    BINDINGS = [("escape,question_mark,q", "close", "Close")]
+
+    def __init__(self, sections: Sequence[tuple[str, Sequence[MenuRow]]]) -> None:
+        """Opens on the keys, a heading over each place they work."""
+        super().__init__()
+        self.sections = sections
+
+    def compose(self) -> ComposeResult:
+        """One block per place, its keys in a column and their words beside."""
+        lines: list[str] = []
+        for heading, rows in self.sections:
+            width = max(len(_key_text(keys)) for keys, _action, _label in rows)
+            lines.append(f"[b]{heading}[/b]")
+            lines += [f"  {_key_text(keys).ljust(width)}  {label}" for keys, _action, label in rows]
+            lines.append("")
+        with VerticalScroll():
+            yield Static("\n".join(lines), id="keys-help", markup=True)
 
     def action_close(self) -> None:
-        """Leaves the memo as it was. Nothing has been done to it yet: the menu
-        only ever names actions, so there is nothing here to confirm."""
+        """Back to where they were."""
         self.dismiss(None)
 
 
@@ -1813,8 +1964,6 @@ class NotesPane(MarkdownViewer):
 # should be offering the key that runs it
 MEMO_ACTIONS = frozenset(
     {
-        # the menu over the rest of them, which needs the memo they need
-        "action_menu",
         "edit_notes",
         "memo_info",
         "move_memo",
@@ -1915,57 +2064,29 @@ class MemoApp(App[None]):
     #chat-scroll { height: 1fr; }
     #chat-about, #scope-help { padding: 0 1; background: $panel; }
     """
+    # a handful of keys, each the first letter of what it does, and the same
+    # thing wherever it is pressed. Everything else is a line in the menu under
+    # space, or in the one under g, and every key is listed under ?. The footer
+    # names the few worth seeing; the rest work all the same
     BINDINGS = [
-        # every key below, laid out as a list to pick from. Space because it is
         # the one key that says "the thing I am pointing at" without saying what
-        # to do with it, and because no memo key is spelled with it
-        ("space", "action_menu", "Actions"),
+        # to do with it: a memo, or the project the sidebar cursor is on
+        Binding("space", "action_menu", "Actions"),
+        # whatever is being pointed at: the project in the sidebar, else the memo
+        Binding("r", "rename", "Rename"),
         Binding("e", "edit_notes", "Edit notes", show=False),
-        Binding("i", "memo_info", "Info", show=False),
         Binding("m", "move_memo", "Move", show=False),
-        Binding("n", "title_memo", "Rename", show=False),
+        Binding("a", "ask", "Ask", show=False),
         # the two keys a file manager deletes with, since either is what a hand
-        # reaches for; the action menu under space is where they are spelled out
+        # reaches for; it always asks first, naming the memo
         Binding("delete", "delete_memo", "Delete", show=False),
         Binding("backspace", "delete_memo", "Delete", show=False),
-        # "h" for hide, which is what archiving does to a memo: it acts on the
-        # one memo, so the case rule makes it lower case, and the first letter
-        # of archive is already Ask
-        Binding("h", "toggle_archive", "Archive / Unarchive", show=False),
-        # "r" rather than "n": renaming the memo has n, and n means "no" in
-        # every dialog that asks
-        Binding("r", "rename_speaker", "Rename speaker", show=False),
-        Binding("t", "toggle_raw", "Raw transcript", show=False),
-        Binding("x", "extract", "Extract", show=False),
-        # the domain calls refinement a repair pass, and r already renames
-        Binding("p", "repair", "Repair", show=False),
-        Binding("d", "diarize", "Diarize", show=False),
-        Binding("a", "ask", "Ask", show=False),
-        # a conversation kept, where ask is a question thrown away; upper case
-        # because c is the memo's tasks and the chat can span other memos too
-        Binding("C", "chat", "Chat", show=False),
-        # the memo's own to-dos, beside the note that states them; the whole
-        # board across every memo is upper case T
-        Binding("c", "check_tasks", "Tasks", show=False),
-        # neither half of the case rule: this acts on no memo and on no project,
-        # it brings something new into the app
-        ("o", "process", "Add recording"),
-        ("y", "youtube", "Add YouTube"),
-        # lower case acts on the one memo, upper case on the whole project the
-        # sidebar cursor is resting on
-        Binding("R", "rename_project", "Rename project", show=False),
-        Binding("X", "remove_project", "Empty project", show=False),
-        ("slash", "find_tag", "Find tag"),
-        # the same exemption as o and / above: sort acts on no memo and no
-        # project, only on how the list already on screen is ordered. Upper
-        # case S is settings, which leaves the lower case free for this
-        ("s", "toggle_sort", "Sort"),
-        # upper case here means neither half of the case rule, only that the
-        # lower case key is taken by the raw transcript. Like the settings under
-        # S, this opens a screen of its own rather than acting on anything
-        ("T", "todo_board", "To-dos"),
-        ("H", "chats", "Chats"),
-        ("S", "settings", "Settings"),
+        Binding("n", "process", "New recording"),
+        Binding("y", "youtube", "From YouTube", show=False),
+        Binding("slash", "find_tag", "Search tags", show=False),
+        Binding("s", "toggle_sort", "Sort", show=False),
+        Binding("g", "go_to", "Go to"),
+        Binding("question_mark", "keys", "All keys"),
         ("escape", "step_back", "Back"),
         ("q", "quit", "Quit"),
     ]
@@ -1984,6 +2105,8 @@ class MemoApp(App[None]):
         # something read off the list on screen, since every redraw has to
         # keep asking for it the same way until a press of "s" says otherwise
         self.sort: str = "created"
+        # the project a menu was opened over, while a line picked from it runs
+        self.menu_project: str | None = None
         # whether the list is the whole library rather than one project's. Its
         # own flag rather than a third value of project above, because "no
         # project" already means "nothing has been browsed yet" — a state the
@@ -2136,11 +2259,11 @@ class MemoApp(App[None]):
         if action in MEMO_ACTIONS:
             return self._target_memo() is not None
         if action in PROJECT_ACTIONS:
-            # checked while the screen is still being built, before there is one
-            sidebar = self.query("#projects")
-            if not sidebar or self.focused is not sidebar.first():
-                return False
             return self._pointed_project() is not None
+        if action in ("action_menu", "rename"):
+            if self._on_sidebar() and self._pointed_project() is not None:
+                return True
+            return self._target_memo() is not None
         if action == "step_back":
             if self.memo_id is not None or self.tag is not None:
                 return True
@@ -2415,7 +2538,7 @@ class MemoApp(App[None]):
             services.transcript_lines(self.repo, memo_id, raw=self.raw)
         )
         self.query_one(TabbedContent).get_tab("transcript-tab").label = (
-            "Transcript (raw)" if self.raw else "Transcript"
+            "Transcript (original)" if self.raw else "Transcript"
         )
         self.refresh_bindings()
 
@@ -2476,7 +2599,7 @@ class MemoApp(App[None]):
             self.notify(f"{subject} is already busy", severity="warning")
             return False
         self.jobs.add(key)
-        self.notify(f"{doing} {subject} …")
+        self.notify(f"{doing}: {subject} …")
         self._started(key, doing)
         self._run_job(key, run)
         return True
@@ -2568,9 +2691,9 @@ class MemoApp(App[None]):
         """Sends the extraction off, naming the backend that answered."""
         self._start_memo_job(
             memo_id,
-            "extracting",
+            "writing notes",
             lambda repo: (
-                f"memo {memo_id} extracted"
+                f"notes written for memo {memo_id}"
                 f" via {services.run_extraction(repo, memo_id, force=force)}"
             ),
         )
@@ -2580,12 +2703,14 @@ class MemoApp(App[None]):
         memo_id = self._target_memo()
         if memo_id is None:
             return
-        self._start_memo_job(memo_id, "repairing", lambda repo: self._repair(repo, memo_id))
+        self._start_memo_job(
+            memo_id, "fixing transcript", lambda repo: self._repair(repo, memo_id)
+        )
 
     def _repair(self, repo: Repository, memo_id: int) -> str:
         """The repair pass itself, and what to say once it has been stored."""
         services.refine_transcript(repo, memo_id)
-        return f"memo {memo_id} repaired"
+        return f"transcript of memo {memo_id} fixed"
 
     def action_diarize(self) -> None:
         """Offers to run speaker detection over the memo being pointed at again,
@@ -2600,13 +2725,13 @@ class MemoApp(App[None]):
         modal keeps what was typed, and sends anything else off to a thread."""
         num_speakers = services.speaker_count(typed)
         self._start_memo_job(
-            memo_id, "diarizing", lambda repo: self._diarize(repo, memo_id, num_speakers)
+            memo_id, "identifying speakers", lambda repo: self._diarize(repo, memo_id, num_speakers)
         )
 
     def _diarize(self, repo: Repository, memo_id: int, num_speakers: int | None = None) -> str:
         """The speaker pass itself, and what to say once it has been stored."""
         services.rediarize(repo, memo_id, num_speakers=num_speakers)
-        return f"memo {memo_id} diarized"
+        return f"speakers identified in memo {memo_id}"
 
     def action_process(self) -> None:
         """Offers to bring a new recording in, filed where you are looking."""
@@ -2849,7 +2974,7 @@ class MemoApp(App[None]):
 
     def action_find_tag(self) -> None:
         """Offers to look for a tag across every project at once."""
-        self.push_screen(TagSearch(self.show_tagged))
+        self.push_screen(TagSearch(services.tags(self.repo), self.show_tagged))
 
     def action_settings(self) -> None:
         """Opens every setting `vtn config` would list, to be read and changed
@@ -2933,17 +3058,66 @@ class MemoApp(App[None]):
             self.sub_title = self._subtitle()
             self.refresh_bindings()
 
+    def _on_sidebar(self) -> bool:
+        """Whether the cursor is in the projects list, where what is pointed at
+        is a project rather than a memo."""
+        # checked while the screen is still being built, before there is one
+        sidebar = self.query("#projects")
+        return bool(sidebar) and self.focused is sidebar.first()
+
     def action_action_menu(self) -> None:
-        """Lays out everything that can be done to the memo being pointed at, if
-        any memo is: the memo keys are worth learning and unguessable, and a
-        footer only names as many of them as the terminal is wide enough for."""
+        """Lays out everything that can be done to what is being pointed at: the
+        project, with the cursor on one in the sidebar, and otherwise the memo.
+        The sidebar's own rows that are not projects fall back to the memo. The
+        memo's menu ends on the project being browsed too, so a project can
+        be renamed or emptied from in front of its memos, without first walking
+        the cursor back to it."""
+        project = self._pointed_project()
+        if self._on_sidebar() and project is not None:
+            self._open_menu(f"{project} — project", _PROJECT_MENU, project)
+            return
         memo_id = self._target_memo()
         if memo_id is None:
             return
-        self.push_screen(
-            ActionMenu(services.require_memo(self.repo, memo_id).filename),
-            self._run_chosen,
+        rows = _MEMO_MENU
+        if project is not None:
+            rows += (
+                ((), "rename_project", f"Rename project “{project}”"),
+                ((), "remove_project", f"Empty project “{project}”…"),
+            )
+        filename = services.require_memo(self.repo, memo_id).filename
+        self._open_menu(f"{filename} — actions", rows, project)
+
+    def action_go_to(self) -> None:
+        """Lists the screens of their own the app has, to go to one."""
+        self._open_menu("Go to", _GOTO_MENU, None)
+
+    def action_keys(self) -> None:
+        """Lists every key, the hidden ones and the menus' included."""
+        main = tuple(
+            ((binding.key,), binding.action, binding.description)
+            for binding in (
+                Binding(*b) if isinstance(b, tuple) else b for b in self.BINDINGS
+            )
+            if binding.key != "backspace"
         )
+        self.push_screen(
+            KeysHelp(
+                (
+                    ("Anywhere", main),
+                    ("space — on a memo", _MEMO_MENU),
+                    ("space — on a project in the sidebar", _PROJECT_MENU),
+                    ("g — go to", _GOTO_MENU),
+                )
+            )
+        )
+
+    def _open_menu(self, title: str, rows: Sequence[MenuRow], project: str | None) -> None:
+        """Opens one menu, holding on to the project it was opened over: the
+        cursor has moved by the time a line is picked, and the line must still
+        act on the project the menu said it was about."""
+        self.menu_project = project
+        self.push_screen(ActionMenu(title, rows), self._run_chosen)
 
     async def _run_chosen(self, action: str | None) -> None:
         """Runs whatever the menu was closed on, as though its key had been
@@ -2953,8 +3127,11 @@ class MemoApp(App[None]):
         Awaited rather than called, because dispatching an action is
         asynchronous — a callback that dropped the coroutine would close the
         menu on nothing happening at all."""
-        if action is not None:
-            await self.run_action(action)
+        try:
+            if action is not None:
+                await self.run_action(action)
+        finally:
+            self.menu_project = None
 
     def action_memo_info(self) -> None:
         """Says what state the memo being pointed at is in, if any memo is."""
@@ -3101,24 +3278,38 @@ class MemoApp(App[None]):
         self.show_memo(memo_id)
 
     def _pointed_project(self) -> str | None:
-        """The project the sidebar cursor is resting on, and nothing at all once
-        the cursor is no longer what the person is pointing at: the project keys
-        read the sidebar, so they stay out of the way while the memos have focus.
+        """The project an action on a project means: the one a menu was opened
+        over while that menu's line runs; the one the sidebar cursor is resting
+        on while the sidebar has the cursor, whether or not it was opened; and
+        otherwise the project whose memos are on screen.
 
-        Nothing either on either of the two rows that are not projects. The
-        whole library is every project at once, so renaming or emptying it names
+        Nothing on either of the two rows that are not projects. The whole
+        library is every project at once, so renaming or emptying it names
         nothing; the archive is a drawer memos are put in, and the name behind
         that row is a sentinel no project can carry — emptying it would take
         that sentinel for a real project and refile every memo filed under it.
-        That answer is what keeps those keys hidden on both rows, and what makes
-        them harmless if one is reached some other way."""
-        sidebar = self.query_one("#projects", ListView)
-        if self.focused is not sidebar:
+        Nothing either while the list is a tag search, whose memos come from
+        any project at all."""
+        if self.menu_project is not None:
+            return self.menu_project
+        if self._on_sidebar():
+            chosen = self.query_one("#projects", ListView).highlighted_child
+            if chosen is None or chosen.name in (EVERYTHING, ARCHIVED):
+                return None
+            return chosen.name
+        if self.tag is not None:
             return None
-        chosen = sidebar.highlighted_child
-        if chosen is None or chosen.name in (EVERYTHING, ARCHIVED):
-            return None
-        return chosen.name
+        return self.project
+
+    def action_rename(self) -> None:
+        """Renames whatever is being pointed at: the project under the sidebar
+        cursor while the sidebar has it, and the memo otherwise. One key for
+        both, because "rename" is one idea, and which thing it lands on is
+        whatever the cursor says."""
+        if self._on_sidebar() and self._pointed_project() is not None:
+            self.action_rename_project()
+        else:
+            self.action_title_memo()
 
     def action_rename_project(self) -> None:
         """Offers to rename the project the sidebar cursor is on."""

@@ -647,6 +647,20 @@ def test_writing_a_note_by_hand_leaves_the_tags_where_they_were(repo):
     assert [m.id for m in repo.memos(tag="release")] == [memo_id]
 
 
+def test_the_tags_on_offer_are_counted_by_memo_most_used_first(repo):
+    tag_memo(repo, "a.m4a", ["release", "hiring"])
+    tag_memo(repo, "b.m4a", ["Release", "release"])
+
+    assert repo.tags() == [("Release", 2), ("hiring", 1)]
+
+
+def test_an_archived_memo_offers_no_tags_to_search_by(repo):
+    put_away = tag_memo(repo, "a.m4a", ["release"])
+    repo.set_archived(put_away, True)
+
+    assert repo.tags() == []
+
+
 # --- when a memo was last changed -----------------------------------------
 
 
@@ -1170,14 +1184,13 @@ def test_listings_can_be_narrowed_to_the_threads_one_memo_is_in(repo):
     assert {row.conversation.id for row in repo.conversation_listings(memo_id=b)} == {both, only_b}
 
 
-def test_a_conversation_can_be_renamed_and_rescoped(repo):
-    a, b = make_memo(repo, filename="a.m4a"), make_memo(repo, filename="b.m4a")
+def test_a_conversation_can_be_renamed(repo):
+    a = make_memo(repo, filename="a.m4a")
     cid = repo.create_conversation([a], ["A"])
     assert repo.set_conversation_title(cid, "renamed") is True
     assert repo.set_conversation_title(99, "nope") is False
-    repo.set_conversation_memos(cid, [b, a], ["B", "A"])
     convo = repo.conversation(cid)
-    assert (convo.title, convo.memo_ids) == ("renamed", (b, a))
+    assert (convo.title, convo.memo_ids) == ("renamed", (a,))
 
 
 def test_an_older_database_gains_the_conversation_tables_on_open(tmp_path):
