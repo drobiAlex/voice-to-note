@@ -267,6 +267,11 @@ if wants("property") {
     var stats: [String: Int] = [:]
     let runs: UInt64 = 6000
     for seed in 1...runs { propertyRun(seed: seed, stats: &stats) }
+    // A property test that only ever sees one kind of ending proves little.
+    for ending in ["free", "tucked", "peeking"] {
+        precondition(stats[ending, default: 0] >= 100, "the property runs rarely ended \(ending): \(stats)")
+    }
+    precondition(stats["notes", default: 0] > 1000, "the property runs said too little: \(stats)")
     print("property: \(runs) seeded runs (seeds 1...\(runs)), rested as \(stats.sorted { $0.key < $1.key })")
 }
 
