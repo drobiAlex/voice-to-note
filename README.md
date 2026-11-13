@@ -57,14 +57,7 @@ vtn ask 3 "who owns the launch?"  # ask a question about a memo
 
 ## Roadmap
 
-Next:
-
-- A Voice Memos watcher that processes phone recordings on its own.
-- To-dos and notes on your phone through Apple Reminders and Notes.
-- Switching microphone mid-meeting without stopping the recording.
-- Full-text search across transcripts and notes.
-
-The shipped list and the rest are in [`docs/roadmap.md`](docs/roadmap.md).
+What is shipped and what is next: [docs/roadmap.md](docs/roadmap.md).
 
 ## Development
 
@@ -85,3 +78,7 @@ The spring physics in `src/voice_to_note/native/springs.swift` comes from
 [MacPaw/CocoaSprings](https://github.com/MacPaw/CocoaSprings), copyright © 2023
 MacPaw Inc., under the MIT License. The vendored file includes the full license,
 upstream headers, and the source commit; platform animation wrappers are not included.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
