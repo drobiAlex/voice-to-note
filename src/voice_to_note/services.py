@@ -1,16 +1,21 @@
 import datetime
 import hashlib
+import importlib.metadata
 import json
 import os
+import platform
 import re
+import resource
+import sqlite3
 import sys
 import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
@@ -24,6 +29,7 @@ from .domain import (
     Memo,
     Message,
     NotesPayload,
+    RunRecord,
     Segment,
     Speaker,
     SpeakerMatch,
@@ -35,12 +41,14 @@ from .gateways import (
     audio,
     bootstrap,
     capture,
+    eventlog,
     llm,
     sherpa,
     whisper,
     youtube,
 )
 from .storage.repository import Repository
+from .transforms import metrics
 from .transforms.live import (
     SEARCH_S,
     cut_offset,
@@ -120,6 +128,157 @@ def _silent(message: str) -> None:
 def _uncounted(stage: int, doing: str) -> None:
     """Default for callers with nowhere to draw how far the pipeline has got."""
     pass
+
+
+# --- what the app did, and how long it took ---------------------------------
+
+
+def app_version() -> str:
+    """The version installed, for every run and report to carry: a timing
+    from last month's build says nothing about this one's."""
+    try:
+        return importlib.metadata.version("voice-to-note")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def _cpu_s() -> float:
+    """Processor time this process and every child it has waited for has used.
+    The children are most of it — whisper, ffmpeg and the LLM CLIs all run as
+    subprocesses — so this process's own time alone would read a ten minute
+    transcription as a few milliseconds of work. With jobs running on several
+    threads at once the share each stage is given is approximate."""
+    children = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return time.process_time() + children.ru_utime + children.ru_stime
+
+
+def redact(text: str) -> str:
+    """Text safe to hand to somebody else: the home folder, which names the
+    person, written as ~."""
+    home = str(Path.home())
+    return text.replace(home, "~") if home not in ("", "/") else text
+
+
+class Run:
+    """One piece of work being timed: which memo it was about, once that is
+    known, and how much audio it had to get through, since speed is what makes
+    two runs comparable."""
+
+    def __init__(self, repo: Repository, kind: str, memo_id: int | None) -> None:
+        self.repo = repo
+        self.kind = kind
+        self.memo_id = memo_id
+        self.audio_s: float | None = None
+        self.id: int | None = None
+
+
+# the run a stage belongs to, wherever down the call stack the stage is timed.
+# A context variable rather than an argument handed down every function, and a
+# thread started inside a run does not see it — which is what keeps a worker
+# thread from writing through a database connection that belongs to another
+_RUN: ContextVar[Run | None] = ContextVar("vtn_run", default=None)
+
+
+def _failure_text(e: BaseException) -> str:
+    """An exception as one line for a log, home folder written as ~."""
+    return redact(f"{type(e).__name__}: {e}")
+
+
+def _stored(write: Callable[[], None]) -> None:
+    """Writes a timing, unless the database will not take it. Nothing about
+    measuring the work may fail the work: a locked or full database costs the
+    timing and is said in the event log instead."""
+    try:
+        write()
+    except sqlite3.Error as e:
+        eventlog.record("metrics.unwritable", error=_failure_text(e))
+
+
+@contextmanager
+def tracked(repo: Repository, kind: str, memo_id: int | None = None, **detail: Any) -> Iterator[Run]:
+    """Times one piece of work from start to end, into the database for the
+    numbers and into the event log for the story. However it ends — finished,
+    failed, interrupted — the end is written down, and the exception carries
+    on exactly as it would have: this watches, it never decides."""
+    run = Run(repo, kind, memo_id)
+    if config.METRICS_KEEP_RUNS > 0:
+
+        def opened() -> None:
+            run.id = repo.start_run(kind, memo_id, app_version(), config.METRICS_KEEP_RUNS)
+
+        _stored(opened)
+    eventlog.record("run.start", run=run.id, kind=kind, memo=memo_id, **detail)
+    token = _RUN.set(run)
+    began = time.monotonic()
+    outcome, error = "ok", None
+    try:
+        yield run
+    except KeyboardInterrupt:
+        outcome = "cancelled"
+        raise
+    except BaseException as e:
+        outcome, error = "failed", _failure_text(e)
+        raise
+    finally:
+        _RUN.reset(token)
+        wall = time.monotonic() - began
+        if run.id is not None:
+            run_id = run.id
+            _stored(
+                lambda: repo.finish_run(run_id, wall, outcome, error, run.audio_s, run.memo_id)
+            )
+        eventlog.record(
+            "run.end",
+            run=run.id,
+            kind=kind,
+            memo=run.memo_id,
+            outcome=outcome,
+            wall_s=round(wall, 3),
+            audio_s=run.audio_s,
+            error=error,
+        )
+
+
+@contextmanager
+def stage(name: str, **detail: Any) -> Iterator[None]:
+    """Times one stage of the run under way, or stands alone in the event log
+    when there is none — a stage timed on a worker thread, which cannot see the
+    run that started it, still tells the log how long it took."""
+    run = _RUN.get()
+    run_id = run.id if run is not None else None
+    eventlog.record("stage.start", run=run_id, stage=name, **detail)
+    began, burnt = time.monotonic(), _cpu_s()
+    outcome, error = "ok", None
+    try:
+        yield
+    except KeyboardInterrupt:
+        outcome = "cancelled"
+        raise
+    except BaseException as e:
+        outcome, error = "failed", _failure_text(e)
+        raise
+    finally:
+        wall, cpu = time.monotonic() - began, _cpu_s() - burnt
+        if run is not None and run_id is not None:
+            owner = run
+            _stored(lambda: owner.repo.add_stage(run_id, name, wall, cpu, outcome, detail))
+        eventlog.record(
+            "stage.end",
+            run=run_id,
+            stage=name,
+            outcome=outcome,
+            wall_s=round(wall, 3),
+            cpu_s=round(cpu, 3),
+            error=error,
+            **detail,
+        )
+
+
+def note(event: str, **fields: Any) -> None:
+    """Writes one event to the log, for a front end that saw something worth
+    knowing about later — a recorder that would not start, a stop that took a
+    while — without reaching past the services for the log itself."""
+    eventlog.record(event, **fields)
 
 
 def require_memo(repo: Repository, memo_id: int) -> Memo:
@@ -242,7 +401,7 @@ class World:
     clone: Callable[[Path, str], None]
     build: Callable[[Path], None]
     build_capture: Callable[[Path, Path, Path], None]
-    build_menubar: Callable[[Path, Path, Path], None]
+    build_menubar: Callable[[list[Path], Path, Path], None]
     script: Callable[[Path, str, list[str]], None]
     fetch: Callable[[str, Path, Callable[[int, int], None]], None]
     fetch_tar: Callable[[str, Path, Callable[[int, int], None]], None]
@@ -323,7 +482,7 @@ def mock_world(sleep: Callable[[float], None] = time.sleep) -> World:
         clone=clone,
         build=build,
         build_capture=lambda _src, _plist, _dst: None,
-        build_menubar=lambda _src, _plist, _app: None,
+        build_menubar=lambda _sources, _plist, _app: None,
         script=script,
         fetch=simulated_fetch,
         fetch_tar=simulated_fetch,
@@ -476,8 +635,8 @@ def setup(
         )
         world.write(config.CAPTURE_STAMP, capture_stamp)
 
-    menubar_sources = [config.MENUBAR_SRC, config.MENUBAR_PLIST]
-    menubar_stamp = _source_stamp(menubar_sources)
+    menubar_sources = [config.MENUBAR_SRC, config.MENUBAR_SPRINGS]
+    menubar_stamp = _source_stamp([*menubar_sources, config.MENUBAR_PLIST])
     if sys.platform != "darwin":
         log("[8/9] menu bar recorder — macOS only, skipped")
     elif world.built(config.MENUBAR_BIN) and world.read(config.MENUBAR_STAMP) == menubar_stamp:
@@ -491,13 +650,17 @@ def setup(
             8,
             "building menu bar recorder",
             lambda: world.build_menubar(
-                config.MENUBAR_SRC, config.MENUBAR_PLIST, config.MENUBAR_APP
+                menubar_sources, config.MENUBAR_PLIST, config.MENUBAR_APP
             ),
         )
         world.write(config.MENUBAR_STAMP, menubar_stamp)
 
     if sys.platform != "darwin":
         log("[9/9] menu bar recorder launch — macOS only, skipped")
+    elif config.SETUP_LAUNCH != "on":
+        # a build box compiles the recorder to prove it compiles; launching it
+        # there would put a scratch checkout's recorder in somebody's menu bar
+        log("[9/9] menu bar recorder launch — off by setting, skipped")
     elif world.recording():
         # quitting the recorder takes its capture helper down with it, and no
         # upgrade is worth ending somebody's meeting; the fresh build is
@@ -863,11 +1026,28 @@ def process_memo(
     num_speakers = _speaker_count(num_speakers)
     # before the minutes of converting and transcribing, not after
     project = _project_name(project)
+    with tracked(repo, "process", source=src.suffix.lower(), diarize=diarize) as run:
+        return _process(repo, run, src, project, log, progress, num_speakers, diarize)
+
+
+def _process(
+    repo: Repository,
+    run: Run,
+    src: Path,
+    project: str,
+    log: Log,
+    progress: Progress,
+    num_speakers: int | None,
+    diarize: bool,
+) -> ProcessResult:
+    """process_memo's stages, each timed under the run it opened."""
     wav = config.UPLOADS_DIR / f"{src.stem}-{uuid.uuid4().hex[:8]}.wav"
     progress(1, "converting")
     log(f"converting {src.name} …")
-    audio.to_wav16k(src, wav)
-    duration = audio.duration_seconds(wav)
+    with stage("convert"):
+        audio.to_wav16k(src, wav)
+        duration = audio.duration_seconds(wav)
+    run.audio_s = duration
     progress(2, "transcribing")
     log(f"transcribing ({_duration(duration)} audio) …")
     turning: Future[list[Turn]] | None = None
@@ -882,7 +1062,14 @@ def process_memo(
             whisper.require()
             side = running.enter_context(ThreadPoolExecutor(max_workers=1))
             turning = side.submit(sherpa.diarize, wav, num_speakers)
-        raw = whisper.transcribe(wav, duration)
+        with stage(
+            "transcribe",
+            model=config.WHISPER_MODEL,
+            beam=config.WHISPER_BEAM_SIZE,
+            threads=config.WHISPER_THREADS,
+            overlapped=turning is not None,
+        ):
+            raw = whisper.transcribe(wav, duration)
     segs = segments_from_whisper(raw)
     language = raw.get("result", {}).get("language", "")
     labels: list[str] = []
@@ -891,12 +1078,13 @@ def process_memo(
     if diarize:
         progress(3, "diarizing")
         log("diarizing …")
-        turns = turning.result() if turning is not None else sherpa.diarize(wav, num_speakers)
-        segs = assign_speakers(segs, turns)
-        labels, speakers, matches = _identify(repo, wav, turns, keep_names={})
+        with stage("diarize", speakers=num_speakers):
+            turns = turning.result() if turning is not None else sherpa.diarize(wav, num_speakers)
+            segs = assign_speakers(segs, turns)
+            labels, speakers, matches = _identify(repo, wav, turns, keep_names={})
     else:
         log("skipping speaker detection …")
-    memo_id = repo.create_memo(
+    memo_id = run.memo_id = repo.create_memo(
         filename=src.name,
         wav_path=str(wav),
         duration_s=duration,
@@ -992,6 +1180,8 @@ class LiveSession:
         self._language = ""
         self._failure: str | None = None
         self._tail = ""
+        # the run this meeting's live work is timed under, once it has begun
+        self._timed: Run | None = None
 
     def start(self) -> None:
         """Begins reading the meeting."""
@@ -1003,7 +1193,14 @@ class LiveSession:
         the only stretch of the meeting nobody has read yet, and it is seconds
         of work rather than the minutes the whole recording would have been."""
         self._ending.set()
+        asked = time.monotonic()
         self._thread.join()
+        eventlog.record(
+            "live.stopped",
+            memo=self.memo_id,
+            wait_s=round(time.monotonic() - asked, 3),
+            failed=self._failure is not None,
+        )
         return LiveResult(self._stored, self._language, self._failure)
 
     def _run(self) -> None:
@@ -1011,15 +1208,23 @@ class LiveSession:
         connection to the database: sqlite refuses a connection used from a
         thread that did not open it, and the recording's own thread is busy
         sitting through the meeting."""
-        with open_repo(self._repo) as repo:
-            while not self._ending.wait(self._wait_s()):
-                if not self._ready() or not self._pass(repo, final=False):
-                    if self._failure is not None:
-                        return
-        while self._failure is None and self._pending_s() > 0:
-            with open_repo(self._repo) as repo:
-                if not self._pass(repo, final=True):
+        with open_repo(self._repo) as repo, tracked(repo, "live", self.memo_id) as run:
+            self._run_through(repo, run)
+
+    def _run_through(self, repo: Repository, run: Run) -> None:
+        """Reads the meeting a stretch at a time until it is told to stop, then
+        reads whatever is left. Every stretch is a timed stage of one run, so
+        how far behind the room the machine fell is there to be read
+        afterwards: a stretch's wall time against its own length."""
+        self._timed = run
+        run.audio_s = 0.0
+        while not self._ending.wait(self._wait_s()):
+            if not self._ready() or not self._pass(repo, final=False):
+                if self._failure is not None:
                     return
+        while self._failure is None and self._pending_s() > 0:
+            if not self._pass(repo, final=True):
+                return
 
     def _ready(self) -> bool:
         """Whether enough of the meeting has been recorded to read a stretch of
@@ -1129,7 +1334,10 @@ class LiveSession:
                 reader.advance(len(raw) // reader.format.frame_bytes)
             self._log(f"  silence {fmt_ts(at_ms)}–{fmt_ts(at_ms + int(cut * 1000))}, not sent to whisper")
             return True
-        segments = self._transcribe([(raw, r.format) for r, raw in kept], cut)
+        with stage("chunk", seconds=round(cut, 1), final=final, behind_s=round(span - cut, 1)):
+            segments = self._transcribe([(raw, r.format) for r, raw in kept], cut)
+        if self._timed is not None and self._timed.audio_s is not None:
+            self._timed.audio_s += cut
         repo.append_segments(self.memo_id, shifted(segments, at_ms))
         for reader, raw in kept:
             reader.advance(len(raw) // reader.format.frame_bytes)
@@ -1168,6 +1376,7 @@ class LiveSession:
         that was not already a GatewayError with its own explanation baked
         in."""
         self._failure = str(e)
+        eventlog.record("live.failed", memo=self.memo_id, error=_failure_text(e))
         self._log(f"  transcribing as it records stopped: {type(e).__name__}: {e}")
 
 
@@ -1239,11 +1448,29 @@ def finish_live(
     an empty segment list already, so the only thing worth skipping is
     diarization itself, which is guarded next."""
     num_speakers = _speaker_count(num_speakers)
+    with tracked(repo, "finish_live", memo_id, diarize=diarize) as run:
+        return _finish_live(repo, run, memo_id, src, language, log, progress, num_speakers, diarize)
+
+
+def _finish_live(
+    repo: Repository,
+    run: Run,
+    memo_id: int,
+    src: Path,
+    language: str,
+    log: Log,
+    progress: Progress,
+    num_speakers: int | None,
+    diarize: bool,
+) -> ProcessResult:
+    """finish_live's stages, each timed under the run it opened."""
     wav = config.UPLOADS_DIR / f"{src.stem}-{uuid.uuid4().hex[:8]}.wav"
     progress(1, "converting")
     log(f"converting {src.name} …")
-    audio.to_wav16k(src, wav)
-    duration = audio.duration_seconds(wav)
+    with stage("convert"):
+        audio.to_wav16k(src, wav)
+        duration = audio.duration_seconds(wav)
+    run.audio_s = duration
     repo.finish_memo(
         memo_id,
         wav_path=str(wav),
@@ -1256,9 +1483,10 @@ def finish_live(
     if diarize and segs:
         progress(3, "diarizing")
         log("diarizing …")
-        turns = sherpa.diarize(wav, num_speakers)
-        segs = assign_speakers(segs, turns)
-        labels, speakers, matches = _identify(repo, wav, turns, keep_names={})
+        with stage("diarize", speakers=num_speakers):
+            turns = sherpa.diarize(wav, num_speakers)
+            segs = assign_speakers(segs, turns)
+            labels, speakers, matches = _identify(repo, wav, turns, keep_names={})
         repo.save_diarization(memo_id, segs, speakers)
         _report_matches(log, matches, keep_names={})
     elif diarize:
@@ -1385,7 +1613,9 @@ def import_youtube(
     # auto-generated is worth flagging while the download runs: unpunctuated
     # captions are why these notes may read rougher than a manual track's
     log(f"downloading captions ({track_lang}, {'auto-generated' if auto else 'manual'}) …")
-    segs = segments_from_captions(youtube.captions(track_url))
+    with tracked(repo, "youtube", auto_captions=auto) as run, stage("captions"):
+        run.audio_s = video.duration_s
+        segs = segments_from_captions(youtube.captions(track_url))
     if not segs:
         raise InvalidInput("the caption track is empty — nothing to import")
     memo_id = repo.create_memo(
@@ -1438,9 +1668,11 @@ def rediarize(
         raise NotFound(f"wav missing: {wav}")
     keep_names = repo.named_speakers(memo_id)
     log(f"diarizing memo {memo_id} …")
-    turns = sherpa.diarize(wav, num_speakers)
-    segs = assign_speakers(repo.segments(memo_id), turns)
-    labels, speakers, matches = _identify(repo, wav, turns, keep_names, exclude=memo_id)
+    with tracked(repo, "diarize", memo_id) as run, stage("diarize", speakers=num_speakers):
+        run.audio_s = memo.duration_s
+        turns = sherpa.diarize(wav, num_speakers)
+        segs = assign_speakers(repo.segments(memo_id), turns)
+        labels, speakers, matches = _identify(repo, wav, turns, keep_names, exclude=memo_id)
     repo.save_diarization(memo_id, segs, speakers)
     _report_matches(log, matches, keep_names)
     return labels
@@ -1578,7 +1810,8 @@ def _first_usable(attempt: Callable[[llm.Backend], T], failure: str, unavailable
         if not backend.available():
             continue
         try:
-            return attempt(backend)
+            with stage("llm", backend=backend.name):
+                return attempt(backend)
         except (llm.BackendError, ValueError) as e:
             errors.append(f"{backend.name}: {e}")
     if errors:
@@ -1709,13 +1942,14 @@ def run_extraction(
             f"memo {memo_id} has notes you edited by hand;"
             " re-extract with --force to replace them"
         )
-    backend, data = _complete(
-        llm.notes_prompt(transcript(repo, memo_id), template),
-        schema=SCHEMA,
-        parse=parse_notes,
-        failure="extraction failed",
-        unavailable="no extraction backend",
-    )
+    with tracked(repo, "extract", memo_id, template=template):
+        backend, data = _complete(
+            llm.notes_prompt(transcript(repo, memo_id), template),
+            schema=SCHEMA,
+            parse=parse_notes,
+            failure="extraction failed",
+            unavailable="no extraction backend",
+        )
     repo.save_extraction(memo_id, backend, data, clear_edited=force)
     repo.sync_todos(memo_id, data["action_items"])
     _auto_name(repo, memo_id, data)
@@ -1776,7 +2010,11 @@ def refine_transcript(repo: Repository, memo_id: int, dry_run: bool = False) -> 
     _require_not_recording(require_memo(repo, memo_id))
     segments = repo.segments(memo_id)
     chunks = chunk_segments(segments, chunk_size=config.REFINE_WINDOW)
-    with ThreadPoolExecutor(max_workers=REFINE_WORKERS) as pool:
+    with (
+        tracked(repo, "refine", memo_id, windows=len(chunks)),
+        stage("windows", workers=REFINE_WORKERS, windows=len(chunks)),
+        ThreadPoolExecutor(max_workers=REFINE_WORKERS) as pool,
+    ):
         # map hands the replies back in window order, which is the order
         # merge_refinements pairs them against the windows in
         replies = list(pool.map(_repair_window, chunks))
@@ -1849,6 +2087,22 @@ def notes_markdown(repo: Repository, memo_id: int) -> str:
     if not extraction:
         return "*no notes yet — run `vtn extract` on this memo*"
     return render_notes_markdown(extraction, _done_tasks(repo, memo_id))
+
+
+def export_notes(repo: Repository, memo_id: int) -> Path:
+    """Writes the reader-facing note to a stable file under VTN_HOME.
+
+    The native recorder needs a real artifact it can open after processing;
+    keeping this export inside the app's data directory avoids a temporary file
+    disappearing before the user clicks it and makes repeated opens deterministic.
+    """
+    require_memo(repo, memo_id)
+    if not repo.notes_md(memo_id) and repo.extraction(memo_id) is None:
+        raise NotFound(f"no notes for memo {memo_id} — run: vtn extract {memo_id}")
+    path = config.DATA_DIR / "notes" / f"{memo_id}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(notes_markdown(repo, memo_id) + "\n")
+    return path
 
 
 def notes_json(repo: Repository, memo_id: int) -> str:
@@ -2556,3 +2810,198 @@ def rename_speaker(repo: Repository, memo_id: int, label: str, name: str) -> Non
         raise InvalidInput("a speaker needs a name")
     if not repo.rename_speaker(memo_id, label, speaker):
         raise NotFound(f"no speaker {label} in memo {memo_id}")
+
+
+# --- reading back what the app did -----------------------------------------
+
+# how far back `vtn stats` and a report look by default: long enough to hold a
+# few dozen meetings, short enough that a slowdown since the last upgrade is
+# not averaged away under months of the old behaviour
+STATS_DAYS = 30
+# how much of each log a report carries. Bounded so a report stays something
+# that can be attached to a message: the events are the recent story, and the
+# menu bar's log is only the tail of what the pipeline printed
+REPORT_EVENTS = 400
+REPORT_MENUBAR_BYTES = 64 * 1024
+REPORT_SLOWEST = 10
+REPORT_FAILURES = 20
+
+
+def runs_since(repo: Repository, days: int = STATS_DAYS) -> list[RunRecord]:
+    """Every run the database still holds from the last `days` days."""
+    since = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=days)
+    return repo.runs(since=since.strftime("%Y-%m-%dT%H:%M:%S"))
+
+
+def _secs(value: float | None) -> str:
+    """A duration as somebody reads one: 0.4s, 41s, 6m12s."""
+    if value is None:
+        return "—"
+    if value < 10:
+        return f"{value:.1f}s"
+    if value < 60:
+        return f"{value:.0f}s"
+    minutes, seconds = divmod(round(value), 60)
+    return f"{minutes}m{seconds:02d}s"
+
+
+def _speed(value: float | None) -> str:
+    """How many times faster than the audio a stage got through it."""
+    return "—" if value is None else f"{value:.1f}×"
+
+
+def _table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
+    """A markdown table, which reads as a table in a terminal as well."""
+    lines = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
+    lines += ["| " + " | ".join(row) + " |" for row in rows]
+    return "\n".join(lines)
+
+
+def stats_text(repo: Repository, days: int = STATS_DAYS) -> str:
+    """How the app has been doing lately, for a person to read: how each kind
+    of work ended, and how long each stage of it takes — typically, on a bad
+    day, and in multiples of the audio's own length."""
+    runs = runs_since(repo, days)
+    if not runs:
+        return f"nothing timed in the last {days} days"
+    ended = _table(
+        ["work", "ok", "failed", "cancelled", "unfinished"],
+        [
+            [o.kind, str(o.ok), str(o.failed), str(o.cancelled), str(o.unfinished)]
+            for o in metrics.outcomes(runs)
+        ],
+    )
+    stages = _table(
+        ["work", "stage", "runs", "failed", "median", "p90", "worst", "cpu (median)", "speed"],
+        [
+            [
+                st.kind,
+                st.stage,
+                str(st.count),
+                str(st.failed),
+                _secs(st.wall_median),
+                _secs(st.wall_p90),
+                _secs(st.wall_max),
+                _secs(st.cpu_median),
+                _speed(st.speed_median),
+            ]
+            for st in metrics.stage_stats(runs)
+        ],
+    )
+    slow = _table(
+        ["run", "when (UTC)", "work", "memo", "took", "audio", "outcome", "slowest stage"],
+        [_slow_row(run) for run in metrics.slowest(runs, REPORT_SLOWEST)],
+    )
+    return (
+        f"last {days} days, {len(runs)} runs\n\n"
+        f"how runs ended\n\n{ended}\n\n"
+        f"stages (speed = audio length ÷ time taken)\n\n{stages}\n\n"
+        f"longest runs\n\n{slow}"
+    )
+
+
+def _slow_row(run: RunRecord) -> list[str]:
+    """One run in the list of the longest ones, with the stage that took most
+    of it — which is usually the whole answer to why it was slow."""
+    worst = max(run.stages, key=lambda st: st.wall_s, default=None)
+    return [
+        str(run.id),
+        run.started_at[:19].replace("T", " "),
+        run.kind,
+        str(run.memo_id or "—"),
+        _secs(run.wall_s),
+        _secs(run.audio_s),
+        run.outcome or "unfinished",
+        f"{worst.stage} {_secs(worst.wall_s)}" if worst else "—",
+    ]
+
+
+def _machine() -> list[str]:
+    """What this machine and install are, as far as a timing depends on it."""
+    mac = platform.mac_ver()[0]
+    return [
+        f"- vtn {app_version()}, Python {platform.python_version()}",
+        f"- {'macOS ' + mac if mac else platform.platform()} on {platform.machine()},"
+        f" {os.cpu_count()} cores",
+        f"- event log: {eventlog.size_bytes() // 1024} KiB of {config.LOG_MAX_MB:g} MiB allowed;"
+        f" database keeps {config.METRICS_KEEP_RUNS} runs",
+    ]
+
+
+def _devices() -> str:
+    """The audio devices this Mac offers a recording, or why they are not
+    known — which is itself worth reporting from a machine that will not
+    record."""
+    if sys.platform != "darwin":
+        return "(not a Mac)"
+    try:
+        return capture.devices().strip() or "(none listed)"
+    except GatewayError as e:
+        return f"(could not list them: {e})"
+
+
+def report_text(repo: Repository, days: int = STATS_DAYS) -> str:
+    """Everything worth knowing about how this install has been behaving, as
+    one document to send to whoever is fixing it: the machine, the settings,
+    the devices, how runs have been ending and how long they take, the recent
+    failures, and the most recent stretch of both logs.
+
+    Nothing anybody said is in it — no transcript, no notes, no audio — and
+    the home folder is written as ~. File names can still appear inside an
+    error a tool gave, which is said at the top so nobody is surprised."""
+    runs = runs_since(repo, days)
+    failures = [run for run in runs if run.outcome == "failed"][:REPORT_FAILURES]
+    settings = _table(
+        ["setting", "value", "from"],
+        [[key, value, source] for key, value, source, _doc in config_rows()],
+    )
+    failed = (
+        _table(
+            ["run", "when (UTC)", "work", "memo", "error"],
+            [
+                [
+                    str(run.id),
+                    run.started_at[:19].replace("T", " "),
+                    run.kind,
+                    str(run.memo_id or "—"),
+                    (run.error or "").replace("|", "/").replace("\n", " "),
+                ]
+                for run in failures
+            ],
+        )
+        if failures
+        else "none"
+    )
+    menubar = eventlog.text_tail(config.MENUBAR_LOG, REPORT_MENUBAR_BYTES).strip()
+    events = "\n".join(eventlog.tail(REPORT_EVENTS))
+    sections = [
+        "# vtn report",
+        f"Made {datetime.datetime.now(datetime.UTC):%Y-%m-%d %H:%M} UTC. Holds settings,"
+        " device names, timings, error messages and recent events. No transcripts, notes"
+        " or audio; file names can appear inside error messages.",
+        "## Machine",
+        "\n".join(_machine()),
+        "## Timings",
+        stats_text(repo, days),
+        "## Recent failures",
+        failed,
+        "## Audio devices",
+        f"```\n{_devices()}\n```",
+        "## Settings",
+        settings,
+        f"## Recent events (last {REPORT_EVENTS})",
+        f"```jsonl\n{events or '(none)'}\n```",
+        "## Menu bar log (tail)",
+        f"```\n{menubar or '(empty)'}\n```",
+    ]
+    return redact("\n\n".join(sections) + "\n")
+
+
+def write_report(repo: Repository, folder: Path) -> Path:
+    """Writes a report into a folder, named for when it was made, and says
+    where."""
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"vtn-report-{datetime.datetime.now():%Y%m%d-%H%M%S}.md"
+    path.write_text(report_text(repo), encoding="utf-8")
+    eventlog.record("report.written", bytes=path.stat().st_size)
+    return path

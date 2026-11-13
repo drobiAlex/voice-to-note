@@ -74,9 +74,12 @@ def test_every_setting_resolves_to_its_known_default():
         "chat_context_chars": 60000,
         "youtube_lang": "en",
         "youtube_timeout_s": 120,
+        "log_max_mb": 6,
+        "metrics_keep_runs": 2000,
         "refine_workers": 4,
         "refine_window": 20,
         "whisper_repo_url": "https://github.com/ggml-org/whisper.cpp",
+        "setup_launch": "on",
         "my_name": "Alex",
         "tui_theme": "textual-dark",
     }

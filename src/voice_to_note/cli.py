@@ -1,9 +1,12 @@
 import argparse
+import json
+import os
 import subprocess
 import sys
+import time
+import traceback
 from collections.abc import Callable
 from datetime import datetime
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from . import config, services
@@ -18,6 +21,8 @@ EXAMPLES = """examples:
   vtn notes 3 --json > notes.json     machine-readable notes for scripting
   vtn rename 3 S1 Samantha            name a speaker; later memos match by voice
   vtn title 3 Sprint planning         give memo 3 a name of its own
+  vtn stats                           how long each stage has been taking lately
+  vtn report                          one file to send when something misbehaves
 """
 
 
@@ -28,10 +33,7 @@ def status(message: str = "") -> None:
 
 def _version() -> str:
     """The installed version, for bug reports."""
-    try:
-        return version("voice-to-note")
-    except PackageNotFoundError:  # running straight from a source checkout
-        return "unknown"
+    return services.app_version()
 
 
 def cmd_setup(args: argparse.Namespace) -> None:
@@ -73,6 +75,7 @@ def _pipeline(
     args: argparse.Namespace,
     steps: frozenset[str],
     count: int | None,
+    progress: services.Progress | None = None,
 ) -> None:
     """Everything that happens to a recording once it exists and its options
     have been checked. Shared, so that a file handed in and a meeting taped a
@@ -80,18 +83,48 @@ def _pipeline(
     the caller may have had to ask it something before any of this could start,
     and one connection for the command keeps that question and this work reading
     the same memos."""
-    _finished(
-        repo,
-        services.process_memo(
+    event = _record_event(args) if getattr(args, "events", False) else None
+    if event is not None:
+        def report(stage: int, doing: str) -> None:
+            """Forwards progress to both the caller and the recorder bridge."""
+            if progress is not None:
+                progress(stage, doing)
+            event("stage", _friendly_stage(doing))
+
+        result = services.process_memo(
+            repo,
+            src,
+            project=args.project,
+            log=status,
+            progress=report,
+            num_speakers=count,
+            diarize="speakers" in steps,
+        )
+    elif progress is None:
+        result = services.process_memo(
             repo,
             src,
             project=args.project,
             log=status,
             num_speakers=count,
             diarize="speakers" in steps,
-        ),
+        )
+    else:
+        result = services.process_memo(
+            repo,
+            src,
+            project=args.project,
+            log=status,
+            progress=progress,
+            num_speakers=count,
+            diarize="speakers" in steps,
+        )
+    _finished(
+        repo,
+        result,
         args,
         steps,
+        event=event,
     )
 
 
@@ -100,6 +133,7 @@ def _finished(
     result: services.ProcessResult,
     args: argparse.Namespace,
     steps: frozenset[str],
+    event: Callable[[str, str], None] | None = None,
 ) -> None:
     """What happens to a memo once its transcript and speakers are stored,
     however they got there. Kept apart from the transcription above it because
@@ -111,6 +145,7 @@ def _finished(
     )
     if "refine" in steps:
         try:
+            event and event("stage", "refining")
             status("refining transcript …")
             refined = services.refine_transcript(repo, result.memo_id)
             status(
@@ -121,15 +156,59 @@ def _finished(
             status(f"refine skipped: {e}")
     if "notes" in steps:
         try:
+            event and event("stage", "writing notes")
             status("extracting notes …")
             backend = services.run_extraction(repo, result.memo_id, template=args.template)
             status(f"extracted via {backend}\n")
             print(services.notes(repo, result.memo_id))
+            event and event("ready", str(result.memo_id))
         except services.ExtractionError as e:
             status(f"extraction skipped: {e}")
             status(f"retry later with: vtn extract {result.memo_id}")
+            event and event("failed", f"notes:{result.memo_id}:{e}")
     else:
         status(f"transcript stored — run `vtn extract {result.memo_id}` for notes")
+        event and event("transcript_ready", str(result.memo_id))
+
+
+def _friendly_stage(stage: str) -> str:
+    """Maps internal pipeline names to the stable labels the recorder shows."""
+    return {
+        "converting": "preparing audio",
+        "transcribing": "transcribing",
+        "diarizing": "identifying speakers",
+        "refining": "refining",
+        "writing notes": "writing notes",
+    }.get(stage, stage)
+
+
+def _record_event(args: argparse.Namespace) -> Callable[[str, str], None]:
+    """Writes the recorder's small machine contract only when its UI asked for
+    it, leaving the ordinary command's human stderr unchanged."""
+    def emit(kind: str, value: str) -> None:
+        if getattr(args, "events", False):
+            fields: dict[str, object] = {"event": kind}
+            if kind == "stage":
+                fields["stage"] = value
+            elif kind == "cancellable":
+                fields["pgid"] = int(value)
+            elif kind == "failed":
+                failure_kind, _, rest = value.partition(":")
+                memo_text, _, detail = rest.partition(":")
+                fields["kind"] = failure_kind
+                try:
+                    fields["memo_id"] = int(memo_text)
+                except ValueError:
+                    pass
+                if detail:
+                    fields["message"] = detail
+            elif value:
+                try:
+                    fields["memo_id"] = int(value)
+                except ValueError:
+                    fields["value"] = value
+            print(f"vtn-event {json.dumps(fields, ensure_ascii=False)}", file=sys.stderr, flush=True)
+    return emit
 
 
 def cmd_process(args: argparse.Namespace) -> None:
@@ -151,7 +230,13 @@ def cmd_process(args: argparse.Namespace) -> None:
         ):
             status("skipped")
             return
-        _pipeline(repo, src, args, steps, count)
+        try:
+            _pipeline(repo, src, args, steps, count)
+        except KeyboardInterrupt:
+            event = _record_event(args) if getattr(args, "events", False) else None
+            event and event("cancelled", "")
+            status("processing cancelled — audio was kept")
+            raise SystemExit(130) from None
 
 
 def cmd_youtube(args: argparse.Namespace) -> None:
@@ -242,6 +327,11 @@ def cmd_record(args: argparse.Namespace) -> None:
     ordinary pass's segments and double the transcript."""
     if sys.platform != "darwin":
         sys.exit("meeting recording is macOS-only")
+    if getattr(args, "events", False) and os.environ.get("VTN_JOB_PROCESS_GROUP") == "1":
+        # The native host opts into an isolated group before it starts the job.
+        # Children of whisper/ffmpeg inherit it, allowing a processing cancel to
+        # stop this job without ever signalling the host or the user's shell.
+        os.setpgrp()
     steps, count = _checked(args)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     tracks = config.RECORDINGS_DIR / stamp
@@ -249,14 +339,34 @@ def cmd_record(args: argparse.Namespace) -> None:
     merged = config.RECORDINGS_DIR / f"meeting-{stamp}.m4a"
 
     levels, meter_done = _meter(args.levels)
-    recording = capture.start(
-        system_wav,
-        mic_wav,
-        output_uid=args.output_device,
-        input_uid=args.input_device,
-        levels=levels,
+    services.note(
+        "record.starting",
+        output_device=args.output_device,
+        input_device=args.input_device,
+        live=config.LIVE_TRANSCRIBE,
     )
+    asked = time.monotonic()
+    try:
+        recording = capture.start(
+            system_wav,
+            mic_wav,
+            output_uid=args.output_device,
+            input_uid=args.input_device,
+            levels=levels,
+        )
+    except GatewayError as e:
+        # the one failure a person sees as "it would not start"; written down
+        # with how long it took to give up, since a prompt left unanswered and
+        # a device that refused look the same from the outside
+        services.note(
+            "record.start_failed",
+            error=services.redact(str(e)),
+            after_s=round(time.monotonic() - asked, 3),
+        )
+        raise
+    services.note("record.started", after_s=round(time.monotonic() - asked, 3))
     with Repository() as repo:
+        event = _record_event(args) if getattr(args, "events", False) else None
         live = services.start_live(
             repo, system_wav, mic_wav, merged.name, args.project, log=status
         )
@@ -264,24 +374,65 @@ def cmd_record(args: argparse.Namespace) -> None:
         try:
             code = recording.wait()
             ended = f"recording ended on its own: vtn-capture exited with code {code}"
+            services.note("record.ended_by_itself", code=code)
         except KeyboardInterrupt:
             ended = ""
+            services.note("record.stop_requested")
         # the helper is stopped before the meter is ended and anything else
         # said: a reading arriving afterwards would draw half a frame under the
         # line below
+        stopping = time.monotonic()
         recording.stop()
+        services.note("record.capture_stopped", wait_s=round(time.monotonic() - stopping, 3))
         meter_done()
         status(ended)
+        if event is not None and live is not None:
+            event("stage", "transcribing")
         # the last stretch of the meeting is read before the tracks are merged
         # away, and while the two of them are still on disk to be read from
-        heard = live.stop() if live is not None else None
+        try:
+            if event is not None and os.environ.get("VTN_JOB_PROCESS_GROUP") == "1":
+                # This is the cancellation handshake with the menu-bar host.
+                # The recorder is fully stopped now, so a queued Cancel may
+                # safely interrupt this isolated group, including a whisper or
+                # ffmpeg child owned by the live drain or later pipeline.
+                event("cancellable", str(os.getpgrp()))
+            draining = time.monotonic()
+            heard = live.stop() if live is not None else None
+            if heard is not None:
+                # the wait between pressing stop and the recording being let
+                # go of: the live pass finishes the stretch it is reading
+                services.note(
+                    "record.live_drained",
+                    wait_s=round(time.monotonic() - draining, 3),
+                    segments=heard.segment_count,
+                    failure=heard.failure and services.redact(heard.failure),
+                )
+        except KeyboardInterrupt:
+            services.note("record.cancelled", during="live drain")
+            event and event("cancelled", str(live.memo_id) if live is not None else "")
+            status("processing cancelled — recorded audio and saved transcript were kept")
+            raise SystemExit(130) from None
 
         if not _taped(system_wav) or not _taped(mic_wav):
+            services.note(
+                "record.empty",
+                system_taped=_taped(system_wav),
+                mic_taped=_taped(mic_wav),
+            )
             if live is not None:
                 services.discard_live(repo, live.memo_id)
             sys.exit(f"nothing was recorded — no audio in {tracks}")
         status("merging the two tracks …")
-        audio.merge_tracks(system_wav, mic_wav, merged)
+        try:
+            event and event("stage", "preparing audio")
+            with services.stage("merge"):
+                audio.merge_tracks(system_wav, mic_wav, merged)
+        except KeyboardInterrupt:
+            services.note("record.cancelled", during="merge")
+            event and event("cancelled", str(live.memo_id) if live is not None else "")
+            status("processing cancelled — recorded audio was kept")
+            raise SystemExit(130) from None
         system_wav.unlink()
         mic_wav.unlink()
         tracks.rmdir()
@@ -315,22 +466,42 @@ def cmd_record(args: argparse.Namespace) -> None:
                     status(f"transcribed while recording — {heard.segment_count} segments")
                 else:
                     status("transcribed while recording — nothing worth transcribing")
-                _finished(
-                    repo,
-                    services.finish_live(
+                try:
+                    _finished(
                         repo,
-                        live.memo_id,
-                        merged,
-                        language=heard.language,
-                        log=status,
-                        num_speakers=count,
-                        diarize="speakers" in steps,
-                    ),
-                    args,
-                    steps,
-                )
+                        services.finish_live(
+                            repo,
+                            live.memo_id,
+                            merged,
+                            language=heard.language,
+                            log=status,
+                            progress=(
+                                (lambda stage, doing: event("stage", _friendly_stage(doing)))
+                                if event is not None
+                                else services._uncounted
+                            ),
+                            num_speakers=count,
+                            diarize="speakers" in steps,
+                        ),
+                        args,
+                        steps,
+                        event=event,
+                    )
+                except KeyboardInterrupt:
+                    services.note("record.cancelled", during="finishing")
+                    event = _record_event(args) if getattr(args, "events", False) else None
+                    event and event("cancelled", str(live.memo_id))
+                    status(f"processing cancelled — memo {live.memo_id} and audio were kept")
+                    raise SystemExit(130) from None
                 return
-        _pipeline(repo, merged, args, steps, count)
+        try:
+            _pipeline(repo, merged, args, steps, count)
+        except KeyboardInterrupt:
+            services.note("record.cancelled", during="processing")
+            event = _record_event(args) if getattr(args, "events", False) else None
+            event and event("cancelled", "")
+            status(f"processing cancelled — audio was kept at {merged}")
+            raise SystemExit(130) from None
 
 
 def cmd_menubar(args: argparse.Namespace) -> None:
@@ -365,6 +536,23 @@ def cmd_devices(args: argparse.Namespace) -> None:
     if sys.platform != "darwin":
         sys.exit("audio devices are listed on macOS only")
     print(capture.devices(), end="")
+
+
+def cmd_stats(args: argparse.Namespace) -> None:
+    """Prints how runs have been ending and how long each stage of them takes,
+    for a person wondering why that last memo was slow."""
+    with Repository() as repo:
+        print(services.stats_text(repo, args.days))
+
+
+def cmd_report(args: argparse.Namespace) -> None:
+    """Writes the file to send when something misbehaves: timings, failures,
+    devices, settings and the recent logs, nothing anybody said. The path goes
+    to stdout, so a script can pick the file up."""
+    with Repository() as repo:
+        path = services.write_report(repo, Path(args.out).expanduser())
+    status("wrote a report — it holds no transcripts, notes or audio")
+    print(path)
 
 
 def cmd_projects(args: argparse.Namespace) -> None:
@@ -555,7 +743,9 @@ def cmd_notes(args: argparse.Namespace) -> None:
     """Prints the notes already extracted for a memo, or the note as the screen
     shows it: whatever somebody wrote by hand, falling back to the extraction."""
     with Repository() as repo:
-        if args.edited:
+        if getattr(args, "export", False):
+            print(services.export_notes(repo, args.id))
+        elif args.edited:
             print(services.notes_markdown(repo, args.id))
         else:
             print(services.notes_json(repo, args.id) if args.json else services.notes(repo, args.id))
@@ -719,6 +909,11 @@ def main() -> None:
         help='comma-separated optional stages to run: speakers,refine,notes'
         ' (default: speakers,notes; "" imports just the transcript)',
     )
+    sp.add_argument(
+        "--events",
+        action="store_true",
+        help="emit JSON processing events prefixed with 'vtn-event ' on stderr",
+    )
     sp.set_defaults(fn=cmd_process)
 
     sp = sub.add_parser("record", help="record this Mac's meeting, then transcribe it")
@@ -758,6 +953,11 @@ def main() -> None:
         help="stream one machine-readable line per 100ms on stderr instead of a meter:"
         " level<TAB>system dBFS<TAB>mic dBFS",
     )
+    sp.add_argument(
+        "--events",
+        action="store_true",
+        help="emit JSON processing events prefixed with 'vtn-event ' on stderr",
+    )
     sp.set_defaults(fn=cmd_record)
 
     sp = sub.add_parser("youtube", help="import a YouTube video's captions as a memo")
@@ -794,6 +994,18 @@ def main() -> None:
     sub.add_parser(
         "devices", help="list the audio devices a recording can be pointed at"
     ).set_defaults(fn=cmd_devices)
+
+    sp = sub.add_parser("stats", help="how runs have been ending and how long each stage takes")
+    sp.add_argument(
+        "--days", type=int, default=services.STATS_DAYS, help="how far back to look"
+    )
+    sp.set_defaults(fn=cmd_stats)
+
+    sp = sub.add_parser(
+        "report", help="write one file to send when something misbehaves (no transcripts)"
+    )
+    sp.add_argument("--out", default=".", metavar="DIR", help="folder to write it into")
+    sp.set_defaults(fn=cmd_report)
 
     sub.add_parser(
         "projects", help="list every project and how many memos it holds"
@@ -915,6 +1127,7 @@ def main() -> None:
 
     sp = sub.add_parser("notes", help="show extracted notes for a memo")
     sp.add_argument("id", type=int)
+    sp.add_argument("--export", action="store_true", help="export the note and print its stable path")
     # an edit replaces the extraction --json prints, so there is no printing both
     form = sp.add_mutually_exclusive_group()
     form.add_argument("--json", action="store_true", help="print the stored extraction as JSON")
@@ -1028,6 +1241,47 @@ def main() -> None:
         if not services.ready():
             sys.exit("not set up yet — run: vtn setup (installs whisper.cpp and all models)")
         args.fn = cmd_tui
+    _run_command(args)
+
+
+def _run_command(args: argparse.Namespace) -> None:
+    """Runs the chosen command, and writes down how it ended. The end is the
+    half that matters: a command that took thirty seconds to obey a cancel, or
+    died with a traceback nobody copied, leaves its last word in the event log
+    rather than only in a terminal that has since been closed."""
+    began = time.monotonic()
+    command = args.cmd or "tui"
+    services.note("command.start", command=command, version=_version())
+    outcome = "ok"
+    try:
+        _dispatch(args)
+    except SystemExit as e:
+        # sys.exit(message) is how every one-line refusal leaves this program
+        outcome = "ok" if e.code in (None, 0) else "failed" if isinstance(e.code, str) else f"exit {e.code}"
+        raise
+    except KeyboardInterrupt:
+        outcome = "cancelled"
+        raise
+    except BaseException as e:
+        outcome = "crashed"
+        services.note(
+            "command.crashed",
+            command=command,
+            error=services.redact(f"{type(e).__name__}: {e}"),
+            where=services.redact("".join(traceback.format_tb(e.__traceback__, limit=-3))),
+        )
+        raise
+    finally:
+        services.note(
+            "command.end",
+            command=command,
+            outcome=outcome,
+            wall_s=round(time.monotonic() - began, 3),
+        )
+
+
+def _dispatch(args: argparse.Namespace) -> None:
+    """Runs the command, turning the failures a person can fix into one line."""
     try:
         args.fn(args)
     except (
@@ -1039,4 +1293,11 @@ def main() -> None:
         # a missing binary, model or unreadable recording is something the user
         # can fix, so it gets one line; anything else is a bug and keeps its
         # traceback, which is the only thing that locates it
+        services.note(
+            "command.failed",
+            command=args.cmd or "tui",
+            error=services.redact(f"{type(e).__name__}: {e}"),
+        )
+        event = _record_event(args) if getattr(args, "events", False) else None
+        event and event("failed", f"processing::{e}")
         sys.exit(str(e))

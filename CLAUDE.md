@@ -63,10 +63,13 @@ Four layers, strictly one-directional. `services.py` is the only module that com
   `whisper` (whisper-cli subprocess), `sherpa` (onnx diarization in a spawned process pool), `llm`
   (claude/codex/gemini CLIs, ollama HTTP), `bootstrap` (clone/build/download during setup),
   `capture` (native Swift recorder), `qos` (taskpolicy/nice wrapping), `youtube` (yt-dlp
-  subprocess plus a caption GET — the words arrive as captions, never as audio).
+  subprocess plus a caption GET — the words arrive as captions, never as audio), `eventlog`
+  (the capped JSON-lines log under `$VTN_HOME/logs`; the one gateway that never raises).
 - **`transforms/`** — pure functions, no I/O: `segments`, `speakers`, `notes`, `refine`, `todos`,
   `live` (where to cut a chunk of a meeting, and how its lines fit into the whole), `youtube`
-  (which caption track to take, and how its events fold into timed paragraphs).
+  (which caption track to take, and how its events fold into timed paragraphs), `metrics`
+  (medians, p90s and speeds over stored runs), `levels` (spotting a side that went silent while
+  the other talked).
 - **`storage/repository.py`** — every SQL statement in the app. `domain.py` holds the frozen
   dataclasses and TypedDicts both sides speak in.
 
@@ -127,6 +130,15 @@ longer stretches rather than starting a second pass when it falls behind. Nothin
 fail a recording: an unreadable track, a missing model or `live_transcribe=off` all just leave
 `vtn record` transcribing the merged file the ordinary way.
 
+**Everything slow is timed, and both records are capped.** `services.tracked(repo, kind)` opens
+a run, `services.stage(name)` times a step of whichever run is current (a `ContextVar`, so a
+worker thread's stages land in the event log only), and both write to the `runs`/`run_stages`
+tables and to `gateways/eventlog`. The tables keep `metrics_keep_runs` runs, pruned on insert; the
+log is three rotating files sharing `log_max_mb`. A timing that cannot be written costs the timing,
+never the work. `vtn stats` reads the tables; `vtn report` bundles them with the log tails and
+nothing anybody said. Tests send events to a tmp folder through an autouse fixture in
+`conftest.py` — without it a suite run would write into the developer's real log.
+
 **Diarization spawns a process.** `sherpa._spawn_safe_stderr` exists because a full-screen TUI
 replaces `sys.stderr` with a capture object whose `fileno()` is -1, which `multiprocessing` refuses.
 
@@ -146,6 +158,11 @@ replaces `sys.stderr` with a capture object whose `fileno()` is -1, which `multi
   (`feat: point a recording at chosen audio devices`), body only when the why is not obvious.
 
 ## Swift on the remote Mac
+
+Puck motion is configured in `PuckMotion` in `native/menubar.swift`; window physics and
+Core Animation springs derive from the same constants. `native/springs.swift` is vendored
+CocoaSprings physics: preserve its upstream formatting and headers, and exempt it from the
+prose-docstring rule so future upstream comparisons remain meaningful.
 
 `capture.swift` / `menubar.swift` only compile on macOS. `scripts/remote-build.sh check|build|test|verify`
 pushes the committed branch to the Mac and runs it there through a pinned SSH key that

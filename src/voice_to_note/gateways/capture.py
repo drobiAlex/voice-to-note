@@ -1,13 +1,16 @@
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import IO
 
 from .. import config
 from ..domain import TrackFormat
-from . import GatewayError
+from ..transforms.levels import LevelWatch
+from . import GatewayError, eventlog
 
 STOP_TIMEOUT_S = 10
 BUILD_HINT = "meeting capture helper not built — run: vtn setup"
@@ -44,6 +47,7 @@ def _failure(proc: "subprocess.Popen[str]") -> GatewayError:
     """Why the helper quit before the recording ever started, as advice rather
     than as a number."""
     code = proc.wait()
+    eventlog.record("capture.refused", code=code)
     return GatewayError(DENIED.get(code, f"vtn-capture exited with code {code}"))
 
 
@@ -61,6 +65,9 @@ class Recording:
         self._proc = proc
         self._levels = levels
         self._over = threading.Event()
+        # only while the meeting is being metered anyway: a side going silent
+        # is read off the same levels the meter draws, at no extra cost
+        self._watch = LevelWatch() if levels is not None else None
         # somebody has to keep reading the helper for as long as it talks, and
         # it talks ten times a second once it is measuring: unread, the pipe
         # fills within minutes and the helper blocks forever inside a print,
@@ -93,6 +100,14 @@ class Recording:
                 reading = (float(system), float(mic))
             except ValueError:
                 return
+            if self._watch is not None:
+                for change, side, silent_s in self._watch.hear(*reading):
+                    eventlog.record(
+                        f"capture.{side}_{change}",
+                        silent_s=round(silent_s, 1),
+                        system_db=reading[0],
+                        mic_db=reading[1],
+                    )
             try:
                 self._levels(*reading)
             except Exception:
@@ -125,8 +140,11 @@ class Recording:
         try:
             self._proc.wait(timeout=STOP_TIMEOUT_S)
         except subprocess.TimeoutExpired:
+            eventlog.record("capture.killed", after_s=STOP_TIMEOUT_S * 2)
             self._proc.kill()
             self._proc.wait()
+        if self._watch is not None:
+            eventlog.record("capture.levels", **self._watch.summary())
 
 
 def start(
@@ -165,12 +183,28 @@ def start(
         argv += ["--input-uid", input_uid]
     if levels is not None:
         argv += ["--levels"]
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, text=True)
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    # started before the handshake rather than after it: a helper refusing a
+    # device says why on stderr and exits, and that line is the whole story of
+    # a recording that would not start
+    threading.Thread(target=_relay, args=(proc.stderr,), daemon=True).start()
     # read here rather than by the thread below, which only starts once the
     # handshake is done: two readers on one pipe would race for the first word
     if _readline(proc) != "recording":
         raise _failure(proc)
     return Recording(proc, levels)
+
+
+def _relay(stream: IO[str] | None) -> None:
+    """Passes on everything the helper says on stderr — still to this process's
+    own stderr, where a terminal or the menu bar's log shows it as before — and
+    into the event log, where it is kept with a time beside it."""
+    if stream is None:
+        return
+    for line in stream:
+        sys.stderr.write(line)
+        sys.stderr.flush()
+        eventlog.record("capture.said", line=line.rstrip("\n"))
 
 
 def devices() -> str:

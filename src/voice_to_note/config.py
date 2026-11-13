@@ -25,6 +25,10 @@ RECORDINGS_DIR = DATA_DIR / "recordings"
 DB_PATH = DATA_DIR / "voice_to_note.db"
 CONFIG_PATH = ROOT / "vtn.toml"
 TEMPLATES_DIR = ROOT / "templates"
+LOGS_DIR = ROOT / "logs"
+# where the menu bar recorder keeps what the pipeline printed; read by
+# `vtn report`, written by menubar.swift, which names the same file
+MENUBAR_LOG = ROOT / "menubar.log"
 
 # the meeting-capture helper ships as source inside this package and is compiled
 # into VTN_HOME by setup, since a native binary cannot ride along in a wheel
@@ -38,6 +42,7 @@ CAPTURE_BIN = ROOT / "bin" / "vtn-capture"
 # recording is launched from, and only a bundle carries the Info.plist whose
 # wording the permission prompt then shows
 MENUBAR_SRC = NATIVE_DIR / "menubar.swift"
+MENUBAR_SPRINGS = NATIVE_DIR / "springs.swift"
 MENUBAR_PLIST = NATIVE_DIR / "menubar-Info.plist"
 MENUBAR_APP = ROOT / "bin" / "VTN Recorder.app"
 MENUBAR_BIN = MENUBAR_APP / "Contents" / "MacOS" / "vtn-menubar"
@@ -120,6 +125,13 @@ SETTINGS: dict[str, Setting] = {
         kind="int",
     ),
     "num_speakers": Setting(-1, int, "speaker count to assume; -1 auto-detects", kind="int"),
+    "setup_launch": Setting(
+        "on",
+        str,
+        "have setup start the menu bar recorder it just built; off for a build box",
+        kind="choice",
+        choices=("off", "on"),
+    ),
     "live_transcribe": Setting(
         "on",
         str,
@@ -235,6 +247,19 @@ SETTINGS: dict[str, Setting] = {
     "youtube_timeout_s": Setting(
         120, int, "seconds before a stuck yt-dlp or caption download is given up on", kind="int"
     ),
+    # a cap rather than a retention period: what bounds the disk is bytes, and a
+    # busy week and a quiet month should cost the machine the same at most
+    "log_max_mb": Setting(
+        6,
+        float,
+        "disk the event log may use in total, oldest events dropped first; 0 turns it off",
+    ),
+    "metrics_keep_runs": Setting(
+        2000,
+        int,
+        "processing runs whose timings the database keeps, oldest dropped first; 0 keeps none",
+        kind="int",
+    ),
     "refine_workers": Setting(4, int, "repair windows a refine pass runs at once", kind="int"),
     "refine_window": Setting(
         20, int, "transcript lines repaired together in one refine window", kind="int"
@@ -299,6 +324,7 @@ EMB_MODEL: str = _setting("emb_model")
 EMB_MODEL_PATH = MODELS_DIR / EMB_MODEL
 
 NUM_SPEAKERS: int = _setting("num_speakers")
+SETUP_LAUNCH: str = _setting("setup_launch")
 LIVE_TRANSCRIBE: str = _setting("live_transcribe")
 LIVE_CHUNK_S: int = _setting("live_chunk_s")
 LIVE_SILENCE_FLOOR: float = _setting("live_silence_floor")
@@ -329,6 +355,9 @@ CHAT_CONTEXT_CHARS: int = _setting("chat_context_chars")
 
 YOUTUBE_LANG: str = _setting("youtube_lang")
 YOUTUBE_TIMEOUT_S: int = _setting("youtube_timeout_s")
+
+LOG_MAX_MB: float = _setting("log_max_mb")
+METRICS_KEEP_RUNS: int = _setting("metrics_keep_runs")
 
 REFINE_WORKERS: int = _setting("refine_workers")
 REFINE_WINDOW: int = _setting("refine_window")
