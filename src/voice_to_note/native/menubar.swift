@@ -198,6 +198,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var shimmerFrame = 0
     private var mayNotify = false
     private var logFile: FileHandle?
+    private let logClock: ISO8601DateFormatter = {
+        let clock = ISO8601DateFormatter()
+        clock.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return clock
+    }()
     private var projects: [(name: String, count: Int)]?
     private var devices: AudioDevices?
     private var refreshing = false
@@ -1356,6 +1361,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard state == .processing, !cancelling, let recorder, recorder.isRunning else { return }
         cancelling = true
         cancellationRequested = true
+        // written before anything is sent, so the log shows how long a cancel
+        // waited for vtn to say it could take one as well as how long it took
+        write("menubar: cancel requested (\(cancellationPGID == nil ? "queued until vtn is cancellable" : "sending now"))")
         sendCancellationIfReady()
         show()
     }
@@ -1371,6 +1379,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         sentCancellation = true
+        write("menubar: cancel sent to process group \(pgid)")
     }
 
     /// Completion stays prominent for one short visit to the menu, then the
@@ -1859,11 +1868,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.runModal()
     }
 
-    /// Keeps every line the recorder printed. A menu bar has nowhere to show the
-    /// pipeline's own progress and failures, so this file is where a failure
-    /// notification sends the person who wants to know what went wrong.
+    /// Keeps every line the recorder printed, each stamped with when it
+    /// arrived. A menu bar has nowhere to show the pipeline's own progress and
+    /// failures, so this file is where a failure notification sends the person
+    /// who wants to know what went wrong — and the stamps are what turn "it
+    /// took a while to cancel" into a number.
     private func write(_ line: String) {
-        guard let data = (line + "\n").data(using: .utf8) else { return }
+        let stamped = "\(logClock.string(from: Date())) \(line)\n"
+        guard let data = stamped.data(using: .utf8) else { return }
         if logFile == nil {
             let directory = logURL.deletingLastPathComponent()
             try? FileManager.default.createDirectory(
@@ -1876,6 +1888,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             _ = try? logFile?.seekToEnd()
         }
         try? logFile?.write(contentsOf: data)
+        if let size = try? logFile?.offset(), size > Self.logCapBytes {
+            trimLog()
+        }
+    }
+
+    /// The most the log may hold before its older half is dropped. A menu bar
+    /// runs for weeks without a restart, and a log nobody trims grows with
+    /// every meeting for as long as it does; a megabyte is months of meetings'
+    /// worth of progress lines, and `vtn report` only ever reads the end.
+    private static let logCapBytes: UInt64 = 1 << 20
+
+    /// Keeps the newer half of the log, starting at a whole line, and lets the
+    /// next write open the file afresh.
+    private func trimLog() {
+        try? logFile?.close()
+        logFile = nil
+        guard let whole = try? Data(contentsOf: logURL) else { return }
+        let newer = whole.suffix(Int(Self.logCapBytes / 2))
+        let start = newer.firstIndex(of: 0x0A).map { newer.index(after: $0) } ?? newer.startIndex
+        try? Data(newer[start...]).write(to: logURL, options: .atomic)
     }
 }
 

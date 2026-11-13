@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 import numpy as np
 
@@ -205,3 +205,35 @@ class ConversationListing:
     conversation: Conversation
     messages: int
     last_at: str
+
+
+@dataclass(frozen=True)
+class StageRecord:
+    """How one stage of a run went: how long it took on the clock and on the
+    processor, whether it finished, and what it ran with — the backend, the
+    model, the beam — since a slow stage is only explained by what it was
+    asked to do."""
+
+    stage: str
+    wall_s: float
+    cpu_s: float | None
+    outcome: str
+    detail: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RunRecord:
+    """One piece of work the app did — a recording processed, notes written, a
+    meeting taped — as it was timed. `outcome` is empty while the run is still
+    going, or when the process died before it could say how it ended."""
+
+    id: int
+    kind: str
+    memo_id: int | None
+    started_at: str
+    wall_s: float | None
+    outcome: str | None
+    error: str | None
+    audio_s: float | None
+    version: str
+    stages: tuple[StageRecord, ...] = ()
