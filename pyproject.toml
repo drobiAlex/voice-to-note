@@ -2,6 +2,8 @@
 name = "voice-to-note"
 version = "0.1.0"
 description = "Local voice memo -> transcript -> speakers -> structured notes"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=2.4.6",

@@ -1,39 +1,26 @@
-# Voice to note
+# voice-to-note
 
-voice-to-note records and analyses voice on your Mac — meetings, memos, calls —
-and turns each recording into a transcript with named speakers, structured
-notes, and a to-do list that survives regeneration. It ships an opinionated
-note template — summary, action items, decisions — and takes custom templates
-beside the built-ins.
+Record a meeting on your Mac and get a transcript, notes and to-dos back,
+with the audio never leaving the machine. macOS only.
 
-- **Records natively** — a menu bar recorder (or `vtn record`) captures system
-  audio and microphone together, Bluetooth headsets included, with project and
-  device pickers; stop it and the memo transcribes, diarizes and lands in your
-  archive on its own.
-- **Privacy-first** — audio, transcription and speaker separation never leave
-  the machine: ffmpeg converts, whisper.cpp transcribes, and sherpa-onnx
-  separates speakers, all into a local SQLite file. Only note extraction uses
-  an LLM, and you choose which one — the `claude` CLI, or a local Ollama
-  model. With Ollama, nothing leaves the machine at all.
-- **Knows who is talking** — name a voice once and later memos recognise it
-  across recordings.
-- **To-dos as first-class items** — action items become a per-project board
-  (`g` `t` in the TUI, `vtn todos` outside it); checking one off survives
-  re-extraction, and the same commitment restated next week doesn't duplicate.
-- **A memo archive, not a dump** — projects, tags, rename/move/delete like a
-  file system, from the TUI or the CLI; a memo you are done with goes in a
-  drawer (space → `h` in the TUI, `vtn archive`) that hides it and its to-dos
-  without deleting a byte, and the same key brings it back; the open TUI notices memos
-  other processes store and refreshes itself.
-- **Agent-ready** — humans get a TUI (`vtn tui`), agents get the same CLI:
-  results go to stdout, progress to stderr, and `list`, `show` and `notes`
-  take `--json`.
+![Voice to notes with local models, a TUI for people, a CLI for agents](docs/pillars.svg)
 
-  ```sh
-  vtn notes 3 --json | jq .action_items
-  ```
-- **Model choice** — the extraction model is configurable: the `claude` CLI
-  or a local Ollama model today.
+**Voice to notes with local models.** Record a meeting or drop in a file.
+whisper.cpp transcribes and sherpa-onnx separates the speakers on your Mac.
+You get named speakers, structured notes and to-dos. Only the note-writing
+step uses an LLM, and with Ollama even that stays local.
+
+**A TUI for people.** One screen to browse, edit and process memos, projects
+and the to-do board: `vtn tui`.
+
+**A CLI for agents.** The same use cases as plain commands: results on stdout,
+progress on stderr, `--json` on the reading commands. Extraction runs through
+the `claude`, `codex` or `gemini` CLI you are already signed in to, or a local
+Ollama model. No API keys.
+
+```sh
+vtn notes 3 --json | jq .action_items
+```
 
 ## Install
 
@@ -41,75 +28,36 @@ beside the built-ins.
 curl -fsSL https://raw.githubusercontent.com/drobiAlex/voice-to-note/main/install.sh | bash
 ```
 
-This installs `uv` if needed, installs the `vtn` CLI, builds whisper.cpp
-against Metal, and downloads the models. Needs macOS, the Xcode Command Line
-Tools (for `git`), `cmake` and `ffmpeg`; the installer names whichever of
-these is missing and how to get it.
+Needs macOS, the Xcode Command Line Tools, `cmake` and `ffmpeg`; the installer
+names whatever is missing. It sets up `uv`, `vtn`, whisper.cpp and the models.
+Re-run it to upgrade.
 
-To upgrade, re-run the installer.
+## Quick start
 
-## Usage
+```sh
+vtn record --project work         # tape this Mac's meeting, then process it
+vtn process ~/memos/standup.m4a   # transcribe, diarize, extract notes
+vtn youtube <url>                 # import a video's captions as a memo
+vtn tui                           # browse and edit everything
+vtn notes 3                       # print the notes for memo 3
+vtn todos                         # open to-dos across all memos
+vtn ask 3 "who owns the launch?"  # ask a question about a memo
+```
 
-| Command | What it does |
-|---|---|
-| `vtn setup` | install whisper.cpp and all models (idempotent) |
-| `vtn record` | record this Mac's meeting — system audio + mic — transcribing it as it goes, then finish it; a live level meter per side shows a muted mic while it can still be fixed (`--levels` for the raw numbers); `--output-device`/`--input-device` pin devices |
-| `vtn menubar` | open the menu bar recorder: one click to record, pickers for project and devices; `--preview` clicks through every state it can be in on made-up sound, to judge the look without recording anything |
-| `vtn process <file>` | convert, transcribe, diarize, store, extract notes — shape the run with --speakers, --steps, --template |
-| `vtn list` | list stored memos — `--sort created\|updated`, `--archived` for the drawer |
-| `vtn show <id>` | print a memo's transcript |
-| `vtn notes <id>` | print the extracted notes |
-| `vtn todos` | list open to-dos across memos; `vtn todo done <id>` checks one off |
-| `vtn ask <id> <question…>` | ask a question about one memo |
-| `vtn move <id> <project>` / `title` / `delete` | file, rename or throw away a memo |
-| `vtn archive <id>` / `unarchive` | put a memo away out of the listings, or bring it back — nothing is deleted |
-| `vtn tui` | browse, edit and process memos on one screen |
+`vtn --help` lists the rest.
 
-Running `vtn` with no command opens the TUI too, once setup has run.
+## What else it does
 
-`vtn --help` lists the full set (diarize, refine, devices, projects, speaker
-naming, templates, config, …).
-
-On a Mac, `vtn menubar --preview` checks the recorder without recording or
-opening a note: choose Processing to see its elapsed stage, Cancelling
-processing to inspect the queued cancellation state, and Note ready to inspect
-the direct Open Note affordance. During a real recording, Stop changes to a
-named processing stage and clock; Cancel keeps the captured audio and any
-completed work. A puck tucked into an outer screen edge opens from a deliberate
-tab click or a short dwell, while a press-and-drag still moves it.
+- Name a voice once and later recordings recognise it.
+- To-dos survive re-extraction: checked-off items stay checked.
+- Projects, tags and an archive drawer, from the TUI or the CLI.
+- Live transcription while a meeting records.
+- Custom note templates beside the built-in ones.
+- A menu bar recorder: [`docs/menubar.md`](docs/menubar.md).
 
 ## Roadmap
 
-Shipped:
-- [x] Local pipeline: transcript, named speakers, structured notes (whisper.cpp + sherpa-onnx + SQLite)
-- [x] Projects, tags and notes you can edit
-- [x] Speaker recognition across memos — name a voice once, later memos match it
-- [x] Transcript repair pass (`vtn refine`)
-- [x] Questions against a memo (`vtn ask`)
-- [x] TUI with live job progress
-- [x] One-command install, with a mock preview mode
-- [x] Settings & configuration — every knob in vtn.toml, editable from the TUI settings screen or `vtn config`
-- [x] Custom note templates — write your own beside the built-ins, pick one per recording
-- [x] Add-recording form — speaker count, template and pipeline steps chosen per recording
-- [x] Native meeting recording — system audio + microphone, from `vtn record` or the menu bar app
-- [x] Menu bar recorder with project and device pickers — system mix by default, any output or microphone by choice
-- [x] Memo management like a file system — delete, rename and move memos from the list or the command line
-- [x] To-dos as first-class items — counted per memo, reconciled through re-extraction, checked off from the board (`g` `t`), beside a note (space → `t`) or the command line
-- [x] Live level meters in the recorder — a waveform strip per side beside the timer in the menu bar, native level indicators and a silence hint in its menu, a live meter in the terminal for `vtn record`, and `--levels` for anything else that wants the numbers
-- [x] Every memo at once — an All row above the projects in the TUI sidebar, a project column in the table, and every listing sortable by creation or last update (`s` in the TUI, `vtn list --sort`)
-- [x] Transcribing a meeting while it is still being recorded — `vtn record` reads the two growing tracks a stretch at a time, cuts each stretch where nobody is talking, and stores the words as they are said; stopping the recording leaves the last stretch and the speaker pass instead of the whole meeting. Measured over 25 minutes of speech: the wait after the last word drops from 204 s to 15 s, and the work costs the same — chunks cut at a pause were within 13% of the whole file, and at two minutes each were 10% cheaper than it, while chunks cut blind on the minute cost 160% more. `live_transcribe`, `live_chunk_s` and `live_model` in `vtn config`; a live pass that cannot run costs nothing but itself
-- [x] Archiving instead of deleting — a memo you are done with goes in a drawer under the projects (space → `h` in the TUI, `vtn archive`/`unarchive`, `vtn list --archived`), taking its to-dos off the board with it; nothing is rewritten, so what comes back out is exactly what went in, and opening a memo by id still works while it is away
-
-Later:
-- [ ] Conversations about a memo — `vtn ask` answers one question and forgets it; keep the exchange as a stored thread so follow-ups ("and who agreed to that?") carry the earlier turns, and let the TUI browse past chats beside the note
-- [ ] Voice Memos watcher — a phone recording syncs itself to `~/Library/Group Containers/group.com.apple.VoiceMemos.shared/Recordings`; a launchd + fswatch watcher copies each new file out (the folder itself is iCloud's — writing into it desyncs) and feeds it to `vtn process`, titled from the CloudRecordings.db beside it
-- [ ] To-dos on the phone via Apple Reminders — two-way: a Reminders list per project (iCloud carries it to the iPhone), checking off in vtn completes the reminder and completing it on the phone marks the to-do done, last writer wins by modification time; goes through an EventKit helper beside `capture.swift`, not AppleScript — EventKit reads all 4088 reminders here in under a second, AppleScript takes 25 s to list eight lists. Apple Notes checklists are out: no scripting interface can read or write a checkbox
-- [ ] Insights on the phone via Apple Notes — publish each memo's notes (summary, insights, decisions, open questions, dates, tags) as one note in a `vtn` folder, republished whenever the note changes, with each to-do line linking to its reminder so a tap opens the box to tick; a note edited on the phone is never overwritten
-- [ ] Chunk rollover in the recorder — have `capture.swift` close and reopen its files on a cadence and announce each finished pair on the stdout protocol it already speaks, so live transcription reads whole files instead of tracking byte cursors through ones still being written
-- [ ] Change the microphone or the sound source mid-meeting — the device pickers go quiet the moment a tape starts, because a choice made then would silently be a choice for the *next* recording; so a headset that dies twenty minutes into a call has no cure but stopping and starting again, which costs the meeting. The swap rides on chunk rollover above: `capture.swift` learns a command channel on its stdin, closes the pair of files it is writing, reopens them on the new device and announces the finished pair the way rollover already announces one — so a sample rate or a channel count that changes with the device changes a file boundary instead of corrupting a header written minutes ago. The merge concatenates the pieces and resamples where they differ, and live transcription needs nothing new, since it already reads whole finished files. It is the other half of the silence warning: amber says the microphone has gone dead, and this is what somebody does about it without losing the room. Step by step, with the why for each step, in `docs/device-swap-plan.md`
-- [ ] A two-speed transcript — a small model keeping up with the room while the meeting runs, then one pass with the full model over the archive afterwards that replaces the words; immediate text and best-effort quality from the same recording, which is what makes a heavy model usable live on a machine without a GPU
-- [ ] Background worker & job queue — durable processing that survives restarts, batch imports, and the shape a future always-on server needs; deliberately deferred until that server becomes real
-- [ ] Full-text search across transcripts and notes
+What is shipped and what is next: [docs/roadmap.md](docs/roadmap.md).
 
 ## Development
 
@@ -130,3 +78,7 @@ The spring physics in `src/voice_to_note/native/springs.swift` comes from
 [MacPaw/CocoaSprings](https://github.com/MacPaw/CocoaSprings), copyright © 2023
 MacPaw Inc., under the MIT License. The vendored file includes the full license,
 upstream headers, and the source commit; platform animation wrappers are not included.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
