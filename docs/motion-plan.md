@@ -114,39 +114,46 @@ when only `springs.swift` has changed.
 
 ### Step 3 — The driver
 
-`SpringMotion` in `menubar.swift`: owns a `SpringMotionPhysics`, a current
-`SpringMotionState`, a destination, and a display link taken from the view inside the
-window (`NSView.displayLink(target:selector:)`, macOS 14+, which the app already requires).
+`PuckDockModel` in `menubar.swift` owns the puck's pose and its spring: a position and a
+velocity stepped by a `SpringMotionPhysics`, with one destination per resting pose. `Dock`
+gives it time through one display link taken from the view inside the window
+(`NSView.displayLink(target:selector:)`, macOS 14+, which the app already requires).
 
 Each tick: add the frame's real elapsed time to an accumulator, step the physics at a fixed
 1/120 s while the accumulator allows, and set the window's origin to the resulting
 position. Stop when the velocity is under 0.001 on both axes *and* the position is within
-half a point of the destination — then snap to the destination exactly and invalidate the
-link, so a window never comes to rest a third of a pixel from where it was told to be.
+half a point of the destination — then snap to the destination exactly, so a window never
+comes to rest a third of a pixel from where it was told to be. A spring that has not
+converged after twice the nominal settle time is snapped there too, and a display that
+delivered no frame for a quarter of a second is put at rest rather than replayed.
 
 *The three behaviours this is for:*
 - **Redirect**: a new destination while running keeps the current position *and velocity*.
   That is the continuity a re-grabbed window needs, and the reason to use real physics
   rather than a curve.
 - **Interrupt**: taking hold of the puck stops the motion where it is.
-- **Lifetime**: the link is invalidated when the window closes, when Reduce Motion is on,
-  and on settling. It never exists while nothing is moving.
+- **Lifetime**: the link exists exactly while the model reports that it needs time — a
+  spring on its way, a press holding one still, a pointer on a tab counting its dwell, a peek
+  counting its grace. Hanging, free and resting at an edge with nobody near, there is no
+  link and no timer. A watchdog timer that exists only while the link does lets a window
+  the display is not drawing still arrive.
 
 *Done when:* a tuck settles in the same wall-clock time on a 60 Hz and a 120 Hz display, to
 within five per cent.
 
 ### Step 4 — The window motions
 
-`Dock.slide(to:alpha:)` springs the origin through the driver and animates the alpha
-alongside it with the short fade it already uses. The frame's *size* never changes in a
-tuck or a peek, so only the origin is sprung — no resizing, and nothing for the two
-animations to fight over.
+The model's presentation — origin, edge, merge amount, alpha — is applied in one place in
+`Dock`. The frame's *size* never changes in a tuck or a peek, so only the origin is sprung —
+no resizing, and nothing for two animations to fight over. The window's alpha is a function
+of the same merge amount as the contour, so the two cannot drift apart.
 
 *The one design decision to make explicitly:* a spring overshoots, and a tuck's destination
 is already off-screen, so the overshoot briefly hides more of the sliver than the rest
-position does. Bound it — the destination is clamped so that no overshoot can take the
+position does. Bound it — each step's position is clamped so that no overshoot can take the
 body's visible edge past half the peek — rather than removing the overshoot, which is the
-thing being built.
+thing being built. The destination itself is never moved, so a resting puck is on its rest
+frame to the bit.
 
 *Done when:* tucking, peeking, and grabbing the puck mid-slide all behave, and the sliver
 is never entirely invisible at any frame.
@@ -269,14 +276,19 @@ participate in the rebuild stamp. The executable now has an explicit `@main` ent
 so Swift can compile multiple sources; the remote typecheck includes the physics alone
 and the combined app.
 
-The puck uses one display-link driver per dock, accumulating monotonic elapsed time at
-1/120 s. Redirects retain velocity; a grip interrupts before measuring its pointer offset.
-An initially offscreen grip has enough drag room to avoid jumping into the screen.
-Tuck safety predicts the trajectory with incoming velocity, adjusts the destination if
-needed, and bounds individual steps so at least half the sliver stays visible. Missing
-display frames trigger a one-shot deadline; settling, hiding and teardown invalidate
-motion callbacks. Alpha still fades separately, the island keeps its ease-out, and exit
-fades remain unchanged.
+The puck uses one display-link clock per dock, accumulating monotonic elapsed time at
+1/120 s into `PuckDockModel`. Redirects retain velocity; a press freezes the spring before
+a grip measures its pointer offset. An initially offscreen grip has enough drag room to
+avoid jumping into the screen. Each step's position is bounded so at least half the sliver
+stays visible, and a spring that cannot converge meets an absolute deadline. Hover is a
+level: the pointer's location is read at every crossing the view reports and at every clock
+frame, and is judged against the tab's footprint (to peek) or the footprint together with
+the revealed body (to stay out), so a pointer that asked for a peek is not left by it. A
+peek nobody points at tucks after the grace, or after three seconds when it was asked for
+from the menu. The island keeps its ease-out, and exit fades remain unchanged.
+
+The model is pure (Foundation geometry only), so `tests/dock_model_harness.swift` runs
+seeded random event sequences against it and checks that every one ends in a legal rest.
 
 The processing rim is a Core Animation arc, static under Reduce Motion and removed outside
 processing or when hidden. Preview's Processing scenario opens the puck directly, and
@@ -290,31 +302,30 @@ symmetric tab: two shoulders leave the visible-frame boundary tangentially, meet
 rounded inward tip, and join a rounded lobe that remains offscreen. The terminal contour
 and the live boundary progression are shown in [`puck-edge-morph.svg`](puck-edge-morph.svg).
 
-The dock derives the contour's amount and its boundary anchors from the frame actually
-drawn on each existing spring display-link tick. A spring overshoot therefore keeps both
-shoulders joined to the edge, and a mid-slide grab reverses from the outline that was
-visible under the pointer. The same tick updates a reusable mask from that display's
-`visibleFrame`, clipping the fill, shadow, processing rim, and controls before they can
-paint into the menu bar, Dock, or an adjacent display. The fill, shadow path, and
-processing rim use one outline.
+The model derives the contour's amount and its boundary anchors from the position actually
+drawn on each clock frame. A spring overshoot therefore keeps both shoulders joined to the
+edge, and a mid-slide grab reverses from the outline that was visible under the pointer. The
+same apply updates a reusable mask from that display's `visibleFrame`, clipping the fill,
+shadow, processing rim, and controls before they can paint into the menu bar, Dock, or an
+adjacent display. The fill, shadow path, and processing rim use one outline.
 The ordinary controls fade during the morph and are hidden before the tab is reached, so
 an invisible button cannot take a click; the remaining sliver still belongs to the puck's
-drag and hover view. Reduce Motion applies the appropriate end outline with the existing
-direct frame placement and starts no animation or timer.
+drag and hover view. Reduce Motion applies the appropriate end outline directly and starts
+no animation or timer.
 
 While the mouse is held, the full circle begins changing 24 points from an exposed screen
 edge and reaches the complete 22-point tab at the drag room's 2-point limit. Pulling away
 reverses that same geometry while the window remains exactly under the pointer; release
-continues from the held outline into the existing spring tuck. Re-grabbing that spring
-preserves its current cubic blend and reverses through the original release frame before
-returning to live proximity. The working rim measures this selected held or release path,
-rather than an ordinary tuck at the same nominal amount.
+continues from the held outline into the spring tuck, the difference between the two
+outlines shrinking with the distance still to travel and gone at rest. Re-grabbing that
+spring continues from the outline on screen. The working rim measures the selected held or
+release path, rather than an ordinary tuck at the same nominal amount.
 
-Only physical desktop boundaries accept the held morph. A probe just across the owning
-screen rejects an edge when another display occupies that passage, and an eight-point
-corner preference keeps the current exposed edge until its neighbour is clearly closer.
-Display ownership stays fixed during a release spring; moving onto another display clears
-the old contour before that display chooses one of its own exposed edges.
+Only physical desktop boundaries accept the held morph. An edge that another display
+touches is rejected, and an eight-point corner preference keeps the current exposed edge
+until its neighbour is clearly closer. The model is told which display the pointer is on
+whenever it changes during a drag, and a puck carried onto another display chooses among
+that display's own exposed edges.
 
 ### Automated verification
 
@@ -322,8 +333,8 @@ At commits `81d0b7b` through `d4a2cbe`, the remote Mac typechecked `capture.swif
 `springs.swift` alone, and the combined recorder sources. Its optimized full-app compile
 test passed without launching the app. The production-solver harness also passed in 3.68 s:
 it checks 180, 184, and 200 point slides at 60 and 120 Hz against the 700 ms, one-visible-
-overshoot, 4–12 point, and five-percent criteria, plus momentum-preserving redirects and
-all four bounded-edge predictions at 1,800 pt/s incoming velocity. The remote runner uses
+overshoot, 4–12 point, and five-percent criteria, plus momentum-preserving redirects; the dock model's
+own harness covers arrival with 6,000 pt/s incoming velocity on all four edges. The remote runner uses
 quiet pytest output and captures the harness's per-case numeric lines, so those individual
 settle times are not available in its log; this is automated constraint evidence, not a
 replacement for the visual measurement below.
