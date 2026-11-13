@@ -4147,11 +4147,18 @@ struct PuckDockModel {
         case left, right, top, bottom
     }
 
-    /// The part of a display the puck lives on, and which of its edges face the
-    /// open desktop: an edge shared with a neighbouring display never grows a tab.
+    /// The part of a display the puck lives on, and where along each of its
+    /// edges a neighbouring display covers the way out. An edge shared with a
+    /// neighbour never grows a tab where the neighbour is, but the open part of
+    /// a partly shared edge still may, so the question is asked at a position
+    /// along the edge, in the screen's own coordinates.
     struct Screen: Equatable {
         var visibleFrame: CGRect
-        var exposed: Set<Edge> = Set(Edge.allCases)
+        var covered: [Edge: [ClosedRange<CGFloat>]] = [:]
+
+        func isOpen(_ edge: Edge, at coordinate: CGFloat) -> Bool {
+            !(covered[edge] ?? []).contains { $0.contains(coordinate) }
+        }
     }
 
     /// What a hand took hold of: where in the puck, where the puck was, and the
@@ -4545,10 +4552,24 @@ struct PuckDockModel {
     private func chosenEdge(at origin: CGPoint, current: Edge?, maximumGap: CGFloat) -> Edge? {
         let edges = Edge.allCases
         let index = PuckEdgeProximity.chosenIndex(
-            distances: gaps(at: origin), exposed: edges.map { screen.exposed.contains($0) },
+            distances: gaps(at: origin), exposed: edges.map { isOpen($0, bodyAt: origin) },
             current: current.flatMap { edges.firstIndex(of: $0) }, maximumGap: maximumGap
         )
         return index.map { edges[$0] }
+    }
+
+    /// Whether an edge is open where the body's middle is: the point a tab
+    /// would grow at.
+    private func isOpen(_ edge: Edge, bodyAt origin: CGPoint) -> Bool {
+        let box = body(at: origin)
+        let coordinate = (edge == .left || edge == .right) ? box.midY : box.midX
+        return screen.isOpen(edge, at: coordinate)
+    }
+
+    /// Whether a puck could rest tucked or peeking at this edge and this far
+    /// along it on the screen the model has now.
+    func isOpen(_ edge: Edge, along: CGFloat) -> Bool {
+        isOpen(edge, bodyAt: revealedOrigin(edge, along: along))
     }
 
     private func gap(_ edge: Edge, at origin: CGPoint) -> CGFloat {
@@ -4868,8 +4889,21 @@ struct PuckDockModel {
             position = clamped(position, within: room.union(CGRect(origin: grab.start, size: panelSize)))
             grab.edge = chosenEdge(at: position, current: grab.edge, maximumGap: PuckEdgeProximity.outerGap)
             pose = .held(grab)
-        case .tucked, .peeking:
-            settle()
+        case let .tucked(edge, along), let .peeking(edge, along):
+            if isOpen(edge, along: along) {
+                settle()
+            } else {
+                // a neighbour now covers the way out here: a tab against a seam
+                // could never be reached, so the puck stays where it can be seen
+                pose = .free
+                position = clamped(revealedOrigin(edge, along: along), within: room)
+                velocity = .zero
+                carry = nil
+                dwell = 0
+                accumulator = 0
+                motionAge = 0
+                notes.append(.placed(.free(position)))
+            }
         }
     }
 
@@ -5045,6 +5079,7 @@ final class Dock {
     }
 
     deinit {
+        releaseCursor()
         stopClock()
         (view as? RecorderPuckView)?.stopMotion()
         for observer in observers { observer.center.removeObserver(observer.token) }
@@ -5075,9 +5110,14 @@ final class Dock {
         case let .tucked(edge, display, along):
             guard let screen = Dock.screen(numbered: display) else { return false }
             use(screen)
+            // an edge a neighbour has since covered cannot be tucked into
+            guard model.isOpen(edge, along: along) else { return false }
             model.send(.restore(.tucked(edge, along: along)))
         }
+        // the frame and the contour are written before the window is shown, so
+        // a new panel is never seen at a default origin
         lastApplied = nil
+        apply()
         panel.orderFrontRegardless()
         settle()
         return true
@@ -5095,7 +5135,9 @@ final class Dock {
     /// The window brought to where it can be used: out of its edge, or to the
     /// front. This is the way in that needs no pointer.
     func reveal() {
+        refreshScreen()
         model.send(.reveal)
+        apply()
         panel.orderFrontRegardless()
         settle()
     }
@@ -5122,10 +5164,8 @@ final class Dock {
             followPointer(to: point)
             model.send(.dragged(point))
         case let .ended(point):
-            if cursorHeld {
-                NSCursor.pop()
-                cursorHeld = false
-            }
+            followPointer(to: point)
+            releaseCursor()
             model.send(.released(point))
         }
         settle()
@@ -5135,6 +5175,7 @@ final class Dock {
     /// a still pointer or while a drag is held, so this is asked again at every
     /// clock frame as well as at every crossing the view reports.
     private func pointerMoved() {
+        refreshScreen()
         model.send(.pointer(pointerLocation))
         settle()
     }
@@ -5151,9 +5192,33 @@ final class Dock {
     /// Hiding stops the clock before the view ceases receiving display frames,
     /// and a window nobody can see has no pointer on it.
     private func hidden() {
-        stopClock()
+        releaseCursor()
+        // a hand that was holding the puck is gone with the window: the hold
+        // ends where the puck is, in whichever legal pose that makes of it
+        if case .held = model.pose {
+            let middle = NSPoint(x: model.position.x + panel.frame.width / 2,
+                                 y: model.position.y + panel.frame.height / 2)
+            model.send(.released(model.pointer ?? middle))
+        }
         model.send(.pointer(nil))
+        settle()
+        stopClock()
         (view as? RecorderPuckView)?.stopMotion()
+    }
+
+    /// The closed hand is pushed when a drag begins, and taken off wherever
+    /// the drag ends — a release, the window hiding, or the dock going away.
+    private func releaseCursor() {
+        guard cursorHeld else { return }
+        NSCursor.pop()
+        cursorHeld = false
+    }
+
+    /// The model's display kept current: resizing or auto-hiding the system Dock
+    /// or menu bar moves the visible frame without necessarily saying so. It is
+    /// a no-op when nothing changed.
+    private func refreshScreen() {
+        if let screen = display.flatMap(Dock.screen(numbered:)) { use(screen) }
     }
 
     /// A tucked or peeking window put back against its edge after the screens
@@ -5162,10 +5227,16 @@ final class Dock {
     private func reanchor() {
         guard let screen = display.flatMap(Dock.screen(numbered:)) ?? Dock.screen(under: panel.frame)
                 ?? NSScreen.main else { return }
+        let before = (display: display, pose: model.pose)
         display = Dock.number(of: screen)
         model.send(.screenChanged(Dock.modelScreen(screen)))
         lastApplied = nil
         settle()
+        // moved to another display: what is remembered is what is on screen
+        if before.display != display, before.pose == model.pose, model.pose != .hanging,
+           let remembered = remember(model.place) {
+            onPlaced?(remembered)
+        }
     }
 
     /// The model told which display it is on, but only when that is news: the
@@ -5250,6 +5321,7 @@ final class Dock {
     /// the pointer is read again because nobody tells us when a window moves
     /// out from under it.
     fileprivate func tick() {
+        refreshScreen()
         let now = CACurrentMediaTime()
         let elapsed = now - lastFrame
         lastFrame = now
@@ -5282,9 +5354,9 @@ final class Dock {
     }
 
     /// A display as the model needs it: the part the menu bar and Dock leave
-    /// free, and which of its edges face open desktop. A neighbour across a
-    /// physical boundary owns that passage, so only an outer desktop edge may
-    /// grow a tab and a drag is never captured while it crosses between screens.
+    /// free, and the spans of each edge a neighbour covers. A neighbour across
+    /// a physical boundary owns that passage, so only the open part of an edge
+    /// may grow a tab and a drag is never captured while it crosses between screens.
     static func modelScreen(_ screen: NSScreen) -> PuckDockModel.Screen {
         let frame = screen.frame
         let strips: [(Edge, NSRect)] = [
@@ -5293,13 +5365,15 @@ final class Dock {
             (.top, NSRect(x: frame.minX, y: frame.maxY, width: frame.width, height: 1)),
             (.bottom, NSRect(x: frame.minX, y: frame.minY - 1, width: frame.width, height: 1)),
         ]
-        var exposed = Set<Edge>()
-        for (edge, strip) in strips where !NSScreen.screens.contains(where: { other in
-            other != screen && other.frame.intersects(strip)
-        }) {
-            exposed.insert(edge)
+        var covered: [Edge: [ClosedRange<CGFloat>]] = [:]
+        for (edge, strip) in strips {
+            for other in NSScreen.screens where other != screen && other.frame.intersects(strip) {
+                let span = (edge == .left || edge == .right)
+                    ? other.frame.minY...other.frame.maxY : other.frame.minX...other.frame.maxX
+                covered[edge, default: []].append(span)
+            }
         }
-        return PuckDockModel.Screen(visibleFrame: screen.visibleFrame, exposed: exposed)
+        return PuckDockModel.Screen(visibleFrame: screen.visibleFrame, covered: covered)
     }
 
     /// The screen a point is on, with its far edges counted in: a rectangle's

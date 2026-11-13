@@ -29,8 +29,21 @@ struct TestRandom {
     mutating func pick<T>(_ values: [T]) -> T { values[int(values.count)] }
 }
 
-func screen(_ width: CGFloat = 1440, _ height: CGFloat = 875) -> Dock.Screen {
-    Dock.Screen(visibleFrame: CGRect(x: 0, y: 0, width: width, height: height))
+func screen(_ width: CGFloat = 1440, _ height: CGFloat = 875,
+            covered: [Dock.Edge: [ClosedRange<CGFloat>]] = [:]) -> Dock.Screen {
+    Dock.Screen(visibleFrame: CGRect(x: 0, y: 0, width: width, height: height), covered: covered)
+}
+
+/// A screen that sometimes has a neighbour along part of one edge.
+func randomScreen(_ rng: inout TestRandom) -> Dock.Screen {
+    let width = rng.pick([CGFloat(1440), 1920, 900])
+    let height = rng.pick([CGFloat(875), 1055, 700])
+    guard rng.int(3) == 0 else { return screen(width, height) }
+    let edge = rng.pick(Dock.Edge.allCases)
+    let extent = (edge == .left || edge == .right) ? height : width
+    let low = rng.between(0, extent)
+    let high = min(extent, low + rng.between(50, extent))
+    return screen(width, height, covered: [edge: [low...high]])
 }
 
 func makeModel(_ place: Dock.Place, on current: Dock.Screen = screen(),
@@ -216,9 +229,7 @@ func propertyRun(seed: UInt64, stats: inout [String: Int]) {
     physical = nil
     rereads = true
     defer { rereads = false }
-    let widths: [CGFloat] = [1440, 1920, 900]
-    let heights: [CGFloat] = [875, 1055, 700]
-    var current = screen(rng.pick(widths), rng.pick(heights))
+    var current = randomScreen(&rng)
     var model = makeModel(.free(CGPoint(x: 400, y: 300)), on: current)
     switch rng.int(5) {
     case 1: model.send(.restore(.tucked(rng.pick(Dock.Edge.allCases), along: rng.unit())))
@@ -280,7 +291,7 @@ func propertyRun(seed: UInt64, stats: inout [String: Int]) {
             if rng.int(2) == 0 { model.send(.released(centre(model))) } else { model.send(.clicked) }
         case 11:
             if rng.int(4) == 0 {
-                current = screen(rng.pick(widths), rng.pick(heights))
+                current = randomScreen(&rng)
                 model.send(.screenChanged(current))
             }
         case 12:
@@ -679,4 +690,94 @@ if wants("tracking_gap") {
         precondition(!inside.needsTime, "a pointer in the tracking area kept the clock running on \(edge)")
     }
     print("tracking_gap: a pointer parked where no exit is promised keeps the clock reading it")
+}
+
+if wants("partly_shared_edge") {
+    // A neighbour covers the middle of the left edge (y 300...600). The open
+    // half still takes a tab; the shared half never does, and a drag across the
+    // seam is never captured on the way.
+    let shared = screen(covered: [.left: [300...600]])
+    var open = makeModel(.free(CGPoint(x: 500, y: 20)), on: shared)
+    dragAndRelease(&open, toward: .left, gap: 10, along: 0.3)
+    precondition(isTucked(open) && edgePose(open)?.edge == .left, "the open part of a shared edge refused a tab")
+    run(&open, for: 3)
+    checkRest(open, "open half")
+
+    var covered = makeModel(.free(CGPoint(x: 500, y: 20)), on: shared)
+    dragAndRelease(&covered, toward: .left, gap: 10, along: 0.5)
+    precondition(covered.pose == .free, "the shared part of an edge took a tab")
+    run(&covered, for: 1)
+    checkRest(covered, "shared half")
+
+    // carried from the open part onto the shared span, 10 pt from the edge all the way
+    var across = makeModel(.free(CGPoint(x: 500, y: 100)), on: shared)
+    across.send(.pressed)
+    across.send(.dragBegan(CGPoint(x: 620, y: 230)))
+    var sawTab = false
+    for step in 0...22 {
+        let y = 160 + CGFloat(step) * 15
+        across.send(.dragged(CGPoint(x: 106, y: y)))
+        let middle = across.position.y + panelSize.height / 2
+        if (300...600).contains(middle) {
+            precondition(across.presentation.edge == nil && across.presentation.amount == 0,
+                         "a drag across the seam was captured at y \(y)")
+        } else if across.presentation.edge == .left && across.presentation.amount > 0 {
+            sawTab = true
+        }
+    }
+    precondition(sawTab, "the open part of the edge never showed a tab during the drag")
+    across.send(.released(CGPoint(x: 106, y: 490)))
+    precondition(across.pose == .free, "a puck let go on the seam was tucked")
+
+    // restore: the model says whether an edge is open at the remembered place
+    precondition(!shared.isOpen(.left, at: 450) && shared.isOpen(.left, at: 100) && shared.isOpen(.right, at: 450),
+                 "Screen.isOpen disagrees with its spans")
+    let probe = makeModel(.free(CGPoint(x: 500, y: 300)), on: shared)
+    precondition(!probe.isOpen(.left, along: 0.5) && probe.isOpen(.left, along: 0.3) && probe.isOpen(.right, along: 0.5),
+                 "the model cannot say whether a remembered edge is open")
+
+    // a neighbour arriving under a resting tab frees the puck, fully lit
+    var arriving = makeModel(.tucked(.left, along: 0.5))
+    arriving.send(.screenChanged(shared))
+    precondition(arriving.pose == .free && arriving.isAtRest, "a tab against a new seam stayed")
+    precondition(arriving.drainNotes().contains(.placed(.free(arriving.position))), "the new place was not remembered")
+    checkRest(arriving, "tab against a new seam")
+    print("partly_shared_edge: tabs only grow where the edge is open")
+}
+
+if wants("screen_change_at_rest") {
+    // The visible frame changes under a resting puck (the system Dock or menu bar
+    // resizes): it is re-anchored on the spot, exactly.
+    for edge in Dock.Edge.allCases {
+        var tucked = makeModel(.tucked(edge, along: 0.5))
+        tucked.send(.screenChanged(screen(1300, 800)))
+        checkRest(tucked, "tucked after the frame changed \(edge)")
+        var peeking = makePeeking(edge, along: 0.5)
+        peeking.send(.screenChanged(screen(1300, 800)))
+        checkRest(peeking, "peeking after the frame changed \(edge)")
+        precondition(peeking.presentation.origin == peeking.revealedOrigin(edge, along: 0.5), "peek not re-anchored")
+    }
+    print("screen_change_at_rest: a changed visible frame re-anchors resting tabs and peeks exactly")
+}
+
+if wants("hold_ended") {
+    // The window hid or the dock went away under a hand: the hold is ended where
+    // the puck is, and wherever that leaves it must come to rest legally.
+    for gap in [CGFloat(10), 26, 90] {
+        var model = makeModel(.free(CGPoint(x: 500, y: 300)))
+        dragAndRelease(&model, toward: .right, gap: gap, along: 0.5, releasing: false)
+        precondition(!model.isAtRest, "a held puck was at rest")
+        model.send(.released(model.pointer ?? centre(model)))
+        model.send(.pointer(nil))
+        run(&model, for: 6)
+        checkRest(model, "hold ended at gap \(gap)")
+    }
+    var grabbed = makeModel(.tucked(.left, along: 0.4))
+    grabbed.send(.pressed)
+    grabbed.send(.dragBegan(centre(grabbed)))
+    grabbed.send(.released(grabbed.pointer ?? centre(grabbed)))
+    grabbed.send(.pointer(nil))
+    run(&grabbed, for: 6)
+    checkRest(grabbed, "tucked grab ended")
+    print("hold_ended: a hold ended without its hand comes to rest in a legal pose")
 }

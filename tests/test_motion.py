@@ -118,6 +118,21 @@ def test_a_pointer_parked_where_no_exit_event_is_promised_still_lets_the_peek_tu
 
 
 @needs_swift
+def test_a_partly_shared_edge_takes_a_tab_only_where_it_is_open_and_never_captures_a_drag_across_the_seam(motion_binary):
+    run_sections(motion_binary, "partly_shared_edge")
+
+
+@needs_swift
+def test_a_changed_visible_frame_re_anchors_a_resting_tab_or_peek_exactly(motion_binary):
+    run_sections(motion_binary, "screen_change_at_rest")
+
+
+@needs_swift
+def test_a_hold_ended_without_its_hand_comes_to_rest_in_a_legal_pose(motion_binary):
+    run_sections(motion_binary, "hold_ended")
+
+
+@needs_swift
 def test_reduce_motion_click_to_peek_and_leaving_the_hanging_pose_behave(motion_binary):
     run_sections(motion_binary, "quiet_modes")
 
