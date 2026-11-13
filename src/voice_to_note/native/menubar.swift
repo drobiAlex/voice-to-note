@@ -4089,6 +4089,42 @@ enum PuckMotion {
     static let angularFrequency: Float = 34
     static let dampingRatio: Float = 0.7
     static let step: TimeInterval = 1 / 120
+
+    /// Where the puck rests at an edge, shared by the dock and by the pure model
+    /// that decides it: how much of the body stays showing when tucked, the air
+    /// between a revealed body and its edge, how near a released body must be to
+    /// tuck, and how dim a tab sits.
+    static let peek: CGFloat = 22
+    static let clearance: CGFloat = 6
+    static let magnet: CGFloat = 28
+    static let keepOff: CGFloat = 2
+    static let tuckedAlpha: CGFloat = 0.6
+
+    /// The dwell before a hover reveals, and the grace after the pointer has left
+    /// the whole shape the puck occupies before it hides again. A fifth of a
+    /// second is what the Dock waits; the grace is longer because coming back
+    /// for something is more common than leaving for good.
+    static let dwell: TimeInterval = 0.2
+    static let grace: TimeInterval = 0.4
+
+    /// How far along its edge the tab reaches either side of the body's middle
+    /// (the outline's terminal shoulders): the footprint a pointer can find.
+    static let tabHalfLength: CGFloat = 75
+
+    /// What the spring takes to stop (the solver check holds it to 700 ms), and
+    /// the absolute limit after which the model snaps to rest whether or not
+    /// the spring converged: twice the nominal time, so a healthy spring never
+    /// meets it and a broken one cannot leave the puck between poses.
+    static let nominalSettle: TimeInterval = 0.7
+    static let deadline: TimeInterval = nominalSettle * 2
+
+    /// A display that stopped delivering frames for this long has already
+    /// missed the motion, so the puck is put at rest instead of being replayed.
+    static let stall: TimeInterval = 0.25
+
+    /// A press that never turns into a click or a drag is a lost mouse-up; the
+    /// spring it froze is let go after this long rather than held forever.
+    static let pressLimit: TimeInterval = 3
     static let configuration = SpringConfiguration(
         angularFrequency: angularFrequency, dampingRatio: dampingRatio
     )
@@ -4120,6 +4156,713 @@ enum PuckMotion {
         return destination
     }
 
+}
+
+/// Where the recorder puck is and how merged it is with the edge of the screen,
+/// decided by one pure value so that "it always comes to rest in a legal pose"
+/// is something a test can assert instead of something a person has to watch.
+///
+/// There is exactly one logical pose, and one spring (position and velocity).
+/// How merged the puck looks is never stored: it is read off the position — how
+/// far it has travelled between the revealed and the tucked rest frames — and
+/// the window's alpha is a function of that same number, so the tab's shape and
+/// its dimming cannot disagree or run on clocks of their own. While a hand holds
+/// the puck, the proximity of its body to the edge is folded into the same
+/// number; at release the difference between what the hand showed and what the
+/// position says is a residual that shrinks with the distance still to travel
+/// and is exactly zero once the puck is where it was going.
+///
+/// Every pose that is not held has one rest position. The spring may overshoot,
+/// and its position is clamped each step so a sliver always stays on screen, but
+/// the target is never moved to make room for that: at rest the position is the
+/// target, bit for bit. A spring that cannot converge meets an absolute deadline
+/// and is snapped there, so no pose is ever left half way.
+///
+/// Hover is a level, not a crossing: each step asks where the pointer is now
+/// against the shape the puck occupies now. While peeking, the shape that keeps
+/// it out is the tab's footprint together with the revealed body, so the pointer
+/// that asked for the peek is not left behind by the peek itself, and a pointer
+/// that is on neither always lets it go back after the grace, whoever revealed it.
+///
+/// Only Foundation geometry is used, so the same source is compiled by the
+/// harness on any machine.
+struct PuckDockModel {
+    enum Edge: String, CaseIterable {
+        case left, right, top, bottom
+    }
+
+    /// The part of a display the puck lives on, and which of its edges face the
+    /// open desktop: an edge shared with a neighbouring display never grows a tab.
+    struct Screen: Equatable {
+        var visibleFrame: CGRect
+        var exposed: Set<Edge> = Set(Edge.allCases)
+    }
+
+    /// What a hand took hold of: where in the puck, where the puck was, and the
+    /// edge whose tab the held outline is showing. The residual is the gap
+    /// between the outline the puck wore when grabbed and the one proximity
+    /// alone would draw, so grabbing never makes the outline jump.
+    struct Grab: Equatable {
+        let offset: CGPoint
+        let start: CGPoint
+        let startEdge: Edge?
+        let residual: CGFloat
+        let cameFromHanging: Bool
+        var edge: Edge?
+        var moved = false
+    }
+
+    /// The one logical pose. Hanging is kept because a hanging puck belongs to
+    /// the status item above it, not to any edge or to the screen, and the first
+    /// movement of a hand is what takes it from there.
+    enum Pose: Equatable {
+        case hanging
+        case free
+        case held(Grab)
+        case tucked(Edge, along: CGFloat)
+        case peeking(Edge, along: CGFloat)
+    }
+
+    /// Where a puck can be put back, and what is remembered of where it was left.
+    enum Place: Equatable {
+        case hanging(CGPoint)
+        case free(CGPoint)
+        case tucked(Edge, along: CGFloat)
+    }
+
+    /// Everything the outside world can tell the model, as plain values. The
+    /// pointer is a level (where it is now, or nowhere), never a crossing.
+    enum Event {
+        case pressed
+        case dragBegan(CGPoint)
+        case dragged(CGPoint)
+        case released(CGPoint)
+        case clicked
+        case pointer(CGPoint?)
+        case reveal
+        case screenChanged(Screen)
+        case reduceMotion(Bool)
+        case restore(Place)
+    }
+
+    /// What the model wants somebody else to hear about, drained by the caller.
+    enum Note: Equatable {
+        case leftHanging
+        case placed(Place)
+    }
+
+    /// The outline a release is still blending from the held one: the amount the
+    /// hand was showing and how far the puck has come toward where it is going.
+    struct Release: Equatable {
+        let heldAmount: CGFloat
+        let transition: CGFloat
+    }
+
+    /// Everything a view needs to draw one frame, all of it read off the model.
+    /// `amount` runs from 0, a free circle, to 1, the full tab, and `alpha` and
+    /// `controlsOpacity` are functions of that one number.
+    struct Presentation: Equatable {
+        let origin: CGPoint
+        let edge: Edge?
+        let amount: CGFloat
+        let alpha: CGFloat
+        let controlsOpacity: CGFloat
+        let boundary: CGFloat
+        let held: Bool
+        let release: Release?
+    }
+
+    private struct Carry {
+        let offset: CGFloat
+        let span: CGFloat
+        let heldAmount: CGFloat?
+    }
+
+    let panelSize: CGSize
+    let inset: CGFloat
+    private(set) var screen: Screen
+    private(set) var pose: Pose = .hanging
+    private(set) var position = CGPoint(x: 0, y: 0)
+    /// Settable so a harness can hand the spring a velocity no hand could give;
+    /// the app only ever reads it.
+    var velocity = SpringMotionState.Velocity.zero
+    private(set) var pointer: CGPoint?
+    private(set) var pressing = false
+    private(set) var reduceMotion: Bool
+    private(set) var notes: [Note] = []
+    private let physics: SpringMotionPhysics
+    private var carry: Carry?
+    private var accumulator: TimeInterval = 0
+    private var motionAge: TimeInterval = 0
+    private var frozenFor: TimeInterval = 0
+    private var dwell: TimeInterval = 0
+
+    /// The physics is a parameter so a harness can hand it a spring that never
+    /// converges and watch the deadline do its job.
+    init(panelSize: CGSize, inset: CGFloat, screen: Screen, reduceMotion: Bool = false,
+         physics: SpringMotionPhysics = SpringMotionPhysics(
+             configuration: PuckMotion.configuration, timeStep: Float(PuckMotion.step))) {
+        self.panelSize = panelSize
+        self.inset = inset
+        self.screen = screen
+        self.reduceMotion = reduceMotion
+        self.physics = physics
+    }
+
+    // MARK: events in
+
+    /// One entry for every fact the outside world can report. Each case ends in
+    /// a pose whose rest position is defined, so no event can leave the model
+    /// waiting on a later one to say where it is going.
+    mutating func send(_ event: Event) {
+        switch event {
+        case .pressed: press()
+        case let .dragBegan(point): beginDrag(at: point)
+        case let .dragged(point): drag(to: point)
+        case let .released(point): release(at: point)
+        case .clicked: click()
+        case let .pointer(point): pointer = point
+        case .reveal: reveal()
+        case let .screenChanged(next): changeScreen(to: next)
+        case let .reduceMotion(on):
+            reduceMotion = on
+            if on, isEdgePose, !isAtRest { settle() }
+        case let .restore(place): restore(place)
+        }
+    }
+
+    /// Time passes: the spring is stepped in fixed increments so both refresh
+    /// rates follow one trajectory, and then the hover timers are asked again.
+    /// A hand on the puck stops both, because a hand decides where it goes.
+    mutating func advance(by seconds: TimeInterval) {
+        guard seconds > 0, isEdgePose else { return }
+        if pressing {
+            frozenFor += seconds
+            if frozenFor >= PuckMotion.pressLimit { pressing = false }
+            return
+        }
+        if !isMotionless { stepSpring(by: seconds) }
+        hover(by: seconds)
+    }
+
+    /// Notes are handed over once, so a caller that polls cannot hear them twice.
+    mutating func drainNotes() -> [Note] {
+        defer { notes = [] }
+        return notes
+    }
+
+    // MARK: the pose out
+
+    /// The single place the puck rests when nobody is holding it: the revealed
+    /// frame when peeking, the tucked frame when tucked, and where it is now
+    /// otherwise.
+    var target: CGPoint {
+        switch pose {
+        case let .tucked(edge, along): return tuckedOrigin(edge, along: along)
+        case let .peeking(edge, along): return revealedOrigin(edge, along: along)
+        case .hanging, .free, .held: return position
+        }
+    }
+
+    /// At rest means the position is the target and nothing is moving or held,
+    /// which is the only condition under which the presentation is one of the
+    /// legal ones.
+    var isAtRest: Bool {
+        switch pose {
+        case .hanging, .free: return true
+        case .held: return false
+        case .tucked, .peeking: return !pressing && isMotionless
+        }
+    }
+
+    /// Where a remembered place would put the puck back, in the terms the
+    /// preferences keep.
+    var place: Place {
+        switch pose {
+        case .hanging: return .hanging(position)
+        case .free, .held: return .free(position)
+        case let .tucked(edge, along), let .peeking(edge, along): return .tucked(edge, along: along)
+        }
+    }
+
+    /// The whole frame, read off the position and the pose with no state of
+    /// its own to clear. The alpha and the controls follow the amount, so a hand
+    /// dragging the tab out of its edge lights the puck as the tab unmerges.
+    var presentation: Presentation {
+        let shown = amount
+        let edge: Edge?
+        switch pose {
+        case .hanging, .free: edge = nil
+        case let .held(grab): edge = grab.edge
+        case let .tucked(shownEdge, _), let .peeking(shownEdge, _): edge = shownEdge
+        }
+        var isHeld = false
+        if case .held = pose { isHeld = true }
+        var release: Release?
+        if case .tucked = pose, let carry, let held = carry.heldAmount {
+            release = Release(heldAmount: held, transition: 1 - remaining(of: carry))
+        }
+        return Presentation(
+            origin: position, edge: edge, amount: shown,
+            alpha: PuckDockModel.alpha(for: shown),
+            controlsOpacity: PuckDockModel.controlsOpacity(for: shown),
+            boundary: edge.map { boundary($0, at: position) } ?? 0,
+            held: isHeld,
+            release: release
+        )
+    }
+
+    /// Dimmer as it merges, and exactly 1 and exactly the tucked value at the
+    /// two ends, so a resting puck's alpha is never a rounding of anything.
+    static func alpha(for amount: CGFloat) -> CGFloat {
+        if amount >= 1 { return PuckMotion.tuckedAlpha }
+        if amount <= 0 { return 1 }
+        return 1 - (1 - PuckMotion.tuckedAlpha) * amount
+    }
+
+    /// The controls leave while the shoulders form and are gone before the
+    /// tab is: exactly 1 up to a hint of merge, exactly 0 once it is a tab.
+    static func controlsOpacity(for amount: CGFloat) -> CGFloat {
+        let x = min(max((amount - 0.1) / 0.4, 0), 1)
+        return 1 - x * x * (3 - 2 * x)
+    }
+
+    // MARK: geometry
+
+    private var isEdgePose: Bool {
+        switch pose {
+        case .tucked, .peeking: return true
+        case .hanging, .free, .held: return false
+        }
+    }
+
+    private var isMotionless: Bool {
+        position == target && velocity.isZero
+    }
+
+    private var bodySize: CGSize {
+        CGSize(width: panelSize.width - inset * 2, height: panelSize.height - inset * 2)
+    }
+
+    private func body(at origin: CGPoint) -> CGRect {
+        CGRect(x: origin.x + inset, y: origin.y + inset, width: bodySize.width, height: bodySize.height)
+    }
+
+    /// Where the window may sit, in frame terms: the body inside the screen
+    /// with a couple of points to spare.
+    private var room: CGRect {
+        screen.visibleFrame.insetBy(dx: -inset + PuckMotion.keepOff, dy: -inset + PuckMotion.keepOff)
+    }
+
+    private func clamped(_ origin: CGPoint, within area: CGRect) -> CGPoint {
+        CGPoint(x: min(max(origin.x, area.minX), max(area.minX, area.maxX - panelSize.width)),
+                y: min(max(origin.y, area.minY), max(area.minY, area.maxY - panelSize.height)))
+    }
+
+    /// The whole body just inside the edge, at `along` of the way across it.
+    func revealedOrigin(_ edge: Edge, along: CGFloat) -> CGPoint {
+        let area = screen.visibleFrame
+        let gap = PuckMotion.clearance
+        var origin = CGPoint(x: 0, y: 0)
+        switch edge {
+        case .left:
+            origin.x = area.minX + gap - inset
+            origin.y = area.minY + along * area.height - panelSize.height / 2
+        case .right:
+            origin.x = area.maxX - gap - bodySize.width - inset
+            origin.y = area.minY + along * area.height - panelSize.height / 2
+        case .top:
+            origin.y = area.maxY - gap - bodySize.height - inset
+            origin.x = area.minX + along * area.width - panelSize.width / 2
+        case .bottom:
+            origin.y = area.minY + gap - inset
+            origin.x = area.minX + along * area.width - panelSize.width / 2
+        }
+        return clamped(origin, within: area.insetBy(dx: -inset, dy: -inset))
+    }
+
+    /// The revealed frame pushed out through its edge until `peek` points of
+    /// the body are left.
+    func tuckedOrigin(_ edge: Edge, along: CGFloat) -> CGPoint {
+        var origin = revealedOrigin(edge, along: along)
+        let shift = PuckMotion.clearance - PuckMotion.peek
+        switch edge {
+        case .left: origin.x -= bodySize.width + shift
+        case .right: origin.x += bodySize.width + shift
+        case .top: origin.y += bodySize.height + shift
+        case .bottom: origin.y -= bodySize.height + shift
+        }
+        return origin
+    }
+
+    /// Half the peek stays visible even when an incoming velocity needs more
+    /// room than the spring's ordinary overshoot: the position is held to this,
+    /// the target never is.
+    private func bound(_ point: CGPoint, for edge: Edge) -> CGPoint {
+        let area = screen.visibleFrame
+        var safe = point
+        switch edge {
+        case .left: safe.x = max(safe.x, area.minX + PuckMotion.peek / 2 - panelSize.width + inset)
+        case .right: safe.x = min(safe.x, area.maxX - PuckMotion.peek / 2 - inset)
+        case .bottom: safe.y = max(safe.y, area.minY + PuckMotion.peek / 2 - panelSize.height + inset)
+        case .top: safe.y = min(safe.y, area.maxY - PuckMotion.peek / 2 - inset)
+        }
+        return safe
+    }
+
+    /// How far along its edge a frame's middle sits, as a fraction of the screen.
+    private func along(_ edge: Edge, of origin: CGPoint) -> CGFloat {
+        let area = screen.visibleFrame
+        switch edge {
+        case .left, .right:
+            return min(max((origin.y + panelSize.height / 2 - area.minY) / area.height, 0), 1)
+        case .top, .bottom:
+            return min(max((origin.x + panelSize.width / 2 - area.minX) / area.width, 0), 1)
+        }
+    }
+
+    /// Distance from the body to each edge, in the order of `Edge.allCases`.
+    private func gaps(at origin: CGPoint) -> [CGFloat] {
+        let box = body(at: origin)
+        let area = screen.visibleFrame
+        return [box.minX - area.minX, area.maxX - box.maxX, area.maxY - box.maxY, box.minY - area.minY]
+    }
+
+    private func chosenEdge(at origin: CGPoint, current: Edge?, maximumGap: CGFloat) -> Edge? {
+        let edges = Edge.allCases
+        let index = PuckEdgeProximity.chosenIndex(
+            distances: gaps(at: origin), exposed: edges.map { screen.exposed.contains($0) },
+            current: current.flatMap { edges.firstIndex(of: $0) }, maximumGap: maximumGap
+        )
+        return index.map { edges[$0] }
+    }
+
+    private func gap(_ edge: Edge, at origin: CGPoint) -> CGFloat {
+        gaps(at: origin)[Edge.allCases.firstIndex(of: edge) ?? 0]
+    }
+
+    /// From the display's edge to the body's far side: where the tab's shoulders
+    /// must land however far the spring has carried the window.
+    private func boundary(_ edge: Edge, at origin: CGPoint) -> CGFloat {
+        let box = body(at: origin)
+        let area = screen.visibleFrame
+        switch edge {
+        case .right: return area.maxX - box.minX
+        case .left: return box.maxX - area.minX
+        case .top: return area.maxY - box.minY
+        case .bottom: return box.maxY - area.minY
+        }
+    }
+
+    // MARK: the one number
+
+    /// Position between the revealed and tucked rest frames, along the line
+    /// that joins them: 0 revealed, 1 tucked, never outside.
+    private func travel(_ edge: Edge, along: CGFloat, at point: CGPoint) -> CGFloat {
+        let revealed = revealedOrigin(edge, along: along)
+        let tucked = tuckedOrigin(edge, along: along)
+        let dx = tucked.x - revealed.x
+        let dy = tucked.y - revealed.y
+        let length = dx * dx + dy * dy
+        guard length > 0 else { return 0 }
+        let travelled = (point.x - revealed.x) * dx + (point.y - revealed.y) * dy
+        return min(max(travelled / length, 0), 1)
+    }
+
+    private func distance(from a: CGPoint, to b: CGPoint) -> CGFloat {
+        hypot(a.x - b.x, a.y - b.y)
+    }
+
+    /// How much of the journey a carried residual has left: 1 when it was taken
+    /// up, exactly 0 at the target.
+    private func remaining(of carry: Carry) -> CGFloat {
+        guard carry.span > 0 else { return 0 }
+        return min(distance(from: position, to: target) / carry.span, 1)
+    }
+
+    /// What a hand shows: proximity to the chosen edge, with the outline the
+    /// puck wore when grabbed fading out over the first few points of movement.
+    private func heldAmount(_ grab: Grab) -> CGFloat {
+        guard let edge = grab.edge else { return 0 }
+        var shown = PuckEdgeProximity.amount(for: gap(edge, at: position))
+        if edge == grab.startEdge {
+            let moved = distance(from: position, to: grab.start)
+            shown += grab.residual * max(0, 1 - moved / PuckEdgeProximity.outerGap)
+        }
+        return min(max(shown, 0), 1)
+    }
+
+    /// The single scalar the shape, the dimming and the controls are read from.
+    private var amount: CGFloat {
+        switch pose {
+        case .hanging, .free: return 0
+        case let .held(grab): return heldAmount(grab)
+        case let .tucked(edge, along), let .peeking(edge, along):
+            var shown = travel(edge, along: along, at: position)
+            if let carry { shown += carry.offset * remaining(of: carry) }
+            return min(max(shown, 0), 1)
+        }
+    }
+
+    // MARK: moving between poses
+
+    /// Retargeting keeps position and velocity: only the destination changes.
+    /// The amount the old pose was showing, less what the new rest frames say
+    /// of this position, is carried and shrinks with the distance still to
+    /// go, so the outline continues from what was on screen and ends exactly
+    /// where the pose says.
+    private mutating func move(to next: Pose) {
+        let shown = amount
+        var heldShown: CGFloat?
+        if case .held = pose { heldShown = shown }
+        pose = next
+        dwell = 0
+        motionAge = 0
+        carry = nil
+        switch next {
+        case let .tucked(edge, along), let .peeking(edge, along):
+            let span = distance(from: position, to: target)
+            let offset = shown - travel(edge, along: along, at: position)
+            if span > 0, abs(offset) > 1e-9 || heldShown != nil {
+                carry = Carry(offset: offset, span: span, heldAmount: heldShown)
+            }
+            if reduceMotion || span == 0 { settle() }
+        case .hanging, .free, .held:
+            velocity = .zero
+        }
+    }
+
+    /// The position is made the target, bit for bit, with nothing left moving
+    /// or carried: the only way a pose that is not held comes to rest.
+    private mutating func settle() {
+        position = target
+        velocity = .zero
+        carry = nil
+        accumulator = 0
+        motionAge = 0
+    }
+
+    private mutating func stepSpring(by seconds: TimeInterval) {
+        guard seconds <= PuckMotion.stall else { settle(); return }
+        let edge: Edge
+        switch pose {
+        case let .tucked(shown, _), let .peeking(shown, _): edge = shown
+        default: return
+        }
+        let destination = target
+        motionAge += seconds
+        accumulator += seconds
+        while accumulator >= PuckMotion.step {
+            let next = physics.calculateNextState(
+                from: SpringMotionState(position: position, velocity: velocity),
+                destinationPoint: destination)
+            position = next.position
+            velocity = next.velocity
+            let safe = bound(position, for: edge)
+            if safe.x != position.x { velocity = .init(horizontal: 0, vertical: velocity.vertical) }
+            if safe.y != position.y { velocity = .init(horizontal: velocity.horizontal, vertical: 0) }
+            position = safe
+            accumulator -= PuckMotion.step
+            if abs(velocity.horizontal) < 0.001 && abs(velocity.vertical) < 0.001
+                && abs(position.x - destination.x) < 0.5 && abs(position.y - destination.y) < 0.5 {
+                settle()
+                return
+            }
+        }
+        if motionAge >= PuckMotion.deadline { settle() }
+    }
+
+    // MARK: hover as a level
+
+    private func closed(_ rect: CGRect, contains point: CGPoint) -> Bool {
+        point.x >= rect.minX && point.x <= rect.maxX && point.y >= rect.minY && point.y <= rect.maxY
+    }
+
+    /// The strip of the tab against its edge, reaching a point past it because
+    /// a pointer pushed against the side sits on the edge itself.
+    func tabFootprint(_ edge: Edge, along: CGFloat) -> CGRect {
+        let area = screen.visibleFrame
+        let origin = revealedOrigin(edge, along: along)
+        let middle = CGPoint(x: origin.x + panelSize.width / 2, y: origin.y + panelSize.height / 2)
+        let depth = PuckMotion.peek + 1
+        let half = PuckMotion.tabHalfLength
+        switch edge {
+        case .left: return CGRect(x: area.minX - 1, y: middle.y - half, width: depth, height: half * 2)
+        case .right: return CGRect(x: area.maxX - PuckMotion.peek, y: middle.y - half, width: depth, height: half * 2)
+        case .top: return CGRect(x: middle.x - half, y: area.maxY - PuckMotion.peek, width: half * 2, height: depth)
+        case .bottom: return CGRect(x: middle.x - half, y: area.minY - 1, width: half * 2, height: depth)
+        }
+    }
+
+    private func onRevealedBody(_ point: CGPoint, _ edge: Edge, along: CGFloat) -> Bool {
+        let origin = revealedOrigin(edge, along: along)
+        return distance(from: point, to: CGPoint(x: origin.x + panelSize.width / 2,
+                                                 y: origin.y + panelSize.height / 2)) <= bodySize.width / 2
+    }
+
+    private func onBodyNow(_ point: CGPoint) -> Bool {
+        let area = screen.visibleFrame.insetBy(dx: -1, dy: -1)
+        return closed(area, contains: point)
+            && distance(from: point, to: CGPoint(x: position.x + panelSize.width / 2,
+                                                 y: position.y + panelSize.height / 2)) <= bodySize.width / 2
+    }
+
+    /// What a tucked puck lets a pointer find: its tab and nothing else, so a
+    /// body sweeping past a parked pointer on its way into the edge cannot
+    /// call it back out again.
+    func triggersPeek(_ point: CGPoint, _ edge: Edge, along: CGFloat) -> Bool {
+        closed(tabFootprint(edge, along: along), contains: point)
+    }
+
+    /// What keeps a peeking puck out: the tab's footprint, the revealed body and
+    /// the body where it is now. The union is what makes the pointer that
+    /// asked for the peek still count as on the puck once the body has moved.
+    func keepsPeeking(_ point: CGPoint, _ edge: Edge, along: CGFloat) -> Bool {
+        closed(tabFootprint(edge, along: along), contains: point)
+            || onRevealedBody(point, edge, along: along) || onBodyNow(point)
+    }
+
+    private mutating func hover(by seconds: TimeInterval) {
+        switch pose {
+        case let .tucked(edge, along):
+            if let pointer, triggersPeek(pointer, edge, along: along) {
+                dwell += seconds
+                if dwell >= PuckMotion.dwell { move(to: .peeking(edge, along: along)) }
+            } else {
+                dwell = 0
+            }
+        case let .peeking(edge, along):
+            if let pointer, keepsPeeking(pointer, edge, along: along) {
+                dwell = 0
+            } else {
+                dwell += seconds
+                if dwell >= PuckMotion.grace {
+                    move(to: .tucked(edge, along: along))
+                    notes.append(.placed(place))
+                }
+            }
+        case .hanging, .free, .held:
+            break
+        }
+    }
+
+    // MARK: the handlers
+
+    /// The hand freezes a spring the moment it touches it, even if the gesture
+    /// turns out to be a click, so a re-grab never jumps under the pointer.
+    private mutating func press() {
+        if case .held = pose { return }
+        pressing = true
+        frozenFor = 0
+        dwell = 0
+        velocity = .zero
+    }
+
+    /// A tab is a button as well as a handle: a click on it asks for the
+    /// recorder, and a click on a peeking puck gives it a fresh grace.
+    private mutating func click() {
+        pressing = false
+        dwell = 0
+        if case let .tucked(edge, along) = pose { move(to: .peeking(edge, along: along)) }
+    }
+
+    /// The menu item's way in, which needs no pointer and so is judged by the
+    /// same level as any other peek.
+    private mutating func reveal() {
+        dwell = 0
+        if case let .tucked(edge, along) = pose { move(to: .peeking(edge, along: along)) }
+    }
+
+    private mutating func beginDrag(at point: CGPoint) {
+        if case .held = pose { return }
+        pointer = point
+        pressing = false
+        let shown = amount
+        var poseEdge: Edge?
+        switch pose {
+        case let .tucked(edge, _), let .peeking(edge, _): poseEdge = edge
+        default: break
+        }
+        let startEdge = poseEdge ?? chosenEdge(at: position, current: nil, maximumGap: PuckEdgeProximity.outerGap)
+        let residual = startEdge.map { shown - PuckEdgeProximity.amount(for: gap($0, at: position)) } ?? 0
+        var hanging = false
+        if case .hanging = pose { hanging = true }
+        velocity = .zero
+        carry = nil
+        dwell = 0
+        pose = .held(Grab(offset: CGPoint(x: point.x - position.x, y: point.y - position.y),
+                          start: position, startEdge: startEdge, residual: residual,
+                          cameFromHanging: hanging, edge: startEdge))
+    }
+
+    /// The window goes where the hand goes and never past the screen's edges,
+    /// except back to where it started, so a tucked puck can be taken from
+    /// outside the room an ordinary drag has.
+    private mutating func drag(to point: CGPoint) {
+        guard case .held(var grab) = pose else { return }
+        pointer = point
+        let wanted = CGPoint(x: point.x - grab.offset.x, y: point.y - grab.offset.y)
+        let area = room.union(CGRect(origin: grab.start, size: panelSize))
+        position = clamped(wanted, within: area)
+        if !grab.moved {
+            grab.moved = true
+            if grab.cameFromHanging { notes.append(.leftHanging) }
+        }
+        grab.edge = chosenEdge(at: position, current: grab.edge, maximumGap: PuckEdgeProximity.outerGap)
+        pose = .held(grab)
+    }
+
+    /// Let go: a body within the magnet distance of an exposed edge tucks into
+    /// it at the spot along it where it was left; anywhere else it stays.
+    private mutating func release(at point: CGPoint) {
+        pointer = point
+        pressing = false
+        guard case let .held(grab) = pose else { return }
+        if !grab.moved, grab.cameFromHanging {
+            pose = .hanging
+            return
+        }
+        if let edge = chosenEdge(at: position, current: grab.edge, maximumGap: PuckMotion.magnet) {
+            move(to: .tucked(edge, along: along(edge, of: position)))
+        } else {
+            move(to: .free)
+        }
+        notes.append(.placed(place))
+    }
+
+    private mutating func changeScreen(to next: Screen) {
+        screen = next
+        switch pose {
+        case .hanging:
+            break
+        case .free:
+            position = clamped(position, within: next.visibleFrame)
+        case .held(var grab):
+            position = clamped(position, within: room.union(CGRect(origin: grab.start, size: panelSize)))
+            grab.edge = chosenEdge(at: position, current: grab.edge, maximumGap: PuckEdgeProximity.outerGap)
+            pose = .held(grab)
+        case .tucked, .peeking:
+            settle()
+        }
+    }
+
+    private mutating func restore(_ place: Place) {
+        carry = nil
+        pressing = false
+        dwell = 0
+        velocity = .zero
+        switch place {
+        case let .hanging(origin):
+            pose = .hanging
+            position = origin
+        case let .free(origin):
+            pose = .free
+            position = clamped(origin, within: room)
+        case let .tucked(edge, along):
+            pose = .tucked(edge, along: along)
+            settle()
+        }
+    }
 }
 
 /// A weak target breaks the display link's ownership cycle so dropping a dock
@@ -4341,35 +5084,35 @@ final class Dock {
     /// How much of the body stays on screen when tucked: a rim's worth,
     /// enough to be a tab and to be hovered. Never less than a few
     /// points — a window with nothing on screen gets no events at all.
-    static let peek: CGFloat = 22
+    static let peek: CGFloat = PuckMotion.peek
 
     /// How near a window's own body must come to an edge to tuck into it when
     /// let go. It is the window that is measured and not the pointer, so that
     /// tucking never asks anybody to shove the cursor into the side of the
     /// screen — the gesture macOS reads as "tile this window", and the one
     /// thing this window must never look like it is doing.
-    static let magnet: CGFloat = 28
+    static let magnet: CGFloat = PuckMotion.magnet
 
     /// The air kept between the window and the edge of the screen while it is
     /// being dragged. It cannot be pushed through the side: what a drag can do
     /// is put it against the edge, and what letting go there does is tuck it.
-    static let keepOff: CGFloat = 2
+    static let keepOff: CGFloat = PuckMotion.keepOff
 
     /// The dwell before a hover reveals, and the grace after the pointer leaves
     /// before it hides again — each re-checked when it fires. A fifth of a
     /// second is what the Dock waits; the grace is longer because coming back
     /// for something is more common than leaving for good.
-    static let dwell: TimeInterval = 0.2
-    static let grace: TimeInterval = 0.4
+    static let dwell: TimeInterval = PuckMotion.dwell
+    static let grace: TimeInterval = PuckMotion.grace
 
     /// The slide, the same length from every edge: a window that took longer
     /// from farther away would be a window that felt heavier at the bottom of
     /// the screen than at the side.
     static let sliding: TimeInterval = 0.22
-    static let tuckedAlpha: CGFloat = 0.6
+    static let tuckedAlpha: CGFloat = PuckMotion.tuckedAlpha
 
     /// The air between a revealed body and the edge it came out of.
-    static let clearance: CGFloat = 6
+    static let clearance: CGFloat = PuckMotion.clearance
 
     let panel: NSPanel
     let view: Dockable
