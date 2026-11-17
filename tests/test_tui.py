@@ -550,7 +550,7 @@ async def test_saving_an_emptied_note_says_so_and_keeps_what_was_typed(repo):
         await pilot.pause()
 
         assert showing(pilot.app, "#editor")
-        assert [str(n.message) for n in pilot.app._notifications] == ["a note needs something in it"]
+        assert said(pilot)[-1:] == ["a note needs something in it"]
         assert services.notes_markdown(repo, work).startswith("# Sprint sync")
 
 
@@ -807,7 +807,7 @@ async def test_a_speaker_name_of_nothing_is_refused_without_losing_the_modal(rep
         await pilot.pause()
 
         assert showing(pilot.app, "#speaker-name")
-        assert [str(n.message) for n in pilot.app._notifications] == ["a speaker needs a name"]
+        assert said(pilot)[-1:] == ["a speaker needs a name"]
         assert services.speakers(repo, work) == {"S1": "S1"}
 
 
@@ -2042,7 +2042,7 @@ async def test_writing_the_notes_again_extracts_them_for_the_memo_on_screen(repo
         await from_menu(pilot, "space", "w")
         await finish_jobs(pilot)
 
-        assert said(pilot) == ["writing notes: memo 2 …", "notes written for memo 2 via claude"]
+        assert said(pilot) == ["writing notes: memo 2 \"shopping.m4a\" …", "notes written for memo 2 via claude"]
         assert "Shopping list" in notes_pane(pilot).document.source
 
 
@@ -2062,7 +2062,7 @@ async def test_fixing_transcription_mistakes_repairs_the_transcript(repo, monkey
         await from_menu(pilot, "space", "f")
         await finish_jobs(pilot)
 
-        assert said(pilot) == ["fixing transcript: memo 1 …", "transcript of memo 1 fixed"]
+        assert said(pilot) == ["fixing transcript: memo 1 \"standup.m4a\" …", "transcript of memo 1 fixed"]
         assert "We ship on Friday." in transcript(pilot)
 
 
@@ -2085,7 +2085,7 @@ async def test_a_second_job_on_one_memo_is_refused_rather_than_queued(repo, monk
         await from_menu(pilot, "space", "w")
         await pilot.pause()
 
-        assert said(pilot) == ["writing notes: memo 1 …", "memo 1 is already busy"]
+        assert said(pilot) == ["writing notes: memo 1 \"standup.m4a\" …", 'memo 1 "standup.m4a" is already busy']
 
         holding.set()
         await finish_jobs(pilot)
@@ -2112,7 +2112,7 @@ async def test_two_memos_can_be_worked_on_at_the_same_time(repo, monkeypatch):
         await pilot.pause()
 
         assert pilot.app.jobs == {work, home}
-        assert "memo 2 is already busy" not in said(pilot)
+        assert 'memo 2 "shopping.m4a" is already busy' not in said(pilot)
 
         holding.set()
         await finish_jobs(pilot)
@@ -2133,7 +2133,7 @@ async def test_a_gateway_that_is_down_says_so_instead_of_taking_the_app_down(rep
         await from_menu(pilot, "space", "w")
         await finish_jobs(pilot)
 
-        assert said(pilot) == ["writing notes: memo 1 …", "ollama is not running"]
+        assert said(pilot) == ["writing notes: memo 1 \"standup.m4a\" …", "ollama is not running"]
         assert pilot.app.jobs == set()
 
 
@@ -2156,7 +2156,7 @@ async def test_a_memo_can_be_worked_on_again_once_its_job_has_finished(repo, mon
         await finish_jobs(pilot)
 
         assert runs == [work, work]
-        assert "memo 1 is already busy" not in said(pilot)
+        assert 'memo 1 "standup.m4a" is already busy' not in said(pilot)
 
 
 @pytest.mark.asyncio
@@ -2415,7 +2415,7 @@ async def test_the_answer_comes_back_on_screen(repo, monkeypatch):
         await finish_jobs(pilot)
 
         assert "You asked: When do they ship?" in answer_shown(pilot)
-        assert said(pilot) == ["answering: memo 1 …", "memo 1 answered via claude"]
+        assert said(pilot) == ["answering: memo 1 \"standup.m4a\" …", "memo 1 answered via claude"]
 
 
 @pytest.mark.asyncio
@@ -2562,7 +2562,7 @@ async def test_a_typed_speaker_count_reaches_rediarization(repo, monkeypatch):
         await finish_jobs(pilot)
 
         assert seen["num_speakers"] == 2
-        assert said(pilot) == ["identifying speakers: memo 1 …", "speakers identified in memo 1"]
+        assert said(pilot) == ["identifying speakers: memo 1 \"standup.m4a\" …", "speakers identified in memo 1"]
 
 
 @pytest.mark.asyncio
@@ -5291,3 +5291,90 @@ async def test_the_memo_keys_are_not_offered_in_the_bin(repo):
         assert pilot.app.check_action("move_memo", ()) is False
         assert pilot.app.check_action("undo", ()) is True
         assert pilot.app.check_action("empty_bin", ()) is True
+
+
+# --- focus decides which memo a key means -----------------------------------
+
+
+async def focus_a_notes_pane(pilot) -> None:
+    """Moves the focus into the panes of the open memo, as clicking into its
+    notes does."""
+    pilot.app.query_one("#notes").query_one(Markdown).focus()
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_with_the_focus_in_the_open_memos_notes_edit_notes_means_that_memo(repo):
+    opened, _highlighted = two_work_memos(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_then_highlight_the_other(pilot, "planning.m4a", "retro.m4a")
+        await focus_a_notes_pane(pilot)
+        assert pilot.app._focus_in_detail()
+
+        await pilot.press("e")
+        await pilot.pause()
+
+        assert 'editing the notes of "planning.m4a"' in said(pilot)
+
+
+@pytest.mark.asyncio
+async def test_with_the_focus_in_the_open_memos_notes_naming_a_speaker_means_that_memo(repo):
+    two_work_memos(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_then_highlight_the_other(pilot, "planning.m4a", "retro.m4a")
+        await focus_a_notes_pane(pilot)
+
+        await pilot.app.run_action("rename_speaker")
+        await pilot.pause()
+
+        assert 'naming a speaker in "planning.m4a"' in said(pilot)
+
+
+@pytest.mark.asyncio
+async def test_with_the_focus_in_the_open_memos_notes_extract_means_that_memo(repo, monkeypatch):
+    opened, highlighted = two_work_memos(repo)
+    seen = []
+
+    def extract(_repo, memo_id, force=False):
+        seen.append(memo_id)
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", extract)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_then_highlight_the_other(pilot, "planning.m4a", "retro.m4a")
+        await focus_a_notes_pane(pilot)
+        await pilot.app.run_action("extract")
+        await finish_jobs(pilot)
+
+        assert seen == [opened]
+        assert 'writing notes: memo 1 "planning.m4a" …' in said(pilot)
+
+
+@pytest.mark.asyncio
+async def test_toggling_raw_text_always_flips_the_open_memo_even_with_another_highlighted(repo):
+    opened, _highlighted = two_work_memos(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_then_highlight_the_other(pilot, "planning.m4a", "retro.m4a")
+        await pilot.app.run_action("toggle_raw")
+        await pilot.pause()
+
+        assert pilot.app.memo_id == opened
+        assert "plan the sprint" in transcript(pilot)
+
+
+@pytest.mark.asyncio
+async def test_the_notice_for_a_move_and_a_rename_names_the_memo_they_changed(repo):
+    two_work_memos(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_then_highlight_the_other(pilot, "planning.m4a", "retro.m4a")
+        pilot.app._move_memo(2, "side")
+        pilot.app._title_memo(1, "Planning")
+        await pilot.pause()
+
+        assert 'moved "retro.m4a" to side' in said(pilot)
+        assert 'renamed "planning.m4a" to "Planning"' in said(pilot)

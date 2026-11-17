@@ -2286,13 +2286,17 @@ class MemoApp(App[None]):
         opening a recording to file it away or throw it out is a step that says
         nothing.
 
-        Never the memo open below the list while the cursor is on another row.
-        Somebody who opened one memo and then arrowed to a second is looking at
-        the second one's highlight, and a key that went to the first deleted a
-        memo nobody was pointing at. The open memo answers only when the cursor
-        has no row at all — an empty list, or a memo opened from the to-do
-        board out of another project — because then it is all that is on screen
-        to mean.
+        What is pointed at depends on where the focus is. With it in the list
+        or the sidebar the highlight is the target, never the memo left open
+        below the list: somebody who opened one memo and then arrowed to a
+        second is looking at the second one's highlight, and a key that went to
+        the first deleted a memo nobody was pointing at. With it inside the
+        panes showing the open memo the open memo is the target: somebody
+        typing into its notes is looking at it, and an edit landing on the
+        highlighted row would silently change a memo they never opened. The
+        open memo also answers when the cursor has no row at all — an empty
+        list, or a memo opened from the to-do board out of another project —
+        because then it is all that is on screen to mean.
 
         Nothing at all when the cursor is on no memo, though it is on a row: one
         standing in for a recording still coming in is keyed by the path it is
@@ -2300,6 +2304,8 @@ class MemoApp(App[None]):
         in the bin, whose memos cannot be acted on until they are restored."""
         if self._in_bin():
             return None
+        if self.memo_id is not None and self._focus_in_detail():
+            return self.memo_id
         key = self._cursor_key()
         if key is None:
             return self.memo_id
@@ -2307,6 +2313,16 @@ class MemoApp(App[None]):
             return int(key)
         except ValueError:
             return None
+
+    def _focus_in_detail(self) -> bool:
+        """Whether the focus is inside the panes that show the open memo, which
+        is where a key means that memo and not whatever the list has
+        highlighted."""
+        focused = self.focused
+        if focused is None:
+            return False
+        tabs = self.query(TabbedContent)
+        return bool(tabs) and tabs.first() in focused.ancestors_with_self
 
     def _in_bin(self) -> bool:
         """Whether the list on screen is the bin. A tag search run from inside
@@ -2705,8 +2721,12 @@ class MemoApp(App[None]):
         """Swaps the transcript between the repaired reading and the words as
         they were transcribed, which is how a repair pass gets checked. What it
         swaps is the transcript in the pane, so a memo only pointed at is opened
-        to be read: the answer to raw against repaired is the text itself."""
-        memo_id = self._target_memo()
+        to be read: the answer to raw against repaired is the text itself.
+
+        Always the open memo when there is one, whatever has the focus: the
+        pane being swapped is that memo's, and a flip applied to a highlighted
+        row would replace the transcript somebody is reading with another's."""
+        memo_id = self.memo_id if self.memo_id is not None else self._target_memo()
         if memo_id is None:
             return
         self.raw = not self.raw
@@ -2764,7 +2784,8 @@ class MemoApp(App[None]):
         self, memo_id: int, doing: str, run: Callable[[Repository], str]
     ) -> None:
         """Slow work on a memo that already exists, keyed and named by its id."""
-        self._start_job(memo_id, f"memo {memo_id}", doing, run)
+        name = services.require_memo(self.repo, memo_id).filename
+        self._start_job(memo_id, f'memo {memo_id} "{name}"', doing, run)
 
     @work(thread=True)
     def _run_job(self, key: Hashable, run: Callable[[Repository], str]) -> None:
@@ -3284,6 +3305,9 @@ class MemoApp(App[None]):
         if memo_id is None:
             return
         self.show_memo(memo_id)
+        # the editor has no title of its own, so the notice is what says whose
+        # notes these are while they are being typed over
+        self.notify(f'editing the notes of "{services.require_memo(self.repo, memo_id).filename}"')
         self.push_screen(
             NoteEditor(
                 services.notes_markdown(self.repo, memo_id),
@@ -3312,8 +3336,10 @@ class MemoApp(App[None]):
         """Refiles the memo, then redraws what that changed. Filed away from the
         project on screen, the memo drops out of the list, and panes left
         describing it would be describing a row that is no longer there."""
+        filename = services.require_memo(self.repo, memo_id).filename
         services.move_memo(self.repo, memo_id, project)
         self._reload(self.project)
+        self.notify(f'moved "{filename}" to {services.project_name(project)}')
 
     def action_title_memo(self) -> None:
         """Offers to rename the memo being pointed at, if any memo is."""
@@ -3332,8 +3358,10 @@ class MemoApp(App[None]):
         being the one place the name is read. A name of nothing is refused by
         services, and the refusal travels back to the modal, which keeps what
         was typed rather than losing it."""
+        before = services.require_memo(self.repo, memo_id).filename
         services.rename_memo(self.repo, memo_id, name)
         self._relist()
+        self.notify(f'renamed "{before}" to "{name.strip()}"')
 
     def action_delete_memo(self) -> None:
         """Moves the pointed-at memo to the bin, and says so. Nothing is asked
@@ -3462,6 +3490,7 @@ class MemoApp(App[None]):
         memo_id = self._target_memo()
         if memo_id is None:
             return
+        self.notify(f'naming a speaker in "{services.require_memo(self.repo, memo_id).filename}"')
         self.push_screen(
             RenameSpeaker(
                 services.speakers(self.repo, memo_id),
