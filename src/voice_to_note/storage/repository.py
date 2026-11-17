@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS memos (
   updated_at TEXT,
   recorded_at TEXT,
   archived_at TEXT,
-  source_url TEXT
+  source_url TEXT,
+  deleted_at TEXT
 );
 CREATE TABLE IF NOT EXISTS segments (
   id INTEGER PRIMARY KEY,
@@ -122,7 +123,7 @@ CREATE INDEX IF NOT EXISTS run_stages_by_run ON run_stages(run_id);
 
 MEMO_COLUMNS = (
     "id, filename, wav_path, duration_s, language, status, created_at, project,"
-    " updated_at, recorded_at, archived_at, source_url"
+    " updated_at, recorded_at, archived_at, source_url, deleted_at"
 )
 
 
@@ -168,7 +169,8 @@ class Repository:
         `recorded_at` for one made before an import could be recognised as a
         recording already stored, `archived_at` for one made before a memo
         could be put away without being deleted, and `source_url` for one made
-        before a memo could come from a video instead of a recording."""
+        before a memo could come from a video instead of a recording, and
+        `deleted_at` for one made before a deleted memo went to the bin."""
         cols = {r["name"] for r in self.con.execute("PRAGMA table_info(speakers)")}
         if "embedding" not in cols:
             self.con.execute("ALTER TABLE speakers ADD COLUMN embedding BLOB")
@@ -190,6 +192,8 @@ class Repository:
             self.con.execute("ALTER TABLE memos ADD COLUMN archived_at TEXT")
         if "source_url" not in cols:
             self.con.execute("ALTER TABLE memos ADD COLUMN source_url TEXT")
+        if "deleted_at" not in cols:
+            self.con.execute("ALTER TABLE memos ADD COLUMN deleted_at TEXT")
 
     def close(self) -> None:
         """Closes the memo database."""
@@ -330,6 +334,9 @@ class Repository:
         Every listing is either the live one or the archive drawer, never the
         two merged: a memo put away is meant to be gone from the list, and a
         view showing both would leave the archiving no visible effect at all.
+        A memo in the bin is in neither, whatever its archived state: the bin
+        has a listing of its own (`binned`), and the archived state a memo went
+        in with is what it comes back out to.
 
         A memo nobody has touched carries no updated_at at all, so ordering by
         it falls back to created_at through COALESCE — the same rule
@@ -343,7 +350,10 @@ class Repository:
         order is a name only this app's own code passes, never one a person
         types, so a value neither order recognises is a caller's bug and
         raises rather than silently falling back to one of the two it does."""
-        where = ["archived_at IS NOT NULL" if archived else "archived_at IS NULL"]
+        where = [
+            "deleted_at IS NULL",
+            "archived_at IS NOT NULL" if archived else "archived_at IS NULL",
+        ]
         params: list = []
         if project is not None:
             where.append("project=?")
@@ -357,7 +367,7 @@ class Repository:
                 " JOIN json_each(e.json, '$.tags') t WHERE lower(t.value)=lower(?))"
             )
             params.append(tag)
-        # always at least the archived clause, so there is always a WHERE
+        # always at least the bin and archived clauses, so there is always a WHERE
         clause = " WHERE " + " AND ".join(where)
         if order == "created":
             order_sql = "id DESC"
@@ -431,14 +441,15 @@ class Repository:
 
     def projects(self) -> list[tuple[str, int]]:
         """Every project that has memos in it and how many, for a sidebar to
-        show without a second query per project. Archived memos are counted in
-        no project: what the sidebar promises is what opening the project
+        show without a second query per project. Archived and binned memos are
+        counted in no project: what the sidebar promises is what opening the project
         shows, and a count including memos the listing hides would send someone
         to a shorter list than the number beside its name."""
         return [
             (r["project"], r["n"])
             for r in self.con.execute(
-                "SELECT project, count(*) AS n FROM memos WHERE archived_at IS NULL"
+                "SELECT project, count(*) AS n FROM memos"
+                " WHERE archived_at IS NULL AND deleted_at IS NULL"
                 " GROUP BY project ORDER BY project"
             )
         ]
@@ -455,7 +466,7 @@ class Repository:
                 "SELECT min(t.value) AS tag, count(DISTINCT e.memo_id) AS n"
                 " FROM extractions e JOIN json_each(e.json, '$.tags') t"
                 " JOIN memos m ON m.id = e.memo_id"
-                " WHERE m.archived_at IS NULL AND trim(t.value) <> ''"
+                " WHERE m.archived_at IS NULL AND m.deleted_at IS NULL AND trim(t.value) <> ''"
                 " GROUP BY lower(t.value) ORDER BY n DESC, lower(t.value)"
             )
         ]
@@ -679,8 +690,51 @@ class Repository:
             ).fetchone()[0]
         )
 
+    def set_binned(self, memo_id: int, binned: bool) -> bool:
+        """Moves a memo into the bin or back out, reporting whether that id was
+        there to move. The stamp is kept from the first time: binning a memo
+        already in the bin leaves it dated by when it really went, so a repeat
+        changes nothing a reader of the bin could see. Nothing else is
+        rewritten, `updated_at` and `archived_at` included, so a restored memo
+        sits in the list exactly where and as it did before."""
+        row = self.con.execute("SELECT 1 FROM memos WHERE id=?", (memo_id,)).fetchone()
+        if row is None:
+            return False
+        with self.con:
+            if binned:
+                self.con.execute(
+                    "UPDATE memos SET deleted_at=COALESCE(deleted_at, datetime('now'))"
+                    " WHERE id=?",
+                    (memo_id,),
+                )
+            else:
+                self.con.execute("UPDATE memos SET deleted_at=NULL WHERE id=?", (memo_id,))
+        return True
+
+    def binned(self) -> list[Memo]:
+        """Every memo in the bin, the one binned last first. Ties on the second
+        break on id DESC, like every listing here, so two memos binned together
+        come back in a stable order."""
+        return [
+            _memo(r)
+            for r in self.con.execute(
+                f"SELECT {MEMO_COLUMNS} FROM memos WHERE deleted_at IS NOT NULL"
+                " ORDER BY deleted_at DESC, id DESC"
+            )
+        ]
+
+    def binned_count(self) -> int:
+        """How many memos are in the bin, for a sidebar to show beside it
+        without reading a listing nothing on screen would draw."""
+        return int(
+            self.con.execute(
+                "SELECT count(*) FROM memos WHERE deleted_at IS NOT NULL"
+            ).fetchone()[0]
+        )
+
     def delete_memo(self, memo_id: int) -> None:
-        """Removes a memo and everything stored under it. One statement is the
+        """Removes a memo and everything stored under it, for good: the bin's
+        own emptying and `delete --forever` are what reach this. One statement is the
         whole deletion: segments, extractions, speakers and to-dos all reference
         the memo with ON DELETE CASCADE, so sqlite carries them off with the row
         and no child table can be left holding rows nothing points at."""
@@ -768,14 +822,19 @@ class Repository:
     def known_embeddings(
         self, exclude_memo_id: int | None = None
     ) -> dict[str, list[np.ndarray]]:
-        """Voice fingerprints of everyone named so far, for matching new memos."""
+        """Voice fingerprints of everyone named so far, for matching new memos.
+        A memo in the bin is out of the pool, as a deleted one always was: a
+        name only recognised from it stops being recognised until it is
+        restored, when the fingerprints are simply there again."""
         sql = (
-            "SELECT name, embedding FROM speakers"
-            " WHERE name IS NOT NULL AND embedding IS NOT NULL"
+            "SELECT s.name AS name, s.embedding AS embedding FROM speakers s"
+            " JOIN memos m ON m.id=s.memo_id"
+            " WHERE m.deleted_at IS NULL AND s.name IS NOT NULL"
+            " AND s.embedding IS NOT NULL"
         )
         params: tuple = ()
         if exclude_memo_id is not None:
-            sql += " AND memo_id != ?"
+            sql += " AND s.memo_id != ?"
             params = (exclude_memo_id,)
         pool: dict[str, list[np.ndarray]] = {}
         for r in self.con.execute(sql, params):
@@ -880,7 +939,7 @@ class Repository:
             r["norm"]
             for r in self.con.execute(
                 "SELECT t.norm FROM todos t JOIN memos m ON m.id=t.memo_id"
-                " WHERE t.status='open' AND t.memo_id<>?"
+                " WHERE t.status='open' AND t.memo_id<>? AND m.deleted_at IS NULL"
                 " AND m.project=(SELECT project FROM memos WHERE id=?)",
                 (memo_id, memo_id),
             )
@@ -907,8 +966,12 @@ class Repository:
         there to change. Either way the row is marked touched: a person's own
         say-so about a task has to outlive the next extraction, which would
         otherwise reword it or drop it as noise."""
+        # a to-do of a binned memo is on no board, so it cannot be ticked from
+        # one either: the memo has to come back first
         row = self.con.execute(
-            "SELECT memo_id FROM todos WHERE id=?", (todo_id,)
+            "SELECT t.memo_id FROM todos t JOIN memos m ON m.id=t.memo_id"
+            " WHERE t.id=? AND m.deleted_at IS NULL",
+            (todo_id,),
         ).fetchone()
         if row is None:
             return False
@@ -943,11 +1006,16 @@ class Repository:
         to on purpose showing an empty task list would read as a memo that
         committed to nothing.
 
+        A binned memo's commitments are on no board and in no memo's own list
+        either: they stay stored, and come back with the memo.
+
         A to-do has no archived state of its own, deliberately: archiving never
         rewrites whether a task is open or done, so a memo taken back out of the
         archive brings its list back exactly as it stood, and the two tables
         have nothing to drift apart about."""
-        where = ["t.status='open'"] if not include_done else []
+        where = ["m.deleted_at IS NULL"]
+        if not include_done:
+            where.append("t.status='open'")
         params: list = []
         if project is not None:
             where.append("m.project=?")
@@ -957,7 +1025,7 @@ class Repository:
             params.append(memo_id)
         else:
             where.append("m.archived_at IS NULL")
-        clause = " WHERE " + " AND ".join(where) if where else ""
+        clause = " WHERE " + " AND ".join(where)
         return [
             Todo(
                 r["id"],
@@ -1017,13 +1085,29 @@ class Repository:
         )
 
     def _scope(self, conversation_id: int) -> tuple[tuple[int, ...], tuple[str, ...]]:
-        """A thread's memos and their remembered titles, in reading order."""
+        """A thread's memos and their remembered titles, in reading order. A
+        memo in the bin is not in the scope while it is there — the model must
+        not read it, and a header must not name it — and is again once it is
+        restored: its row here is never touched."""
         rows = self.con.execute(
-            "SELECT memo_id, memo_title FROM conversation_memos WHERE conversation_id=?"
-            " ORDER BY position",
+            "SELECT c.memo_id, c.memo_title FROM conversation_memos c"
+            " JOIN memos m ON m.id=c.memo_id"
+            " WHERE c.conversation_id=? AND m.deleted_at IS NULL ORDER BY c.position",
             (conversation_id,),
         ).fetchall()
         return tuple(r["memo_id"] for r in rows), tuple(r["memo_title"] for r in rows)
+
+    def binned_in_scope(self, conversation_id: int) -> list[int]:
+        """The memos of a thread that are in the bin, for a message that says
+        which one to bring back when nothing else is left to talk about."""
+        return [
+            r["memo_id"]
+            for r in self.con.execute(
+                "SELECT c.memo_id FROM conversation_memos c JOIN memos m ON m.id=c.memo_id"
+                " WHERE c.conversation_id=? AND m.deleted_at IS NOT NULL ORDER BY c.position",
+                (conversation_id,),
+            )
+        ]
 
     def conversation(self, conversation_id: int) -> Conversation | None:
         """One thread with its scope, or nothing when that id was never opened."""
@@ -1044,15 +1128,27 @@ class Repository:
         one memo takes part in when asked. The scope is read per thread after
         the one listing statement rather than folded into it — a thread has a
         handful of memos, not thousands, and a GROUP_CONCAT would only have to
-        be split apart again."""
-        clause = ""
+        be split apart again.
+
+        A thread whose every memo is in the bin is not listed: nothing of it can
+        be read or asked about until a memo comes back, and a list entry that
+        only fails when opened is worse than none. A thread still holding one
+        live memo stays, with the binned ones out of its scope. One whose
+        memos were all deleted for good has an empty scope and still lists, as
+        it always has, for its history."""
+        where = [
+            "NOT (EXISTS (SELECT 1 FROM conversation_memos x JOIN memos mm"
+            "  ON mm.id=x.memo_id WHERE x.conversation_id=c.id AND mm.deleted_at IS NOT NULL)"
+            " AND NOT EXISTS (SELECT 1 FROM conversation_memos x JOIN memos mm"
+            "  ON mm.id=x.memo_id WHERE x.conversation_id=c.id AND mm.deleted_at IS NULL))"
+        ]
         params: tuple = ()
         if memo_id is not None:
-            clause = (
-                " WHERE c.id IN (SELECT conversation_id FROM conversation_memos"
-                " WHERE memo_id=?)"
+            where.append(
+                "c.id IN (SELECT conversation_id FROM conversation_memos WHERE memo_id=?)"
             )
             params = (memo_id,)
+        clause = " WHERE " + " AND ".join(where)
         rows = self.con.execute(
             "SELECT c.id, c.title, c.created_at, c.updated_at,"
             " (SELECT count(*) FROM messages m WHERE m.conversation_id=c.id) AS n,"
@@ -1132,4 +1228,5 @@ def _memo(row: sqlite3.Row) -> Memo:
         row["recorded_at"],
         row["archived_at"],
         row["source_url"],
+        row["deleted_at"],
     )

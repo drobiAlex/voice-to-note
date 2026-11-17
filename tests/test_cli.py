@@ -994,7 +994,9 @@ def stored_memo(filename: str = "standup.m4a") -> Memo:
     return Memo(3, filename, "/tmp/standup.wav", 12.0, "en", "transcribed", "2026-01-01 09:00:00")
 
 
-def test_deleting_with_yes_says_what_went_without_asking(monkeypatch, capsys):
+def test_deleting_a_memo_moves_it_to_the_bin_without_asking_and_names_the_undo(
+    monkeypatch, capsys
+):
     seen: dict = {}
 
     def delete_memo(_repo, memo_id):
@@ -1002,24 +1004,29 @@ def test_deleting_with_yes_says_what_went_without_asking(monkeypatch, capsys):
         return "standup.m4a"
 
     monkeypatch.setattr(services, "delete_memo", delete_memo)
-    monkeypatch.setattr("builtins.input", lambda: pytest.fail("asked despite --yes"))
-
-    run(monkeypatch, StubRepo(), "delete", "3", "--yes")
-
-    assert seen == {"memo_id": 3}
-    assert capsys.readouterr().err == "deleted memo 3 — standup.m4a\n"
-
-
-def test_a_delete_answered_no_keeps_the_memo(monkeypatch, capsys):
-    monkeypatch.setattr(services, "require_memo", lambda _repo, _id: stored_memo())
-    monkeypatch.setattr(
-        services, "delete_memo", lambda _repo, _id: pytest.fail("deleted after a no")
-    )
-    monkeypatch.setattr("builtins.input", lambda: "n")
+    monkeypatch.setattr("builtins.input", lambda: pytest.fail("asked before binning"))
 
     run(monkeypatch, StubRepo(), "delete", "3")
 
-    assert capsys.readouterr().err == "delete memo 3 — standup.m4a? [y/N] kept\n"
+    assert seen == {"memo_id": 3}
+    assert capsys.readouterr().err == 'moved "standup.m4a" to the bin — vtn restore 3\n'
+
+
+def test_a_permanent_delete_answered_no_keeps_the_memo(monkeypatch, capsys):
+    monkeypatch.setattr(
+        services, "require_memo", lambda _repo, _id, binned_ok=False: stored_memo()
+    )
+    monkeypatch.setattr(
+        services, "purge_memo", lambda _repo, _id: pytest.fail("deleted after a no")
+    )
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda: "n")
+
+    run(monkeypatch, StubRepo(), "delete", "3", "--forever")
+
+    assert capsys.readouterr().err == (
+        "delete memo 3 — standup.m4a for good? it cannot be restored. [y/N] kept\n"
+    )
 
 
 def test_archiving_a_memo_says_what_moved_without_asking_first(monkeypatch, capsys):

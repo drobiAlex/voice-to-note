@@ -638,16 +638,81 @@ def _confirmed(question: str) -> bool:
     return answer.strip().lower() in ("y", "yes")
 
 
+def _confirmed_for_good(question: str, yes: bool) -> bool:
+    """Whether a permanent removal may go ahead. `--yes` is the only way past a
+    prompt nobody is there to answer: agents and pipes drive this command, and
+    a destructive default must not be one a stray `echo y |` or an inherited
+    closed stdin can reach. Off a terminal without it the command refuses
+    outright, saying why, rather than waiting or guessing."""
+    if yes:
+        return True
+    if not sys.stdin.isatty():
+        sys.exit("refusing to delete for good without --yes: stdin is not a terminal")
+    return _confirmed(question)
+
+
 def cmd_delete(args: argparse.Namespace) -> None:
-    """Throws a memo away for good, asking first unless already told to."""
+    """Moves a memo to the bin, which asks nothing: it is undone by one command,
+    and the line it prints says which. With --forever it is the one command
+    that throws a memo away for good — whether or not it is in the bin — and
+    that is the one that has to ask."""
     with Repository() as repo:
-        if not args.yes:
-            memo = services.require_memo(repo, args.id)
-            if not _confirmed(f"delete memo {args.id} — {memo.filename}?"):
+        if args.forever:
+            memo = services.require_memo(repo, args.id, binned_ok=True)
+            if not _confirmed_for_good(
+                f"delete memo {args.id} — {memo.filename} for good? it cannot be restored.",
+                args.yes,
+            ):
                 status("kept")
                 return
+            filename = services.purge_memo(repo, args.id)
+            status(f"deleted memo {args.id} — {filename} for good")
+            return
         filename = services.delete_memo(repo, args.id)
-    status(f"deleted memo {args.id} — {filename}")
+    status(f'moved "{filename}" to the bin — vtn restore {args.id}')
+
+
+def cmd_restore(args: argparse.Namespace) -> None:
+    """Takes a memo back out of the bin, undoing cmd_delete. Nothing was thrown
+    away going in, so nothing needs confirming on the way back out."""
+    with Repository() as repo:
+        filename = services.restore_memo(repo, args.id)
+    status(f"memo {args.id} restored — {filename}")
+
+
+def cmd_bin(args: argparse.Namespace) -> None:
+    """Lists what is in the bin, with when each memo went in and the disk its
+    audio is holding, so someone deciding what to bring back or empty can see
+    both. Results on stdout like every listing; the note that it is empty goes
+    to stderr."""
+    with Repository() as repo:
+        if args.json:
+            print(services.bin_json(repo))
+            return
+        listing = services.bin_text(repo)
+        if listing:
+            print(listing)
+        else:
+            status("the bin is empty")
+
+
+def cmd_bin_empty(args: argparse.Namespace) -> None:
+    """Throws everything in the bin away for good, after saying how many memos
+    that is and asking, unless told --yes. The count is the point of the
+    prompt: emptying is the one thing that cannot be undone from here."""
+    with Repository() as repo:
+        count = services.binned_count(repo)
+        if not count:
+            status("the bin is already empty")
+            return
+        plural = "" if count == 1 else "s"
+        if not _confirmed_for_good(
+            f"delete {count} memo{plural} in the bin for good? it cannot be undone.", args.yes
+        ):
+            status("kept")
+            return
+        services.empty_bin(repo)
+    status(f"emptied the bin — {count} memo{plural} deleted for good")
 
 
 def cmd_archive(args: argparse.Namespace) -> None:
@@ -1057,10 +1122,34 @@ def main() -> None:
     sp.add_argument("project")
     sp.set_defaults(fn=cmd_move)
 
-    sp = sub.add_parser("delete", help="throw a memo away for good: delete <id>")
+    sp = sub.add_parser(
+        "delete",
+        help="move a memo to the bin (vtn restore undoes it): delete <id>",
+        description="Moves a memo to the bin; nothing is removed and `vtn restore <id>` brings it"
+        " back. With --forever the memo is removed permanently instead, whether or not it is in"
+        " the bin, after asking; off a terminal that needs --yes.",
+    )
     sp.add_argument("id", type=int)
-    sp.add_argument("--yes", action="store_true", help="delete without asking first")
+    sp.add_argument("--forever", action="store_true", help="remove it permanently, bin or not")
+    sp.add_argument("--yes", action="store_true", help="with --forever: do not ask first")
     sp.set_defaults(fn=cmd_delete)
+
+    sp = sub.add_parser("restore", help="take a memo back out of the bin: restore <id>")
+    sp.add_argument("id", type=int)
+    sp.set_defaults(fn=cmd_restore)
+
+    sp = sub.add_parser(
+        "bin",
+        help="list deleted memos, or empty them for good: bin [empty]",
+        description="Lists the memos `vtn delete` moved to the bin. Nothing leaves the bin on its"
+        " own; `vtn bin empty` removes everything in it permanently, after asking.",
+    )
+    sp.add_argument("--json", action="store_true", help="machine-readable output")
+    sp.set_defaults(fn=cmd_bin)
+    bin_sub = sp.add_subparsers(dest="bin_cmd")
+    bsp = bin_sub.add_parser("empty", help="remove everything in the bin permanently")
+    bsp.add_argument("--yes", action="store_true", help="do not ask first (required off a terminal)")
+    bsp.set_defaults(fn=cmd_bin_empty)
 
     sp = sub.add_parser("archive", help="put a memo away without deleting it: archive <id>")
     sp.add_argument("id", type=int)

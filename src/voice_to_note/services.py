@@ -101,6 +101,16 @@ class NotFound(Exception):
     """A memo, speaker or extraction the caller asked for does not exist."""
 
 
+class InBin(NotFound):
+    """The memo exists but is in the bin. A kind of not-found on purpose: to
+    every command that works on a live memo it is not there, and the message
+    says where it is and the one command that brings it back."""
+
+    def __init__(self, memo_id: int) -> None:
+        super().__init__(f"memo {memo_id} is in the bin — vtn restore {memo_id}")
+        self.memo_id = memo_id
+
+
 class ExtractionError(Exception):
     """No LLM backend produced a usable result."""
 
@@ -281,11 +291,19 @@ def note(event: str, **fields: Any) -> None:
     eventlog.record(event, **fields)
 
 
-def require_memo(repo: Repository, memo_id: int) -> Memo:
-    """Finds a memo, or fails with something the user can act on."""
+def require_memo(repo: Repository, memo_id: int, *, binned_ok: bool = False) -> Memo:
+    """Finds a memo, or fails with something the user can act on. A memo in the
+    bin is not found by default, and says so rather than claiming it never
+    existed: every use case that works on a live memo goes through here, so
+    this one check is what keeps a binned memo from being read, filed,
+    extracted or chatted about by any front end. Only the few things that
+    exist for binned memos — restoring, deleting for good, describing — ask
+    for them with binned_ok."""
     memo = repo.memo(memo_id)
     if not memo:
         raise NotFound(f"no memo with id {memo_id}")
+    if memo.deleted_at and not binned_ok:
+        raise InBin(memo_id)
     return memo
 
 
@@ -1508,10 +1526,15 @@ def find_duplicate(repo: Repository, src: Path) -> Memo | None:
     re-exported, downloaded a second time — and the instant it was taped is what
     stays the same through all of that.
 
-    The lookup and nothing else. Whether a duplicate is worth stopping for is a
-    question for whoever is asking, and only a front end can put it to a
-    person."""
-    return repo.memo_by_recorded_at(audio.recorded_at(src))
+    Whether a duplicate is worth stopping for is a question for whoever is
+    asking, and only a front end can put it to a person. The exception is a
+    copy in the bin: that is not a question but a pointer, and processing the
+    file again would quietly make a second copy of something one command from
+    coming back, so it raises InBin instead of answering."""
+    stored = repo.memo_by_recorded_at(audio.recorded_at(src))
+    if stored is not None and stored.deleted_at:
+        raise InBin(stored.id)
+    return stored
 
 
 # the optional stages a youtube import can go through. Shorter than a
@@ -1566,8 +1589,12 @@ def find_youtube_duplicate(repo: Repository, video: YouTubeVideo) -> Memo | None
     by the canonical watch URL rather than the pasted spelling of it, so a
     short link and a full one find the same memo. The lookup and nothing else,
     for find_duplicate's reason: only a front end can ask a person whether a
-    duplicate was meant."""
-    return repo.memo_by_source_url(video.url)
+    duplicate was meant — and for its reason too, a copy in the bin raises
+    InBin rather than being answered."""
+    stored = repo.memo_by_source_url(video.url)
+    if stored is not None and stored.deleted_at:
+        raise InBin(stored.id)
+    return stored
 
 
 def youtube_heading(video: YouTubeVideo) -> str:
@@ -2058,6 +2085,7 @@ def _done_tasks(repo: Repository, memo_id: int) -> set[str]:
 def notes(repo: Repository, memo_id: int) -> str:
     """The notes as a person reads them, showing what has since been checked
     off on the memo's to-do list."""
+    require_memo(repo, memo_id)
     return render_notes(_extraction(repo, memo_id), _done_tasks(repo, memo_id))
 
 
@@ -2107,6 +2135,7 @@ def export_notes(repo: Repository, memo_id: int) -> Path:
 
 def notes_json(repo: Repository, memo_id: int) -> str:
     """The notes as a script reads them."""
+    require_memo(repo, memo_id)
     return json.dumps(_extraction(repo, memo_id).data, ensure_ascii=False)
 
 
@@ -2385,6 +2414,9 @@ def chat(repo: Repository, conversation_id: int, asked: str) -> ChatTurn:
     text = question(asked)
     convo = require_conversation(repo, conversation_id)
     if not convo.memo_ids:
+        binned = repo.binned_in_scope(conversation_id)
+        if binned:
+            raise InBin(binned[0])
         raise InvalidInput("every memo this conversation was about has been deleted")
     system = llm.chat_system(
         _chat_context(repo, convo), config.MY_NAME, datetime.date.today().isoformat()
@@ -2547,6 +2579,7 @@ def chats_json(repo: Repository, memo_id: int | None = None) -> str:
 def speakers(repo: Repository, memo_id: int) -> dict[str, str]:
     """Each voice in a memo and what it is currently called, for a screen asking
     which of them to put a name to."""
+    require_memo(repo, memo_id)
     return repo.display_names(memo_id)
 
 
@@ -2570,22 +2603,138 @@ def rename_memo(repo: Repository, memo_id: int, name: str) -> None:
 
 
 def delete_memo(repo: Repository, memo_id: int) -> str:
-    """Throws a memo away for good, reporting what it was called so the caller
-    can say what went. The transcript, the notes and the speakers go with it,
-    and so those speakers' voice fingerprints leave the pool later recordings
-    are matched against — a name only recognised from this one memo stops being
-    recognised at all.
+    """Moves a memo to the bin, reporting what it was called so the caller can
+    say what went. Nothing is removed: the transcript, notes, speakers, to-dos,
+    chats, the archived state and the wav all stay exactly as they were, and
+    `restore_memo` brings the memo back as it left. Until then it is in no
+    listing, and its speakers' voice fingerprints are out of the pool later
+    recordings are matched against — a name only recognised from this one memo
+    stops being recognised while it is in the bin, and is again once it is out.
+
+    Deleting a memo already in the bin is not an error, the same way archiving
+    an archived one is not: the request and the result already agree, and the
+    memo keeps the date it really went in."""
+    memo = require_memo(repo, memo_id, binned_ok=True)
+    repo.set_binned(memo_id, True)
+    return memo.filename
+
+
+def restore_memo(repo: Repository, memo_id: int) -> str:
+    """Takes a memo out of the bin and back where it was, reporting what it was
+    called. Nothing under it was rewritten while it sat there, so it returns
+    with its project, its archived state, its notes and its to-dos' checked
+    boxes as they were. Restoring a memo that is not in the bin is not an
+    error, for the reason deleting one already there is not."""
+    memo = require_memo(repo, memo_id, binned_ok=True)
+    repo.set_binned(memo_id, False)
+    return memo.filename
+
+
+def purge_memo(repo: Repository, memo_id: int) -> str:
+    """Throws a memo away for good, whether or not it is in the bin, reporting
+    what it was called so the caller can say what went. The transcript, the
+    notes and the speakers go with it, and with them the memo's place in any
+    conversation.
 
     Only the converted wav this app wrote is deleted from disk. The recording it
     was made from is left where it is: that copy is the user's own archive of
     the audio, and deleting a memo means dropping what was made of a recording,
-    not the recording itself."""
-    memo = require_memo(repo, memo_id)
+    not the recording itself. Asking first is the front end's job; nothing here
+    does, and nothing in the app calls this on its own — no age, no timer, no
+    startup sweep."""
+    memo = require_memo(repo, memo_id, binned_ok=True)
     repo.delete_memo(memo_id)
     # the row is what says a memo exists, so it goes first and the file follows:
     # a wav already removed by hand must not leave a memo that cannot be deleted
     Path(memo.wav_path).unlink(missing_ok=True)
     return memo.filename
+
+
+def binned_memos(repo: Repository) -> list[Memo]:
+    """What is in the bin, the memo sent there last first."""
+    return repo.binned()
+
+
+def binned_count(repo: Repository) -> int:
+    """How many memos are in the bin, for a sidebar to show."""
+    return repo.binned_count()
+
+
+def empty_bin(repo: Repository) -> int:
+    """Throws everything in the bin away for good and reports how many memos
+    went. Each one goes the way `purge_memo` sends one, so a wav already gone
+    from disk cannot leave the rest of the bin standing."""
+    doomed = repo.binned()
+    for memo in doomed:
+        purge_memo(repo, memo.id)
+    return len(doomed)
+
+
+def _audio_bytes(wav_path: str) -> int:
+    """How much disk a memo's own audio holds, nothing for a memo with none: a
+    video import has no wav, and one removed by hand has none left to count."""
+    try:
+        return Path(wav_path).stat().st_size if wav_path else 0
+    except OSError:
+        return 0
+
+
+def _size_text(size: int) -> str:
+    """A byte count as a person reads it, empty for none."""
+    if not size:
+        return ""
+    value = float(size)
+    for unit in ("B", "KB", "MB"):
+        if value < 1024:
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+@dataclass(frozen=True)
+class BinRow:
+    """One binned memo as the bin lists it."""
+
+    id: int
+    title: str
+    project: str
+    deleted: str
+    size: str
+    size_bytes: int
+
+
+def bin_rows(repo: Repository) -> list[BinRow]:
+    """The bin as rows both front ends lay out: what each memo is called, where
+    it was filed, when it went in and how much disk its audio is holding — the
+    last because the bin is where the space of a deleted recording stays until
+    somebody empties it."""
+    rows = []
+    for m in repo.binned():
+        size = _audio_bytes(m.wav_path)
+        rows.append(BinRow(m.id, m.filename, m.project, m.deleted_at or "", _size_text(size), size))
+    return rows
+
+
+def bin_text(repo: Repository) -> str:
+    """The bin as a person reads it, column-aligned. Empty when it is."""
+    rows = bin_rows(repo)
+    project_w = max((len(r.project) for r in rows), default=0)
+    return "\n".join(
+        f"{r.id:>4}  {r.deleted}  {r.size:>9}  {r.project:<{project_w}}  {r.title}"
+        for r in rows
+    )
+
+
+def bin_json(repo: Repository) -> str:
+    """The bin as a script reads it."""
+    return json.dumps(
+        [
+            {"id": r.id, "title": r.title, "project": r.project, "deleted_at": r.deleted,
+             "audio_bytes": r.size_bytes}
+            for r in bin_rows(repo)
+        ],
+        ensure_ascii=False,
+    )
 
 
 def archive_memo(repo: Repository, memo_id: int) -> str:
@@ -2634,6 +2783,7 @@ class MemoInfo:
     refined: bool
     edited: bool
     archived: bool
+    binned: bool = False
 
 
 def memo_info(repo: Repository, memo_id: int) -> MemoInfo:
@@ -2642,7 +2792,7 @@ def memo_info(repo: Repository, memo_id: int) -> MemoInfo:
     its notes over. A memo nobody has changed reads as updated when it was made,
     since a screen has to print something and "never" would misdescribe a
     recording that has been sitting there correct since the day it arrived."""
-    memo = require_memo(repo, memo_id)
+    memo = require_memo(repo, memo_id, binned_ok=True)
     return MemoInfo(
         filename=memo.filename,
         project=memo.project,
@@ -2655,6 +2805,7 @@ def memo_info(repo: Repository, memo_id: int) -> MemoInfo:
         refined=any(s.refined_text is not None for s in repo.segments(memo_id)),
         edited=bool(repo.notes_md(memo_id)),
         archived=bool(memo.archived_at),
+        binned=bool(memo.deleted_at),
     )
 
 
@@ -2681,6 +2832,10 @@ def memo_info_text(repo: Repository, memo_id: int) -> str:
         ("edited", _yes_no(info.edited)),
         ("archived", _yes_no(info.archived)),
     ]
+    if info.binned:
+        # only said when it is true: the one command that describes a binned
+        # memo has to say so, and every other memo has nothing to add
+        rows.append(("in bin", f"yes — vtn restore {memo_id}"))
     return "\n".join(f"{label + ':':<10}{value}" for label, value in rows)
 
 
@@ -2808,6 +2963,7 @@ def rename_speaker(repo: Repository, memo_id: int, label: str, name: str) -> Non
     speaker = name.strip()
     if not speaker:
         raise InvalidInput("a speaker needs a name")
+    require_memo(repo, memo_id)
     if not repo.rename_speaker(memo_id, label, speaker):
         raise NotFound(f"no speaker {label} in memo {memo_id}")
 
