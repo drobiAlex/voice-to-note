@@ -129,6 +129,7 @@ async def test_the_app_opens_on_the_projects_that_exist(repo):
             "personal (1)",
             "work (1)",
             "Archived (0)",
+            "Bin (0)",
         ]
 
 
@@ -549,7 +550,7 @@ async def test_saving_an_emptied_note_says_so_and_keeps_what_was_typed(repo):
         await pilot.pause()
 
         assert showing(pilot.app, "#editor")
-        assert [str(n.message) for n in pilot.app._notifications] == ["a note needs something in it"]
+        assert said(pilot)[-1:] == ["a note needs something in it"]
         assert services.notes_markdown(repo, work).startswith("# Sprint sync")
 
 
@@ -639,6 +640,7 @@ async def test_typing_a_new_project_refiles_the_memo_and_moves_the_count(repo):
             "personal (1)",
             "side (1)",
             "Archived (0)",
+            "Bin (0)",
         ]
 
 
@@ -805,7 +807,7 @@ async def test_a_speaker_name_of_nothing_is_refused_without_losing_the_modal(rep
         await pilot.pause()
 
         assert showing(pilot.app, "#speaker-name")
-        assert [str(n.message) for n in pilot.app._notifications] == ["a speaker needs a name"]
+        assert said(pilot)[-1:] == ["a speaker needs a name"]
         assert services.speakers(repo, work) == {"S1": "S1"}
 
 
@@ -916,49 +918,27 @@ async def test_the_footer_offers_the_menu_and_rename_as_soon_as_a_row_is_pointed
 
 
 @pytest.mark.asyncio
-async def test_delete_asks_by_name_before_throwing_the_pointed_at_memo_away(repo):
+async def test_delete_moves_the_pointed_at_memo_to_the_bin_without_asking_and_says_how_to_undo(
+    repo,
+):
     work, home = seed(repo)
 
     async with MemoApp(repo).run_test() as pilot:
         await point_at_memo(pilot, "work")
         await pilot.press("delete")
         await pilot.pause()
-        assert "standup.m4a" in str(
-            pilot.app.screen.query_one("#confirm-delete", Static).content
-        )
 
-        await pilot.press("y")
-        await pilot.pause()
-
+        assert not showing(pilot.app, "#confirm-delete")
         assert [m.id for m in services.memos(repo)] == [home]
         assert memo_names(pilot.app) == []
         assert labels(pilot.app.query_one("#projects", ListView)) == [
             "All (1)",
             "personal (1)",
             "Archived (0)",
+            "Bin (1)",
         ]
-        assert "deleted standup.m4a" in [
-            str(n.message) for n in pilot.app._notifications
-        ]
-        assert work not in [m.id for m in services.memos(repo)]
-
-
-@pytest.mark.asyncio
-async def test_declining_the_delete_leaves_the_memo_where_it_was(repo):
-    work, _home = seed(repo)
-
-    async with MemoApp(repo).run_test() as pilot:
-        await point_at_memo(pilot, "work")
-        await pilot.press("backspace")  # the other key a hand reaches to delete with
-        await pilot.pause()
-        assert showing(pilot.app, "#confirm-delete")
-
-        await pilot.press("n")
-        await pilot.pause()
-
-        assert not showing(pilot.app, "#confirm-delete")
-        assert [m.filename for m in services.memos(repo) if m.id == work] == ["standup.m4a"]
-        assert memo_names(pilot.app) == ["standup.m4a"]
+        assert 'moved "standup.m4a" to the bin — u to undo' in said(pilot)
+        assert repo.memo(work) is not None
 
 
 @pytest.mark.asyncio
@@ -1034,11 +1014,11 @@ async def test_a_memo_name_of_nothing_is_refused_without_losing_the_modal(repo):
 
 async def open_archive(pilot) -> None:
     """Opens the archive the way a person does: down the sidebar to the row
-    under every project, and Enter. It is the last row, wherever the projects
-    above it happen to end."""
+    under every project, and Enter. It is the row above the bin, wherever the
+    projects above it happen to end."""
     sidebar = pilot.app.query_one("#projects", ListView)
     sidebar.focus()
-    sidebar.index = len(sidebar.children) - 1
+    sidebar.index = len(sidebar.children) - 2
     await pilot.pause()
     await pilot.press("enter")
     await pilot.pause()
@@ -1075,6 +1055,7 @@ async def test_the_sidebar_offers_the_archive_and_counts_what_is_in_it(repo):
             "personal (1)",
             "work (1)",
             "Archived (0)",
+            "Bin (0)",
         ]
 
         await point_at_memo(pilot, "work")
@@ -1087,6 +1068,7 @@ async def test_the_sidebar_offers_the_archive_and_counts_what_is_in_it(repo):
             "All (1)",
             "personal (1)",
             "Archived (1)",
+            "Bin (0)",
         ]
 
 
@@ -1394,6 +1376,7 @@ async def test_renaming_a_project_renames_it_in_the_sidebar(repo):
             "home (1)",
             "work (1)",
             "Archived (0)",
+            "Bin (0)",
         ]
 
 
@@ -1495,6 +1478,7 @@ async def test_a_renamed_project_is_found_again_under_its_tidied_name(repo):
             "client (1)",
             "personal (1)",
             "Archived (0)",
+            "Bin (0)",
         ]
         assert memo_names(pilot.app) == ["standup.m4a"]
 
@@ -1519,6 +1503,7 @@ async def test_emptying_the_other_project_is_refused_without_taking_the_app_down
             "All (1)",
             "other (1)",
             "Archived (0)",
+            "Bin (0)",
         ]
         assert [str(n.message) for n in pilot.app._notifications] == [
             "other is where emptied projects go"
@@ -1541,6 +1526,7 @@ async def test_emptying_a_project_asks_first(repo):
             "personal (1)",
             "work (1)",
             "Archived (0)",
+            "Bin (0)",
         ]
 
 
@@ -1561,6 +1547,7 @@ async def test_agreeing_to_empty_a_project_files_its_memos_under_other(repo):
             "other (1)",
             "work (1)",
             "Archived (0)",
+            "Bin (0)",
         ]
 
 
@@ -1583,6 +1570,7 @@ async def test_declining_to_empty_a_project_leaves_every_memo_where_it_was(repo)
             "personal (1)",
             "work (1)",
             "Archived (0)",
+            "Bin (0)",
         ]
 
 
@@ -2054,7 +2042,7 @@ async def test_writing_the_notes_again_extracts_them_for_the_memo_on_screen(repo
         await from_menu(pilot, "space", "w")
         await finish_jobs(pilot)
 
-        assert said(pilot) == ["writing notes: memo 2 …", "notes written for memo 2 via claude"]
+        assert said(pilot) == ["writing notes: memo 2 \"shopping.m4a\" …", "notes written for memo 2 via claude"]
         assert "Shopping list" in notes_pane(pilot).document.source
 
 
@@ -2074,7 +2062,7 @@ async def test_fixing_transcription_mistakes_repairs_the_transcript(repo, monkey
         await from_menu(pilot, "space", "f")
         await finish_jobs(pilot)
 
-        assert said(pilot) == ["fixing transcript: memo 1 …", "transcript of memo 1 fixed"]
+        assert said(pilot) == ["fixing transcript: memo 1 \"standup.m4a\" …", "transcript of memo 1 fixed"]
         assert "We ship on Friday." in transcript(pilot)
 
 
@@ -2097,7 +2085,7 @@ async def test_a_second_job_on_one_memo_is_refused_rather_than_queued(repo, monk
         await from_menu(pilot, "space", "w")
         await pilot.pause()
 
-        assert said(pilot) == ["writing notes: memo 1 …", "memo 1 is already busy"]
+        assert said(pilot) == ["writing notes: memo 1 \"standup.m4a\" …", 'memo 1 "standup.m4a" is already busy']
 
         holding.set()
         await finish_jobs(pilot)
@@ -2124,7 +2112,7 @@ async def test_two_memos_can_be_worked_on_at_the_same_time(repo, monkeypatch):
         await pilot.pause()
 
         assert pilot.app.jobs == {work, home}
-        assert "memo 2 is already busy" not in said(pilot)
+        assert 'memo 2 "shopping.m4a" is already busy' not in said(pilot)
 
         holding.set()
         await finish_jobs(pilot)
@@ -2145,7 +2133,7 @@ async def test_a_gateway_that_is_down_says_so_instead_of_taking_the_app_down(rep
         await from_menu(pilot, "space", "w")
         await finish_jobs(pilot)
 
-        assert said(pilot) == ["writing notes: memo 1 …", "ollama is not running"]
+        assert said(pilot) == ["writing notes: memo 1 \"standup.m4a\" …", "ollama is not running"]
         assert pilot.app.jobs == set()
 
 
@@ -2168,7 +2156,7 @@ async def test_a_memo_can_be_worked_on_again_once_its_job_has_finished(repo, mon
         await finish_jobs(pilot)
 
         assert runs == [work, work]
-        assert "memo 1 is already busy" not in said(pilot)
+        assert 'memo 1 "standup.m4a" is already busy' not in said(pilot)
 
 
 @pytest.mark.asyncio
@@ -2427,7 +2415,7 @@ async def test_the_answer_comes_back_on_screen(repo, monkeypatch):
         await finish_jobs(pilot)
 
         assert "You asked: When do they ship?" in answer_shown(pilot)
-        assert said(pilot) == ["answering: memo 1 …", "memo 1 answered via claude"]
+        assert said(pilot) == ["answering: memo 1 \"standup.m4a\" …", "memo 1 answered via claude"]
 
 
 @pytest.mark.asyncio
@@ -2574,7 +2562,7 @@ async def test_a_typed_speaker_count_reaches_rediarization(repo, monkeypatch):
         await finish_jobs(pilot)
 
         assert seen["num_speakers"] == 2
-        assert said(pilot) == ["identifying speakers: memo 1 …", "speakers identified in memo 1"]
+        assert said(pilot) == ["identifying speakers: memo 1 \"standup.m4a\" …", "speakers identified in memo 1"]
 
 
 @pytest.mark.asyncio
@@ -2747,6 +2735,7 @@ async def test_a_processed_recording_joins_the_project_on_screen(repo, tmp_path,
             "personal (1)",
             "work (2)",
             "Archived (0)",
+            "Bin (0)",
         ]
 
 
@@ -4648,6 +4637,7 @@ async def test_a_memo_another_process_stored_turns_up_without_a_keypress(repo, m
             "personal (1)",
             "work (2)",
             "Archived (0)",
+            "Bin (0)",
         ]
 
 
@@ -4958,3 +4948,433 @@ async def test_the_chat_key_is_offered_only_while_a_memo_is_pointed_at(repo):
         assert pilot.app.check_action("chat", ()) is False
         assert "chat" in tui_app.MEMO_ACTIONS
         assert any(keys == ("c",) for keys, _a, _l in tui_app._MEMO_MENU)
+
+
+# --- the key acts on what is highlighted, never on what was opened earlier ---
+
+
+def two_work_memos(repo) -> tuple[int, int]:
+    """Two memos in one project, listed newest first: the second comes back
+    first in the list and the first one second."""
+    first = repo.create_memo(
+        filename="planning.m4a", wav_path="/tmp/p.wav", duration_s=1.0, language="en",
+        segments=[Segment(0, 1000, "plan the sprint", speaker="S1")],
+        speakers=[Speaker("S1")], project="work",
+    )
+    second = repo.create_memo(
+        filename="retro.m4a", wav_path="/tmp/r.wav", duration_s=1.0, language="en",
+        segments=[Segment(0, 1000, "what went well", speaker="S1")],
+        speakers=[Speaker("S1")], project="work",
+    )
+    return first, second
+
+
+async def open_then_highlight_the_other(pilot, opened: str, highlighted: str) -> None:
+    """The owner's exact sequence: open one memo, then move the highlight to
+    another without opening it, leaving the first still showing below."""
+    pilot.app.show_project("work")
+    table = memo_table(pilot.app)
+    table.focus()
+    await pilot.pause()
+    table.move_cursor(row=[r[0] for r in memo_rows(pilot.app)].index(opened))
+    await pilot.press("enter")
+    await pilot.pause()
+    table.move_cursor(row=[r[0] for r in memo_rows(pilot.app)].index(highlighted))
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_delete_acts_on_the_highlighted_memo_not_the_one_opened_earlier(repo):
+    opened, highlighted = two_work_memos(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_then_highlight_the_other(pilot, "planning.m4a", "retro.m4a")
+        assert pilot.app.memo_id == opened
+
+        await pilot.press("delete")
+        await pilot.pause()
+        if showing(pilot.app, "#confirm-delete"):
+            await pilot.press("y")
+            await pilot.pause()
+
+        assert [m.id for m in services.memos(repo)] == [opened]
+        assert pilot.app.memo_id == opened
+
+
+@pytest.mark.asyncio
+async def test_archive_acts_on_the_highlighted_memo_not_the_one_opened_earlier(repo):
+    opened, highlighted = two_work_memos(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_then_highlight_the_other(pilot, "planning.m4a", "retro.m4a")
+        await from_menu(pilot, "space", "h")
+
+        assert [m.id for m in services.memos(repo, archived=True)] == [highlighted]
+        assert [m.id for m in services.memos(repo)] == [opened]
+
+
+@pytest.mark.asyncio
+async def test_move_acts_on_the_highlighted_memo_not_the_one_opened_earlier(repo):
+    opened, highlighted = two_work_memos(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_then_highlight_the_other(pilot, "planning.m4a", "retro.m4a")
+        await pilot.press("m")
+        await pilot.pause()
+        pilot.app.screen.query_one("#project-name", Input).value = "side"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert repo.memo(highlighted).project == "side"
+        assert repo.memo(opened).project == "work"
+
+
+@pytest.mark.asyncio
+async def test_rename_acts_on_the_highlighted_memo_not_the_one_opened_earlier(repo):
+    opened, highlighted = two_work_memos(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_then_highlight_the_other(pilot, "planning.m4a", "retro.m4a")
+        await pilot.press("r")
+        await pilot.pause()
+        assert pilot.app.screen.query_one("#memo-rename", Input).value == "retro.m4a"
+        pilot.app.screen.query_one("#memo-rename", Input).value = "Retro"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert repo.memo(highlighted).filename == "Retro"
+        assert repo.memo(opened).filename == "planning.m4a"
+
+
+# --- the bin ----------------------------------------------------------------
+
+
+async def open_bin(pilot) -> None:
+    """Opens the bin the way a person does: the last row of the sidebar, and
+    Enter."""
+    sidebar = pilot.app.query_one("#projects", ListView)
+    sidebar.focus()
+    sidebar.index = len(sidebar.children) - 1
+    await pilot.pause()
+    await pilot.press("enter")
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_u_takes_the_last_delete_back_and_names_the_memo(repo):
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await point_at_memo(pilot, "work")
+        await pilot.press("delete")
+        await pilot.pause()
+        assert memo_names(pilot.app) == []
+
+        await pilot.press("u")
+        await pilot.pause()
+
+        assert memo_names(pilot.app) == ["standup.m4a"]
+        assert repo.memo(work).deleted_at is None
+        assert 'restored "standup.m4a"' in said(pilot)
+        assert labels(pilot.app.query_one("#projects", ListView))[-1] == "Bin (0)"
+
+
+@pytest.mark.asyncio
+async def test_the_undo_key_is_offered_only_once_something_has_been_deleted(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await point_at_memo(pilot, "work")
+        assert await missing(pilot, ["u"]) == ["u"]
+        await pilot.press("delete")
+        await pilot.pause()
+        pilot.app.show_everything()
+        memo_table(pilot.app).focus()
+        await pilot.pause()
+
+        assert pilot.app.check_action("undo", ()) is True
+
+
+@pytest.mark.asyncio
+async def test_the_bin_row_lists_what_was_deleted_and_nothing_else(repo):
+    work, home = seed(repo)
+    services.delete_memo(repo, work)
+
+    async with MemoApp(repo).run_test() as pilot:
+        assert labels(pilot.app.query_one("#projects", ListView))[-2:] == [
+            "Archived (0)",
+            "Bin (1)",
+        ]
+
+        await open_bin(pilot)
+
+        assert memo_names(pilot.app) == ["standup.m4a"]
+        assert pilot.app.sub_title == "bin"
+
+
+@pytest.mark.asyncio
+async def test_a_memo_in_the_bin_cannot_be_opened_or_filed_from_there(repo):
+    work, _home = seed(repo)
+    services.delete_memo(repo, work)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_bin(pilot)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert pilot.app.memo_id is None
+        assert "in the bin" in " ".join(said(pilot))
+        # every other memo key has nothing to act on, rather than failing
+        for action in ("title_memo", "move_memo", "toggle_archive", "extract", "ask"):
+            await pilot.app.run_action(action)
+        await pilot.pause()
+        assert pilot.app.screen is pilot.app.screen_stack[0]
+        assert repo.memo(work).filename == "standup.m4a"
+
+
+@pytest.mark.asyncio
+async def test_u_in_the_bin_restores_the_memo_under_the_cursor(repo):
+    work, _home = seed(repo)
+    services.delete_memo(repo, work)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_bin(pilot)
+        await pilot.press("u")
+        await pilot.pause()
+
+        assert memo_names(pilot.app) == []
+        assert [m.id for m in services.memos(repo, project="work")] == [work]
+        assert labels(pilot.app.query_one("#projects", ListView))[-1] == "Bin (0)"
+
+
+@pytest.mark.asyncio
+async def test_deleting_for_good_from_the_bin_names_the_memo_and_waits_for_a_yes(repo):
+    work, _home = seed(repo)
+    services.delete_memo(repo, work)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_bin(pilot)
+        await pilot.press("delete")
+        await pilot.pause()
+
+        assert "standup.m4a" in str(
+            pilot.app.screen.query_one("#confirm-delete", Static).content
+        )
+        assert repo.memo(work) is not None
+
+        await pilot.press("n")
+        await pilot.pause()
+        assert repo.memo(work) is not None
+
+        await pilot.press("delete")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+
+        assert repo.memo(work) is None
+        assert memo_names(pilot.app) == []
+
+
+@pytest.mark.asyncio
+async def test_emptying_the_bin_states_the_count_and_only_a_yes_removes_anything(repo):
+    work, home = seed(repo)
+    services.delete_memo(repo, work)
+    services.delete_memo(repo, home)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_bin(pilot)
+        await pilot.app.run_action("empty_bin")
+        await pilot.pause()
+
+        assert "2 memos" in str(
+            pilot.app.screen.query_one("#confirm-empty-bin", Static).content
+        )
+        await pilot.press("n")
+        await pilot.pause()
+        assert len(services.binned_memos(repo)) == 2
+
+        await pilot.app.run_action("empty_bin")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+
+        assert services.binned_memos(repo) == []
+        assert repo.memo(work) is None
+
+
+@pytest.mark.asyncio
+async def test_a_delete_made_by_another_process_leaves_the_list_and_counts_the_bin(repo):
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        assert memo_names(pilot.app) == ["standup.m4a"]
+
+        outside = Repository(repo.path)
+        try:
+            services.delete_memo(outside, work)
+        finally:
+            outside.close()
+        pilot.app._take_in_outside_writes()
+        await pilot.pause()
+
+        assert memo_names(pilot.app) == []
+        assert labels(pilot.app.query_one("#projects", ListView))[-1] == "Bin (1)"
+
+
+@pytest.mark.asyncio
+async def test_a_restore_made_by_another_process_returns_the_memo_to_its_list(repo):
+    work, _home = seed(repo)
+    services.delete_memo(repo, work)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_bin(pilot)
+        assert memo_names(pilot.app) == ["standup.m4a"]
+
+        outside = Repository(repo.path)
+        try:
+            services.restore_memo(outside, work)
+        finally:
+            outside.close()
+        pilot.app._take_in_outside_writes()
+        await pilot.pause()
+
+        assert memo_names(pilot.app) == []
+        assert labels(pilot.app.query_one("#projects", ListView))[-1] == "Bin (0)"
+
+
+@pytest.mark.asyncio
+async def test_the_open_memo_is_closed_when_another_process_sends_it_to_the_bin(repo):
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await open_memo(pilot, work)
+
+        outside = Repository(repo.path)
+        try:
+            services.delete_memo(outside, work)
+        finally:
+            outside.close()
+        pilot.app._take_in_outside_writes()
+        await pilot.pause()
+
+        assert pilot.app.memo_id is None
+
+
+@pytest.mark.asyncio
+async def test_space_in_the_bin_offers_restore_delete_for_good_and_emptying(repo):
+    work, _home = seed(repo)
+    services.delete_memo(repo, work)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_bin(pilot)
+        await pilot.press("space")
+        await pilot.pause()
+
+        menu = pilot.app.screen
+        shown = " ".join(str(item.query_one(Label).content) for item in menu.query("ListItem"))
+        assert "Restore" in shown and "Delete for good" in shown and "Empty the bin" in shown
+        assert "Rename" not in shown
+
+
+@pytest.mark.asyncio
+async def test_the_memo_keys_are_not_offered_in_the_bin(repo):
+    work, _home = seed(repo)
+    services.delete_memo(repo, work)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_bin(pilot)
+
+        assert pilot.app.check_action("title_memo", ()) is False
+        assert pilot.app.check_action("move_memo", ()) is False
+        assert pilot.app.check_action("undo", ()) is True
+        assert pilot.app.check_action("empty_bin", ()) is True
+
+
+# --- focus decides which memo a key means -----------------------------------
+
+
+async def focus_a_notes_pane(pilot) -> None:
+    """Moves the focus into the panes of the open memo, as clicking into its
+    notes does."""
+    pilot.app.query_one("#notes").query_one(Markdown).focus()
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_with_the_focus_in_the_open_memos_notes_edit_notes_means_that_memo(repo):
+    opened, _highlighted = two_work_memos(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_then_highlight_the_other(pilot, "planning.m4a", "retro.m4a")
+        await focus_a_notes_pane(pilot)
+        assert pilot.app._focus_in_detail()
+
+        await pilot.press("e")
+        await pilot.pause()
+
+        assert 'editing the notes of "planning.m4a"' in said(pilot)
+
+
+@pytest.mark.asyncio
+async def test_with_the_focus_in_the_open_memos_notes_naming_a_speaker_means_that_memo(repo):
+    two_work_memos(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_then_highlight_the_other(pilot, "planning.m4a", "retro.m4a")
+        await focus_a_notes_pane(pilot)
+
+        await pilot.app.run_action("rename_speaker")
+        await pilot.pause()
+
+        assert 'naming a speaker in "planning.m4a"' in said(pilot)
+
+
+@pytest.mark.asyncio
+async def test_with_the_focus_in_the_open_memos_notes_extract_means_that_memo(repo, monkeypatch):
+    opened, highlighted = two_work_memos(repo)
+    seen = []
+
+    def extract(_repo, memo_id, force=False):
+        seen.append(memo_id)
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", extract)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_then_highlight_the_other(pilot, "planning.m4a", "retro.m4a")
+        await focus_a_notes_pane(pilot)
+        await pilot.app.run_action("extract")
+        await finish_jobs(pilot)
+
+        assert seen == [opened]
+        assert 'writing notes: memo 1 "planning.m4a" …' in said(pilot)
+
+
+@pytest.mark.asyncio
+async def test_toggling_raw_text_always_flips_the_open_memo_even_with_another_highlighted(repo):
+    opened, _highlighted = two_work_memos(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_then_highlight_the_other(pilot, "planning.m4a", "retro.m4a")
+        await pilot.app.run_action("toggle_raw")
+        await pilot.pause()
+
+        assert pilot.app.memo_id == opened
+        assert "plan the sprint" in transcript(pilot)
+
+
+@pytest.mark.asyncio
+async def test_the_notice_for_a_move_and_a_rename_names_the_memo_they_changed(repo):
+    two_work_memos(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_then_highlight_the_other(pilot, "planning.m4a", "retro.m4a")
+        pilot.app._move_memo(2, "side")
+        pilot.app._title_memo(1, "Planning")
+        await pilot.pause()
+
+        assert 'moved "retro.m4a" to side' in said(pilot)
+        assert 'renamed "planning.m4a" to "Planning"' in said(pilot)

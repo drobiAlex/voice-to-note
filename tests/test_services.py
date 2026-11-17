@@ -1093,21 +1093,21 @@ def test_renaming_a_memo_to_nothing_is_refused(repo, wav, name):
     assert repo.memo(memo_id).filename == "standup.m4a"
 
 
-def test_deleting_a_memo_takes_the_wav_it_converted_with_it(repo, wav):
+def test_deleting_a_memo_for_good_takes_the_wav_it_converted_with_it(repo, wav):
     memo_id = add_memo(repo, wav, filename="standup.m4a")
 
-    assert services.delete_memo(repo, memo_id) == "standup.m4a"
+    assert services.purge_memo(repo, memo_id) == "standup.m4a"
     assert repo.memo(memo_id) is None
     assert not wav.exists()
 
 
-def test_deleting_a_memo_whose_wav_is_already_gone_still_removes_it(repo, wav):
+def test_deleting_a_memo_for_good_whose_wav_is_already_gone_still_removes_it(repo, wav):
     # the stored row is what says a memo exists, so a file somebody cleared out
     # by hand must not leave a memo nobody can delete
     memo_id = add_memo(repo, wav)
     wav.unlink()
 
-    services.delete_memo(repo, memo_id)
+    services.purge_memo(repo, memo_id)
 
     assert repo.memo(memo_id) is None
 

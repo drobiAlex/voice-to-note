@@ -124,6 +124,10 @@ class Memo:
     # the canonical video URL, which is how a video offered a second time is
     # recognised as one already imported. Empty for a memo made from audio
     source_url: str | None = None
+    # when somebody sent this memo to the bin: every listing leaves it out, and
+    # everything stored under it is exactly as it was. Empty is a memo that has
+    # never been deleted, or one that has been restored
+    deleted_at: str | None = None
 
 
 @dataclass(frozen=True)

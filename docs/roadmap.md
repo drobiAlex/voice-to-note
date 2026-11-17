@@ -43,6 +43,7 @@ What vtn can do today, and what has been planned but not built.
 - [x] Organise memos with projects and tags; rename, move and delete them from the list or the command line
 - [x] See every memo at once in the TUI, sorted by creation or last update
 - [x] Archive a memo instead of deleting it (`vtn archive`, `vtn list --archived`)
+- [x] Delete moves a memo to a bin that nothing empties but you (`vtn restore`, `vtn bin`, `u` in the TUI)
 
 ### Agents and scripting
 
