@@ -325,6 +325,7 @@ class Repository:
         tag: str | None,
         order: str = "created",
         archived: bool = False,
+        binned: bool = False,
     ) -> tuple[str, tuple]:
         """How a listing is narrowed and ordered, as SQL and the values it
         reads: the plain list and the one carrying each memo's state are
@@ -336,7 +337,8 @@ class Repository:
         view showing both would leave the archiving no visible effect at all.
         A memo in the bin is in neither, whatever its archived state: the bin
         has a listing of its own (`binned`), and the archived state a memo went
-        in with is what it comes back out to.
+        in with is what it comes back out to. Asking for the bin is asking for
+        that listing and no other, whatever else is asked.
 
         A memo nobody has touched carries no updated_at at all, so ordering by
         it falls back to created_at through COALESCE — the same rule
@@ -350,10 +352,13 @@ class Repository:
         order is a name only this app's own code passes, never one a person
         types, so a value neither order recognises is a caller's bug and
         raises rather than silently falling back to one of the two it does."""
-        where = [
-            "deleted_at IS NULL",
-            "archived_at IS NOT NULL" if archived else "archived_at IS NULL",
-        ]
+        if binned:
+            where = ["deleted_at IS NOT NULL"]
+        else:
+            where = [
+                "deleted_at IS NULL",
+                "archived_at IS NOT NULL" if archived else "archived_at IS NULL",
+            ]
         params: list = []
         if project is not None:
             where.append("project=?")
@@ -384,13 +389,14 @@ class Repository:
         order: str = "created",
         *,
         archived: bool = False,
+        binned: bool = False,
     ) -> list[Memo]:
         """Every memo, newest first whichever order asked for, narrowed to a
         project, to a tag its notes carry, or to both at once. Tags are matched
         whole and whatever case they were written in; a memo nobody has
         extracted has no tags to be found by. Archived memos answer only when
-        the archive is what was asked for."""
-        tail, params = self._narrowed(project, tag, order, archived)
+        the archive is what was asked for, and binned ones only when the bin is."""
+        tail, params = self._narrowed(project, tag, order, archived, binned)
         return [
             _memo(r)
             for r in self.con.execute(f"SELECT {MEMO_COLUMNS} FROM memos" + tail, params)
@@ -403,6 +409,7 @@ class Repository:
         order: str = "created",
         *,
         archived: bool = False,
+        binned: bool = False,
     ) -> list[MemoListing]:
         """Every memo a list shows, narrowed and ordered the same ways as
         `memos`, each one carrying how many voices are in it, how much of what
@@ -413,7 +420,7 @@ class Repository:
         list at once and redraws it after every job, so counting each row's
         speakers, to-dos and repairs on its own would cost a query per row on
         screen."""
-        tail, params = self._narrowed(project, tag, order, archived)
+        tail, params = self._narrowed(project, tag, order, archived, binned)
         rows = self.con.execute(
             f"SELECT {MEMO_COLUMNS},"
             " (SELECT count(*) FROM speakers s WHERE s.memo_id=memos.id) AS speakers,"
@@ -683,10 +690,13 @@ class Repository:
     def archived_count(self) -> int:
         """How many memos are in the archive. A sidebar shows the drawer with
         its size beside it whether or not anybody opens it, and that is one
-        count rather than a listing nothing on screen would read."""
+        count rather than a listing nothing on screen would read. A memo in the
+        bin that was archived before it went is in the bin's count, not here:
+        the drawer's number has to be the length of the drawer's list."""
         return int(
             self.con.execute(
                 "SELECT count(*) FROM memos WHERE archived_at IS NOT NULL"
+                " AND deleted_at IS NULL"
             ).fetchone()[0]
         )
 
@@ -1145,7 +1155,9 @@ class Repository:
         params: tuple = ()
         if memo_id is not None:
             where.append(
-                "c.id IN (SELECT conversation_id FROM conversation_memos WHERE memo_id=?)"
+                "c.id IN (SELECT x.conversation_id FROM conversation_memos x"
+                " JOIN memos mm ON mm.id=x.memo_id"
+                " WHERE x.memo_id=? AND mm.deleted_at IS NULL)"
             )
             params = (memo_id,)
         clause = " WHERE " + " AND ".join(where)

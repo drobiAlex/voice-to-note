@@ -830,10 +830,11 @@ class RenameMemo(ModalScreen[None]):
 
 
 class ConfirmDelete(ModalScreen[bool]):
-    """Stands between a stray keypress and a memo nobody can get back. The
-    transcript, the notes and the named voices go with it, so the question
-    names the memo it is about: the row under the cursor is not always the one
-    somebody thinks they are pointing at."""
+    """Stands between a stray keypress and a memo nobody can get back — which
+    only the bin's own delete-forever is, since an ordinary delete is undone
+    by a keypress. The transcript, the notes and the named voices go with it,
+    so the question names the memo it is about: the row under the cursor is
+    not always the one somebody thinks they are pointing at."""
 
     BINDINGS = [("y,enter", "delete", "Delete it"), ("n,escape", "keep", "Keep it")]
 
@@ -845,7 +846,7 @@ class ConfirmDelete(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         """Says what goes, then asks."""
         yield Static(
-            f"Delete memo — {self.filename}? It cannot be brought back.  (y / n)",
+            f"Delete memo — {self.filename} — for good? It cannot be brought back.  (y / n)",
             id="confirm-delete",
         )
 
@@ -855,6 +856,36 @@ class ConfirmDelete(ModalScreen[bool]):
 
     def action_keep(self) -> None:
         """Leaves the memo where it is."""
+        self.dismiss(False)
+
+
+class ConfirmEmptyBin(ModalScreen[bool]):
+    """Stands between a stray keypress and everything in the bin going at once.
+    The question carries the count, because how much is about to go is the
+    one fact that tells somebody whether to say yes."""
+
+    BINDINGS = [("y,enter", "empty", "Empty it"), ("n,escape", "keep", "Keep them")]
+
+    def __init__(self, count: int) -> None:
+        """Opens on how many memos are about to go."""
+        super().__init__()
+        self.count = count
+
+    def compose(self) -> ComposeResult:
+        """Says how many go and that it is final, then asks."""
+        noun = "memo" if self.count == 1 else "memos"
+        yield Static(
+            f"Delete {self.count} {noun} in the bin for good? They cannot be brought back."
+            "  (y / n)",
+            id="confirm-empty-bin",
+        )
+
+    def action_empty(self) -> None:
+        """Lets the bin be emptied."""
+        self.dismiss(True)
+
+    def action_keep(self) -> None:
+        """Leaves the bin as it is."""
         self.dismiss(False)
 
 
@@ -1808,7 +1839,16 @@ _MEMO_MENU: tuple[MenuRow, ...] = (
     (("o",), "toggle_raw", "Original / fixed transcript"),
     (("d",), "memo_info", "Details"),
     (("h",), "toggle_archive", "Archive (hide) / bring back"),
-    (("delete", "backspace"), "delete_memo", "Delete…"),
+    (("delete", "backspace"), "delete_memo", "Move to the bin"),
+    (("u",), "undo", "Undo the last delete"),
+)
+
+# what can be done inside the bin, under space there: the same two keys that
+# delete and undo elsewhere, now meaning delete for good and restore
+_BIN_MENU: tuple[MenuRow, ...] = (
+    (("u",), "undo", "Restore"),
+    (("delete", "backspace"), "delete_memo", "Delete for good…"),
+    ((), "empty_bin", "Empty the bin…"),
 )
 
 # what can be done to the project the sidebar cursor is on, under space there
@@ -1995,6 +2035,10 @@ EVERYTHING = ""
 # happened to call Archived
 ARCHIVED = " "
 
+# the sidebar row for the bin, named the same way and for the same reason: two
+# spaces strip to nothing, which no project name can
+BIN = "  "
+
 # how a row says work is running on it: a block travelling along a short bar,
 # beside the word for what is being done. The bar is drawn out of characters
 # rather than being a Rich progress bar, whose pulse is carried entirely in
@@ -2078,9 +2122,11 @@ class MemoApp(App[None]):
         Binding("m", "move_memo", "Move", show=False),
         Binding("a", "ask", "Ask", show=False),
         # the two keys a file manager deletes with, since either is what a hand
-        # reaches for; it always asks first, naming the memo
+        # reaches for. A delete goes to the bin and asks nothing, since u takes
+        # it back; inside the bin the same keys delete for good, and ask
         Binding("delete", "delete_memo", "Delete", show=False),
         Binding("backspace", "delete_memo", "Delete", show=False),
+        Binding("u", "undo", "Undo delete", show=False),
         Binding("n", "process", "New recording"),
         Binding("y", "youtube", "From YouTube", show=False),
         Binding("slash", "find_tag", "Search tags", show=False),
@@ -2117,6 +2163,16 @@ class MemoApp(App[None]):
         # away is meant to be gone from the list, so a view holding both at once
         # would leave the archiving no visible effect at all
         self.archived = False
+        # whether the list is the bin. Exclusive with the others for the same
+        # reason, and with one more consequence: a binned memo cannot be read,
+        # filed or asked about, so while this is set no memo key has a memo to
+        # act on and the only things left are the bin's own
+        self.binview = False
+        # the memos this session has sent to the bin, the latest last, for the
+        # key that takes a delete back. Ids rather than a lookup of the newest
+        # row in the bin: another process may have binned something since, and
+        # an undo that restored somebody else's delete would be a surprise
+        self.deleted_here: list[int] = []
         # what has work running on it, one job each: two passes over the same
         # thing would race each other's writes. A memo already stored is keyed by
         # its id, a recording still being brought in by the path it came from,
@@ -2224,21 +2280,47 @@ class MemoApp(App[None]):
         return str(rows[memos.cursor_row].key.value)
 
     def _target_memo(self) -> int | None:
-        """The memo a memo key acts on: the one open below the list when there
-        is one, and otherwise the row the list cursor is resting on. Pointing at
-        a memo is enough, the way it is enough in a file manager — opening a
-        recording to file it away or throw it out is a step that says nothing.
+        """The memo a memo key acts on: the row the list cursor is resting on,
+        which is the one thing on screen that says what is being pointed at.
+        Pointing at a memo is enough, the way it is enough in a file manager —
+        opening a recording to file it away or throw it out is a step that says
+        nothing.
 
-        Nothing at all when the cursor is on no memo: an empty list, or a row
-        standing in for a recording still coming in, which is keyed by the path
-        it is arriving from rather than by a memo id it does not have yet."""
-        if self.memo_id is not None:
-            return self.memo_id
+        Never the memo open below the list while the cursor is on another row.
+        Somebody who opened one memo and then arrowed to a second is looking at
+        the second one's highlight, and a key that went to the first deleted a
+        memo nobody was pointing at. The open memo answers only when the cursor
+        has no row at all — an empty list, or a memo opened from the to-do
+        board out of another project — because then it is all that is on screen
+        to mean.
+
+        Nothing at all when the cursor is on no memo, though it is on a row: one
+        standing in for a recording still coming in is keyed by the path it is
+        arriving from rather than by a memo id it does not have yet. And nothing
+        in the bin, whose memos cannot be acted on until they are restored."""
+        if self._in_bin():
+            return None
         key = self._cursor_key()
         if key is None:
-            return None
+            return self.memo_id
         try:
             return int(key)
+        except ValueError:
+            return None
+
+    def _in_bin(self) -> bool:
+        """Whether the list on screen is the bin. A tag search run from inside
+        it answers out of the live memos, so it is not."""
+        return self.binview and self.tag is None
+
+    def _target_binned(self) -> int | None:
+        """The binned memo the cursor is resting on, while the bin is what is
+        on screen, and nothing otherwise."""
+        if not self._in_bin():
+            return None
+        key = self._cursor_key()
+        try:
+            return None if key is None else int(key)
         except ValueError:
             return None
 
@@ -2256,6 +2338,19 @@ class MemoApp(App[None]):
         cursor, because the thing it acts on is the row the cursor rests on —
         and only while that row is a project, since the row standing for the
         whole library has no name to rename and nothing of its own to empty."""
+        if self._in_bin():
+            # the bin offers its own few keys and hides every other memo key,
+            # since each of those would be refused by a memo that is not live
+            if action in ("delete_memo", "undo"):
+                return self._target_binned() is not None
+            if action == "empty_bin":
+                return services.binned_count(self.repo) > 0
+            if action == "action_menu":
+                return self._target_binned() is not None or (
+                    self._on_sidebar() and self._pointed_project() is not None
+                )
+        if action == "undo":
+            return self._undoable() is not None
         if action in MEMO_ACTIONS:
             return self._target_memo() is not None
         if action in PROJECT_ACTIONS:
@@ -2289,7 +2384,8 @@ class MemoApp(App[None]):
         nothing has been put in it: it is where a memo goes, and a row that only
         appears once somebody has archived something is a row nobody discovers
         beforehand. Its count is its own, since none of the counts above it
-        include an archived memo.
+        include an archived memo, and neither does the bin's, which counts the
+        memos that were deleted.
 
         A project that is no longer listed leaves the cursor at the top, which
         is also where the first draw of the session puts it: a sidebar
@@ -2306,7 +2402,12 @@ class MemoApp(App[None]):
             sidebar.append(ListItem(Label(f"{name} ({count})"), name=name))
         put_away = services.archived_count(self.repo)
         sidebar.append(ListItem(Label(f"Archived ({put_away})"), name=ARCHIVED))
-        names = [EVERYTHING, *(name for name, _count in listed), ARCHIVED]
+        # the bin sits last, beside the archive drawer and for the same reason
+        # offered while empty: it is where a delete sends a memo, and the row
+        # that says so should be there before the first one
+        binned = services.binned_count(self.repo)
+        sidebar.append(ListItem(Label(f"Bin ({binned})"), name=BIN))
+        names = [EVERYTHING, *(name for name, _count in listed), ARCHIVED, BIN]
         sidebar.index = names.index(was_on) if was_on in names else 0
 
     def _list_memos(self, rows: list[services.MemoRow]) -> None:
@@ -2381,6 +2482,8 @@ class MemoApp(App[None]):
         would redraw it as a listing of memos that are not in it."""
         if self.tag is not None:
             self.show_tagged(self.tag)
+        elif self.binview:
+            self.show_bin()
         elif self.archived:
             self.show_archived()
         elif self.everything:
@@ -2442,6 +2545,11 @@ class MemoApp(App[None]):
         self.seen_version = version
         self.load_projects()
         self._relist_in_place()
+        # another process may have sent the memo being read to the bin, or
+        # removed it: panes describing a memo that is no longer live would keep
+        # offering keys that fail
+        if self.memo_id is not None and not services.memo_is_live(self.repo, self.memo_id):
+            self.clear_memo()
 
     def _listed(self, memo_id: int) -> bool:
         """Whether a memo is among the rows the table is showing."""
@@ -2462,6 +2570,8 @@ class MemoApp(App[None]):
         pieces = []
         if self.archived and self.tag is None:
             pieces.append("archived")
+        if self.binview and self.tag is None:
+            pieces.append("bin")
         if self.everything:
             pieces.append("all projects")
         if self.tag is not None:
@@ -2479,6 +2589,7 @@ class MemoApp(App[None]):
         self.tag = None
         self.everything = True
         self.archived = False
+        self.binview = False
         self.sub_title = self._subtitle()
         self._list_memos(services.memo_rows(self.repo, sort=self.sort))
         self.refresh_bindings()
@@ -2496,8 +2607,24 @@ class MemoApp(App[None]):
         self.tag = None
         self.everything = False
         self.archived = True
+        self.binview = False
         self.sub_title = self._subtitle()
         self._list_memos(services.memo_rows(self.repo, sort=self.sort, archived=True))
+        self.refresh_bindings()
+
+    def show_bin(self) -> None:
+        """Lists the memos that were deleted, and only those. A binned memo
+        cannot be opened — its notes and transcript are not shown until it is
+        restored — so the list is all the bin is, and the memo keys give way
+        to restoring and deleting for good."""
+        self.project = None
+        self.tag = None
+        self.everything = False
+        self.archived = False
+        self.binview = True
+        self.clear_memo()
+        self.sub_title = self._subtitle()
+        self._list_memos(services.memo_rows(self.repo, sort=self.sort, binned=True))
         self.refresh_bindings()
 
     def show_project(self, project: str) -> None:
@@ -2508,6 +2635,7 @@ class MemoApp(App[None]):
         self.tag = None
         self.everything = False
         self.archived = False
+        self.binview = False
         self.sub_title = self._subtitle()
         self._list_memos(services.memo_rows(self.repo, project=project, sort=self.sort))
         self.refresh_bindings()
@@ -3050,6 +3178,8 @@ class MemoApp(App[None]):
             self.show_project(self.project)
         elif self.everything:
             self.show_everything()
+        elif self.binview:
+            self.show_bin()
         elif self.archived:
             self.show_archived()
         else:
@@ -3075,6 +3205,10 @@ class MemoApp(App[None]):
         project = self._pointed_project()
         if self._on_sidebar() and project is not None:
             self._open_menu(f"{project} — project", _PROJECT_MENU, project)
+            return
+        if self._in_bin():
+            if self._target_binned() is not None:
+                self._open_menu("Bin — actions", _BIN_MENU, None)
             return
         memo_id = self._target_memo()
         if memo_id is None:
@@ -3107,6 +3241,7 @@ class MemoApp(App[None]):
                     ("Anywhere", main),
                     ("space — on a memo", _MEMO_MENU),
                     ("space — on a project in the sidebar", _PROJECT_MENU),
+                    ("space — in the bin", _BIN_MENU),
                     ("g — go to", _GOTO_MENU),
                 )
             )
@@ -3201,31 +3336,95 @@ class MemoApp(App[None]):
         self._relist()
 
     def action_delete_memo(self) -> None:
-        """Offers to throw the pointed-at memo away, asking first and naming it
-        while it asks: this is the one memo key with nothing behind it."""
+        """Moves the pointed-at memo to the bin, and says so. Nothing is asked
+        first: the memo is not removed, u puts it back, and a confirmation in
+        front of an undoable act would only teach the hand to press y. Inside
+        the bin the same key is the permanent one, and that one asks."""
+        if self._in_bin():
+            self._delete_for_good()
+            return
         memo_id = self._target_memo()
         if memo_id is None:
             return
-        filename = services.require_memo(self.repo, memo_id).filename
-        self.push_screen(
-            ConfirmDelete(filename),
-            lambda confirmed: self._delete_memo(memo_id, confirmed),
-        )
-
-    def _delete_memo(self, memo_id: int, confirmed: bool | None) -> None:
-        """Throws the memo away once they have said to, and takes everything it
-        left on screen with it: the panes below the list when that memo was the
-        one being read, the count beside the project it was filed under, and its
-        row. Says what went by name, since the row that said so is gone."""
-        if not confirmed:
-            return
         filename = services.delete_memo(self.repo, memo_id)
+        self.deleted_here.append(memo_id)
+        self._left_the_list(memo_id)
+        self.notify(f'moved "{filename}" to the bin — u to undo')
+
+    def _left_the_list(self, memo_id: int) -> None:
+        """Takes everything a memo that has left the live list left on screen
+        with it: the panes below the list when it was the memo being read, the
+        count beside the project it was filed under, and its row."""
         if self.memo_id == memo_id:
             self.clear_memo()
             self.query_one("#memos", DataTable).focus()
         self.load_projects()
         self._relist()
-        self.notify(f"deleted {filename}")
+
+    def _undoable(self) -> int | None:
+        """The memo u would bring back: while the bin is on screen the one the
+        cursor is on, and otherwise the latest this session sent there that is
+        still in it. One that has since been restored by hand, or deleted for
+        good, is skipped rather than reported as an error."""
+        if self._in_bin():
+            return self._target_binned()
+        for memo_id in reversed(self.deleted_here):
+            if services.memo_is_binned(self.repo, memo_id):
+                return memo_id
+        return None
+
+    def action_undo(self) -> None:
+        """Brings a deleted memo back: the last one this session deleted, or
+        the one under the cursor in the bin. The memo returns exactly where it
+        was, archive and project included, so the list is simply redrawn."""
+        memo_id = self._undoable()
+        if memo_id is None:
+            return
+        filename = services.restore_memo(self.repo, memo_id)
+        if memo_id in self.deleted_here:
+            self.deleted_here.remove(memo_id)
+        self.load_projects()
+        self._relist()
+        self.notify(f'restored "{filename}"')
+
+    def _delete_for_good(self) -> None:
+        """Offers to remove the binned memo under the cursor permanently,
+        naming it while it asks."""
+        memo_id = self._target_binned()
+        if memo_id is None:
+            return
+        filename = services.require_memo(self.repo, memo_id, binned_ok=True).filename
+        self.push_screen(
+            ConfirmDelete(filename),
+            lambda confirmed: self._purge_memo(memo_id, confirmed),
+        )
+
+    def _purge_memo(self, memo_id: int, confirmed: bool | None) -> None:
+        """Removes the memo for good once they have said to, and redraws the
+        bin without it. Says what went by name, since its row is gone."""
+        if not confirmed:
+            return
+        filename = services.purge_memo(self.repo, memo_id)
+        self.load_projects()
+        self._relist()
+        self.notify(f'deleted "{filename}" for good')
+
+    def action_empty_bin(self) -> None:
+        """Offers to remove everything in the bin permanently, stating how many
+        memos that is while it asks."""
+        count = services.binned_count(self.repo)
+        if not self._in_bin() or not count:
+            return
+        self.push_screen(ConfirmEmptyBin(count), self._empty_bin)
+
+    def _empty_bin(self, confirmed: bool | None) -> None:
+        """Empties the bin once they have said to."""
+        if not confirmed:
+            return
+        count = services.empty_bin(self.repo)
+        self.load_projects()
+        self._relist()
+        self.notify(f"emptied the bin — {count} deleted for good")
 
     def action_toggle_archive(self) -> None:
         """Puts the pointed-at memo away, or takes it back out when it is
@@ -3294,7 +3493,7 @@ class MemoApp(App[None]):
             return self.menu_project
         if self._on_sidebar():
             chosen = self.query_one("#projects", ListView).highlighted_child
-            if chosen is None or chosen.name in (EVERYTHING, ARCHIVED):
+            if chosen is None or chosen.name in (EVERYTHING, ARCHIVED, BIN):
                 return None
             return chosen.name
         if self.tag is not None:
@@ -3361,6 +3560,8 @@ class MemoApp(App[None]):
                 self.show_everything()
             elif chosen == ARCHIVED:
                 self.show_archived()
+            elif chosen == BIN:
+                self.show_bin()
             else:
                 self.show_project(chosen)
             self.query_one("#memos", DataTable).focus()
@@ -3385,5 +3586,8 @@ class MemoApp(App[None]):
         try:
             memo_id = int(str(event.row_key.value))
         except ValueError:
+            return
+        if self._in_bin():
+            self.notify("it is in the bin — u restores it", severity="warning")
             return
         self.show_memo(memo_id)

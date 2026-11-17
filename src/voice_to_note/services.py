@@ -2234,7 +2234,7 @@ def _status(status: str, refined: bool, edited: bool) -> str:
 
 def memo_rows(
     repo: Repository, project: str | None = None, tag: str | None = None,
-    sort: str = "created", *, archived: bool = False,
+    sort: str = "created", *, archived: bool = False, binned: bool = False,
 ) -> list[MemoRow]:
     """The memo list as a table lays it out, narrowed and ordered as the caller
     asked: a row per memo, saying the same about each one as its info would,
@@ -2242,7 +2242,8 @@ def memo_rows(
     what a list of one does. A memo nobody has changed reads as updated when
     it was made, exactly as the info does, since a column has to say
     something. Shows the live list, or the archive drawer when archived asks
-    for it — the two never appear merged into one listing."""
+    for it — the two never appear merged into one listing — or the bin when
+    binned does, which is not a live list or a drawer at all."""
     return [
         MemoRow(
             id=listed.memo.id,
@@ -2255,7 +2256,9 @@ def memo_rows(
             updated=listed.memo.updated_at or listed.memo.created_at,
             project=listed.memo.project,
         )
-        for listed in repo.memo_listings(project, _tag(tag), order=_sort(sort), archived=archived)
+        for listed in repo.memo_listings(
+            project, _tag(tag), order=_sort(sort), archived=archived, binned=binned
+        )
     ]
 
 
@@ -2648,6 +2651,20 @@ def purge_memo(repo: Repository, memo_id: int) -> str:
     # a wav already removed by hand must not leave a memo that cannot be deleted
     Path(memo.wav_path).unlink(missing_ok=True)
     return memo.filename
+
+
+def memo_is_binned(repo: Repository, memo_id: int) -> bool:
+    """Whether a memo is in the bin right now, for a screen that remembers what
+    it deleted and has to ask whether that is still true."""
+    memo = repo.memo(memo_id)
+    return memo is not None and bool(memo.deleted_at)
+
+
+def memo_is_live(repo: Repository, memo_id: int) -> bool:
+    """Whether a memo exists and is not in the bin, for a screen that has one
+    open and wants to know whether another process has taken it away."""
+    memo = repo.memo(memo_id)
+    return memo is not None and not memo.deleted_at
 
 
 def binned_memos(repo: Repository) -> list[Memo]:
