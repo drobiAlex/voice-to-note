@@ -90,32 +90,6 @@ let reset = physics.calculateNextState(
 precondition(redirected.position.x > reset.position.x, "Redirect lost incoming momentum")
 print("Redirect retains incoming velocity \(moving.velocity.horizontal) pt/s")
 
-/// Both signs on both axes cover the four screen edges, including reversals
-/// carrying velocity toward the off-screen boundary when a new target arrives.
-for axis in 0...1 {
-    for sign in [-1.0, 1.0] {
-        let outward: (CGPoint) -> Double = { (axis == 0 ? $0.x : $0.y) * sign }
-        let bound: (CGPoint) -> CGPoint = { point in
-            var safe = point
-            if axis == 0 { safe.x = min(point.x * sign, 195) * sign }
-            else { safe.y = min(point.y * sign, 195) * sign }
-            return safe
-        }
-        let requested = CGPoint(x: axis == 0 ? 184 * sign : 0,
-                                y: axis == 1 ? 184 * sign : 0)
-        var state = SpringMotionState(
-            position: CGPoint(x: axis == 0 ? 175 * sign : 0, y: axis == 1 ? 175 * sign : 0),
-            velocity: .init(horizontal: axis == 0 ? 1800 * sign : 0,
-                            vertical: axis == 1 ? 1800 * sign : 0))
-        let destination = PuckMotion.safeDestination(requested, from: state, physics: physics, bound: bound)
-        precondition(outward(destination) < outward(requested), "Unsafe target was not adjusted")
-        for _ in 0..<120 {
-            state = physics.calculateNextState(from: state, destinationPoint: destination)
-            precondition(outward(state.position) <= 195.001, "Prediction concealed the sliver")
-        }
-    }
-}
-print("Four edge predictions preserve at least half the peek with incoming velocity")
 
 /// The edge contour is Foundation-only production geometry. These checks make
 /// the tab's actual joints and display anchors executable without AppKit.

@@ -7,33 +7,134 @@ from pathlib import Path
 
 import pytest
 
+NATIVE = Path(__file__).resolve().parents[1] / "src/voice_to_note/native"
+needs_swift = pytest.mark.skipif(shutil.which("swiftc") is None, reason="Swift compiler is unavailable")
 
-@pytest.mark.skipif(shutil.which("swiftc") is None, reason="Swift compiler is unavailable")
-def test_the_shipped_spring_settles_with_one_visible_overshoot_at_both_refresh_rates(tmp_path):
-    """Compile production math so acceptance checks detect solver or tuning changes."""
-    native = Path(__file__).resolve().parents[1] / "src/voice_to_note/native"
-    source = (native / "menubar.swift").read_text()
-    # The Foundation-only constants are isolated from AppKit for this harness;
+
+@pytest.fixture(scope="module")
+def motion_binary(tmp_path_factory):
+    """Compile production math once so every acceptance check shares one build."""
+    source = (NATIVE / "menubar.swift").read_text()
+    # The Foundation-only pieces are isolated from AppKit for this harness;
     # their contents are compiled as Swift, not asserted as source strings.
     constants = source.split("enum PuckMotion {", 1)[1].split("\n}\n", 1)[0]
     contour = source.split("struct PuckEdgeContour {", 1)[1].split(
         "/// The recorder as a small disc", 1
     )[0]
+    model = source.split("struct PuckDockModel {", 1)[1].split("\n}\n", 1)[0]
     harness = (Path(__file__).parent / "motion_harness.swift").read_text()
-    main = tmp_path / "main.swift"
+    dock_harness = (Path(__file__).parent / "dock_model_harness.swift").read_text()
+    out = tmp_path_factory.mktemp("motion")
+    main = out / "main.swift"
     main.write_text(
-        "import Foundation\nenum PuckMotion {" + constants + "\n}\n"
-        + "struct PuckEdgeContour {" + contour + harness
+        # CGRect's members and CGPoint's Equatable live in CoreGraphics, which
+        # Foundation alone does not surface on macOS; corelibs has them built in.
+        "import Foundation\n#if canImport(CoreGraphics)\nimport CoreGraphics\n#endif\n"
+        + "enum PuckMotion {" + constants + "\n}\n"
+        + "struct PuckEdgeContour {" + contour
+        + "struct PuckDockModel {" + model + "\n}\n"
+        + harness + "\n" + dock_harness
     )
-    binary = tmp_path / "motion-check"
+    binary = out / "motion-check"
     compiled = subprocess.run(
-        ["swiftc", "-O", str(native / "springs.swift"), str(main), "-o", str(binary)],
+        ["swiftc", "-O", str(NATIVE / "springs.swift"), str(main), "-o", str(binary)],
         capture_output=True, text=True,
     )
     assert compiled.returncode == 0, compiled.stderr
-    result = subprocess.run([str(binary)], capture_output=True, text=True)
+    return binary
+
+
+def run_sections(binary, *sections):
+    result = subprocess.run([str(binary), *sections], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
     print(result.stdout)
+
+
+@needs_swift
+def test_the_shipped_spring_settles_with_one_visible_overshoot_at_both_refresh_rates(motion_binary):
+    """Run production math so acceptance checks detect solver or tuning changes."""
+    run_sections(motion_binary)
+
+
+@needs_swift
+def test_a_puck_always_comes_to_rest_in_a_legal_pose_after_any_seeded_sequence_of_events(motion_binary):
+    """Thousands of random drags, releases, clicks, hovers and screen changes end exactly merged or exactly free."""
+    run_sections(motion_binary, "property")
+
+
+@needs_swift
+def test_a_tuck_arriving_with_velocity_never_rests_short_of_the_tab_or_loses_its_sliver(motion_binary):
+    run_sections(motion_binary, "arrival")
+
+
+@needs_swift
+def test_a_reveal_with_no_pointer_on_the_puck_tucks_again_after_the_grace(motion_binary):
+    run_sections(motion_binary, "reveal")
+
+
+@needs_swift
+def test_a_pointer_parked_on_the_end_of_a_tab_peeks_once_and_never_oscillates(motion_binary):
+    run_sections(motion_binary, "tab_end")
+
+
+@needs_swift
+def test_a_drag_begun_while_the_tuck_is_still_sliding_ends_free_at_full_alpha(motion_binary):
+    run_sections(motion_binary, "quick_grab")
+
+
+@needs_swift
+def test_a_press_in_the_middle_of_a_spring_settles_after_any_way_of_letting_go(motion_binary):
+    run_sections(motion_binary, "press_mid_spring")
+
+
+@needs_swift
+def test_a_spring_that_cannot_converge_is_snapped_to_rest_at_the_deadline(motion_binary):
+    run_sections(motion_binary, "deadline")
+
+
+@needs_swift
+def test_redirecting_a_tuck_mid_flight_keeps_position_and_velocity(motion_binary):
+    run_sections(motion_binary, "retarget")
+
+
+@needs_swift
+def test_releasing_within_the_magnet_tucks_and_the_outline_continues_from_the_hand(motion_binary):
+    run_sections(motion_binary, "release")
+
+
+@needs_swift
+def test_a_driver_that_ticks_only_while_the_model_needs_time_still_peeks_and_tucks(motion_binary):
+    run_sections(motion_binary, "needs_time")
+
+
+@needs_swift
+def test_a_menu_reveal_stays_out_for_the_long_first_wait_and_then_the_ordinary_grace_governs(motion_binary):
+    run_sections(motion_binary, "reveal_grace")
+
+
+@needs_swift
+def test_a_pointer_parked_where_no_exit_event_is_promised_still_lets_the_peek_tuck(motion_binary):
+    run_sections(motion_binary, "tracking_gap")
+
+
+@needs_swift
+def test_a_partly_shared_edge_takes_a_tab_only_where_it_is_open_and_never_captures_a_drag_across_the_seam(motion_binary):
+    run_sections(motion_binary, "partly_shared_edge")
+
+
+@needs_swift
+def test_a_changed_visible_frame_re_anchors_a_resting_tab_or_peek_exactly(motion_binary):
+    run_sections(motion_binary, "screen_change_at_rest")
+
+
+@needs_swift
+def test_a_hold_ended_without_its_hand_comes_to_rest_in_a_legal_pose(motion_binary):
+    run_sections(motion_binary, "hold_ended")
+
+
+@needs_swift
+def test_reduce_motion_click_to_peek_and_leaving_the_hanging_pose_behave(motion_binary):
+    run_sections(motion_binary, "quiet_modes")
 
 
 @pytest.mark.skipif(

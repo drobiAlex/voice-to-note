@@ -1,0 +1,783 @@
+// Appended after motion_harness.swift by tests/test_motion.py, so it shares that file's compile
+// with the vendored solver and the app's PuckMotion, PuckEdgeContour and PuckDockModel source.
+//
+// Everything here runs only for the sections the caller names on the command line, so each
+// behaviour is its own Python test while one compile serves all of them.
+
+let requestedSections = Set(CommandLine.arguments.dropFirst())
+func wants(_ section: String) -> Bool { requestedSections.contains(section) }
+
+typealias Dock = PuckDockModel
+let panelSize = CGSize(width: 248, height: 248)
+let panelInset: CGFloat = 24
+let bodyWidth: CGFloat = 200
+
+/// SplitMix64, carried here because the app's own copy lives beside code that needs AppKit.
+struct TestRandom {
+    var state: UInt64
+    init(_ seed: UInt64) { state = seed }
+    mutating func next() -> UInt64 {
+        state &+= 0x9e37_79b9_7f4a_7c15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xbf58_476d_1ce4_e5b9
+        z = (z ^ (z >> 27)) &* 0x94d0_49bb_1331_11eb
+        return z ^ (z >> 31)
+    }
+    mutating func unit() -> CGFloat { CGFloat(next() >> 11) / CGFloat(UInt64(1) << 53) }
+    mutating func int(_ count: Int) -> Int { Int(next() % UInt64(count)) }
+    mutating func between(_ low: CGFloat, _ high: CGFloat) -> CGFloat { low + (high - low) * unit() }
+    mutating func pick<T>(_ values: [T]) -> T { values[int(values.count)] }
+}
+
+func screen(_ width: CGFloat = 1440, _ height: CGFloat = 875,
+            covered: [Dock.Edge: [ClosedRange<CGFloat>]] = [:]) -> Dock.Screen {
+    Dock.Screen(visibleFrame: CGRect(x: 0, y: 0, width: width, height: height), covered: covered)
+}
+
+/// A screen that sometimes has a neighbour along part of one edge.
+func randomScreen(_ rng: inout TestRandom) -> Dock.Screen {
+    let width = rng.pick([CGFloat(1440), 1920, 900])
+    let height = rng.pick([CGFloat(875), 1055, 700])
+    guard rng.int(3) == 0 else { return screen(width, height) }
+    let edge = rng.pick(Dock.Edge.allCases)
+    let extent = (edge == .left || edge == .right) ? height : width
+    let low = rng.between(0, extent)
+    let high = min(extent, low + rng.between(50, extent))
+    return screen(width, height, covered: [edge: [low...high]])
+}
+
+func makeModel(_ place: Dock.Place, on current: Dock.Screen = screen(),
+               using solver: SpringMotionPhysics? = nil) -> Dock {
+    var model: Dock
+    if let solver {
+        model = Dock(panelSize: panelSize, inset: panelInset, screen: current, physics: solver)
+    } else {
+        model = Dock(panelSize: panelSize, inset: panelInset, screen: current)
+    }
+    model.send(.restore(place))
+    return model
+}
+
+/// A puck that has finished peeking out of its edge, with the pointer left on it.
+func makePeeking(_ edge: Dock.Edge, along: CGFloat, on current: Dock.Screen = screen()) -> Dock {
+    var model = makeModel(.tucked(edge, along: along), on: current)
+    model.send(.reveal)
+    let origin = model.revealedOrigin(edge, along: along)
+    physical = CGPoint(x: origin.x + panelSize.width / 2, y: origin.y + panelSize.height / 2)
+    model.send(.pointer(physical))
+    run(&model, until: { $0.isAtRest }, limit: 2, "never finished peeking")
+    return model
+}
+
+func kind(_ pose: Dock.Pose) -> String {
+    switch pose {
+    case .hanging: return "hanging"
+    case .free: return "free"
+    case .held: return "held"
+    case .tucked: return "tucked"
+    case .peeking: return "peeking"
+    }
+}
+
+/// The edge, along and whether it is tucked, for an edge pose; nil otherwise.
+func edgePose(_ model: Dock) -> (edge: Dock.Edge, along: CGFloat, tucked: Bool)? {
+    switch model.pose {
+    case let .tucked(edge, along): return (edge, along, true)
+    case let .peeking(edge, along): return (edge, along, false)
+    default: return nil
+    }
+}
+
+func isTucked(_ model: Dock) -> Bool { edgePose(model)?.tucked == true }
+func isPeeking(_ model: Dock) -> Bool { edgePose(model)?.tucked == false }
+
+/// A pointer over the middle of the puck's body, which is where a hand finds it.
+func centre(_ model: Dock) -> CGPoint {
+    CGPoint(x: model.position.x + panelSize.width / 2, y: model.position.y + panelSize.height / 2)
+}
+
+/// The invariants that hold in every frame, not only at rest.
+func checkFrame(_ model: Dock, _ context: String) {
+    let shown = model.presentation
+    precondition(shown.origin.x.isFinite && shown.origin.y.isFinite, "origin not finite \(context)")
+    precondition(shown.amount >= 0 && shown.amount <= 1, "amount \(shown.amount) out of range \(context)")
+    precondition(shown.alpha == Dock.alpha(for: shown.amount), "alpha is not a function of amount \(context)")
+    precondition(shown.controlsOpacity == Dock.controlsOpacity(for: shown.amount),
+                 "controls are not a function of amount \(context)")
+    precondition(shown.alpha >= PuckMotion.tuckedAlpha && shown.alpha <= 1, "alpha out of range \(context)")
+    if shown.edge == nil { precondition(shown.amount == 0, "merged with no edge \(context)") }
+}
+
+/// The legal resting poses, and what each must look like to the last bit.
+func checkRest(_ model: Dock, _ context: String) {
+    precondition(model.isAtRest, "not at rest \(context)")
+    let shown = model.presentation
+    precondition(model.velocity.isZero, "resting with velocity \(context)")
+    precondition(shown.release == nil, "resting mid release \(context)")
+    precondition(shown.origin == model.target, "rest origin is not the target \(context)")
+    switch model.pose {
+    case .held:
+        preconditionFailure("held is not a resting pose \(context)")
+    case .hanging, .free:
+        precondition(shown.amount == 0 && shown.alpha == 1 && shown.edge == nil && shown.controlsOpacity == 1,
+                     "free pose is merged \(context)")
+    case let .tucked(edge, along):
+        precondition(shown.origin == model.tuckedOrigin(edge, along: along), "tucked off its frame \(context)")
+        precondition(shown.amount == 1, "tucked but amount \(shown.amount) \(context)")
+        precondition(shown.alpha == PuckMotion.tuckedAlpha && shown.controlsOpacity == 0, "tucked look \(context)")
+    case let .peeking(edge, along):
+        precondition(shown.origin == model.revealedOrigin(edge, along: along), "peeking off its frame \(context)")
+        precondition(shown.amount == 0 && shown.alpha == 1 && shown.controlsOpacity == 1, "peek look \(context)")
+    }
+}
+
+var idleTicks = 0
+
+/// Where the pointer really is, and whether the clock re-reads it. The app's
+/// clock asks the system for the pointer on every frame it runs; events reach
+/// the model only for a pointer inside the view's tracking area, or at the one
+/// crossing of its boundary.
+var physical: CGPoint?
+var rereads = false
+
+func movePointer(_ model: inout Dock, to point: CGPoint?) {
+    let before = physical
+    physical = point
+    guard let point else {
+        model.send(.pointer(nil))
+        return
+    }
+    let crossing = before.map { model.trackedByView($0) } ?? false
+    if model.trackedByView(point) || crossing { model.send(.pointer(point)) }
+}
+
+/// The driver rule the app follows: time reaches the model only while it says it
+/// needs some. Every so often an idle model is also given half a second on a
+/// copy, and nothing may change, which is what makes "needs no time" a claim and
+/// not a hope.
+func tick(_ model: inout Dock, _ seconds: Double) {
+    if model.needsTime {
+        if rereads { model.send(.pointer(physical)) }
+        model.advance(by: seconds)
+        return
+    }
+    idleTicks += 1
+    guard idleTicks % 25 == 0 else { return }
+    var probe = model
+    for _ in 0..<30 { probe.advance(by: 1 / 30) }
+    precondition(probe.pose == model.pose && probe.position == model.position
+                 && probe.velocity.isZero == model.velocity.isZero,
+                 "an idle puck changed as time passed although needsTime was false: \(model.pose)")
+}
+
+func run(_ model: inout Dock, for seconds: Double, step: Double = 1 / 60, context: String = "",
+         each: ((Dock) -> Void)? = nil) {
+    var elapsed = 0.0
+    while elapsed < seconds {
+        tick(&model, step)
+        elapsed += step
+        checkFrame(model, context)
+        each?(model)
+    }
+}
+
+/// Run until a condition holds, failing if it never does.
+func run(_ model: inout Dock, until done: (Dock) -> Bool, limit: Double, _ message: String) {
+    var elapsed = 0.0
+    while !done(model) {
+        precondition(elapsed < limit, message)
+        tick(&model, 1 / 120)
+        elapsed += 1 / 120
+        checkFrame(model, message)
+    }
+}
+
+/// A hand takes the puck from where it is, carries it so its body is `gap` from the edge, and lets go.
+func dragAndRelease(_ model: inout Dock, toward edge: Dock.Edge, gap: CGFloat, along: CGFloat,
+                    steps: Int = 6, releasing: Bool = true) {
+    let area = model.screen.visibleFrame
+    var goal = CGPoint(x: 0, y: 0)
+    switch edge {
+    case .left: goal = CGPoint(x: area.minX + gap - panelInset, y: area.minY + along * area.height - 124)
+    case .right: goal = CGPoint(x: area.maxX - gap - bodyWidth - panelInset, y: area.minY + along * area.height - 124)
+    case .top: goal = CGPoint(x: area.minX + along * area.width - 124, y: area.maxY - gap - bodyWidth - panelInset)
+    case .bottom: goal = CGPoint(x: area.minX + along * area.width - 124, y: area.minY + gap - panelInset)
+    }
+    let grip = CGPoint(x: 120, y: 130)
+    let from = model.position
+    model.send(.pressed)
+    model.send(.dragBegan(CGPoint(x: from.x + grip.x, y: from.y + grip.y)))
+    for step in 1...steps {
+        let t = CGFloat(step) / CGFloat(steps)
+        physical = CGPoint(x: from.x + (goal.x - from.x) * t + grip.x, y: from.y + (goal.y - from.y) * t + grip.y)
+        model.send(.dragged(physical!))
+        tick(&model, 1 / 60)
+    }
+    if releasing {
+        physical = CGPoint(x: goal.x + grip.x, y: goal.y + grip.y)
+        model.send(.released(physical!))
+    }
+}
+
+// MARK: property test
+
+/// Random but replayable event sequences, ended by letting go of whatever is
+/// held and then only letting time pass: wherever the model comes to rest must
+/// be one of the legal poses, to the last bit, and must stay there.
+func propertyRun(seed: UInt64, stats: inout [String: Int]) {
+    var rng = TestRandom(seed)
+    physical = nil
+    rereads = true
+    defer { rereads = false }
+    var current = randomScreen(&rng)
+    var model = makeModel(.free(CGPoint(x: 400, y: 300)), on: current)
+    switch rng.int(5) {
+    case 1: model.send(.restore(.tucked(rng.pick(Dock.Edge.allCases), along: rng.unit())))
+    case 2: model.send(.restore(.hanging(CGPoint(x: 700, y: 400))))
+    case 3: model.send(.restore(.free(CGPoint(x: rng.between(-50, 1300), y: rng.between(-50, 700)))))
+    default: break
+    }
+    let context = "seed \(seed)"
+    let gaps: [CGFloat] = [0, 1, 2, 10, 23, 24, 25, 26, 27, 28, 29, 35, 90]
+    func interval(_ rng: inout TestRandom) -> Double {
+        switch rng.int(20) {
+        case 0: return 0.3 + Double(rng.unit()) * 1.7
+        case 1...8: return 1 / 120
+        default: return 1 / 60
+        }
+    }
+    func somePointer(_ rng: inout TestRandom, _ model: Dock) -> CGPoint? {
+        let area = model.screen.visibleFrame
+        switch rng.int(8) {
+        case 0: return nil
+        case 1: return CGPoint(x: rng.between(area.minX, area.maxX), y: rng.between(area.minY, area.maxY))
+        case 2: return centre(model)
+        default:
+            let edge = edgePose(model)?.edge ?? rng.pick(Dock.Edge.allCases)
+            let along = edgePose(model)?.along ?? rng.unit()
+            let rect = model.tabFootprint(edge, along: along)
+            switch rng.int(5) {
+            case 0: return CGPoint(x: rect.minX, y: rect.minY)
+            case 1: return CGPoint(x: rect.maxX, y: rect.maxY)
+            case 2: return CGPoint(x: rect.midX, y: rect.minY)
+            case 3: return CGPoint(x: rect.minX, y: rect.maxY)
+            default: return CGPoint(x: rng.between(rect.minX, rect.maxX), y: rng.between(rect.minY, rect.maxY))
+            }
+        }
+    }
+    for _ in 0..<(15 + rng.int(40)) {
+        switch rng.int(14) {
+        case 0, 1, 2:
+            for _ in 0...rng.int(6) {
+                tick(&model, interval(&rng))
+                checkFrame(model, context)
+            }
+        case 3, 4:
+            dragAndRelease(&model, toward: rng.pick(Dock.Edge.allCases), gap: rng.pick(gaps),
+                           along: rng.unit(), steps: 1 + rng.int(8), releasing: rng.int(6) != 0)
+        case 5:
+            movePointer(&model, to: centre(model))
+            model.send(.pressed)
+            if rng.int(2) == 0 { tick(&model, interval(&rng)) }
+            model.send(.clicked)
+        case 6, 7, 8:
+            movePointer(&model, to: somePointer(&rng, model))
+        case 9:
+            model.send(.reveal)
+        case 10:
+            model.send(.pressed)
+            for _ in 0...rng.int(5) { tick(&model, interval(&rng)) }
+            physical = centre(model)
+            if rng.int(2) == 0 { model.send(.released(centre(model))) } else { model.send(.clicked) }
+        case 11:
+            if rng.int(4) == 0 {
+                current = randomScreen(&rng)
+                model.send(.screenChanged(current))
+            }
+        case 12:
+            if rng.int(5) == 0 { model.send(.reduceMotion(rng.int(2) == 0)) }
+        default:
+            movePointer(&model, to: nil)
+        }
+        checkFrame(model, context)
+    }
+    physical = centre(model)
+    model.send(.released(centre(model)))
+    model.send(.reduceMotion(false))
+    stats["notes", default: 0] += model.drainNotes().count
+    // Nothing but time from here: the hover chain is at most a dwell, a peek, a
+    // grace and a tuck, each inside the deadline, and then it must stay put.
+    let horizon = PuckMotion.dwell + PuckMotion.revealGrace + PuckMotion.grace + PuckMotion.deadline * 3 + 0.5
+    run(&model, for: horizon, context: context)
+    checkRest(model, context)
+    if let shown = edgePose(model), !shown.tucked {
+        var keeps = false
+        if let point = physical { keeps = model.keepsPeeking(point, shown.edge, along: shown.along) }
+        precondition(keeps, "peeking with the pointer elsewhere never tucked \(context)")
+    }
+    let before = model.pose
+    run(&model, for: 3, context: context)
+    precondition(model.pose == before, "pose changed with no events \(context)")
+    checkRest(model, context)
+    stats[kind(model.pose), default: 0] += 1
+}
+
+if wants("property") {
+    var stats: [String: Int] = [:]
+    let runs: UInt64 = 6000
+    for seed in 1...runs { propertyRun(seed: seed, stats: &stats) }
+    // A property test that only ever sees one kind of ending proves little.
+    for ending in ["free", "tucked", "peeking"] {
+        precondition(stats[ending, default: 0] >= 100, "the property runs rarely ended \(ending): \(stats)")
+    }
+    precondition(stats["notes", default: 0] > 1000, "the property runs said too little: \(stats)")
+    print("property: \(runs) seeded runs (seeds 1...\(runs)), rested as \(stats.sorted { $0.key < $1.key })")
+}
+
+// MARK: directed tests
+
+if wants("arrival") {
+    // A velocity a hand could never give is handed to the spring right after the
+    // tuck is decided: whatever it does, it must end on the tucked frame and
+    // never cost the sliver.
+    for edge in Dock.Edge.allCases {
+        var model = makePeeking(edge, along: 0.4)
+        model.send(.pointer(nil))
+        run(&model, until: { isTucked($0) }, limit: 2, "never tucked on \(edge)")
+        let outward = 6000.0
+        switch edge {
+        case .right: model.velocity = .init(horizontal: outward, vertical: 0)
+        case .left: model.velocity = .init(horizontal: -outward, vertical: 0)
+        case .top: model.velocity = .init(horizontal: 0, vertical: outward)
+        case .bottom: model.velocity = .init(horizontal: 0, vertical: -outward)
+        }
+        let area = model.screen.visibleFrame
+        var worst = CGFloat.infinity
+        run(&model, for: 3, context: "arrival \(edge)") { current in
+            let body = CGRect(x: current.position.x + panelInset, y: current.position.y + panelInset,
+                              width: bodyWidth, height: bodyWidth)
+            let seen = body.intersection(area)
+            var depth: CGFloat = 0
+            if !seen.isNull {
+                depth = (edge == .left || edge == .right) ? seen.width : seen.height
+            }
+            worst = min(worst, depth)
+        }
+        precondition(worst >= PuckMotion.peek / 2 - 0.001, "arrival lost its sliver on \(edge): \(worst)")
+        checkRest(model, "arrival \(edge)")
+        precondition(model.presentation.amount == 1, "arrival rested short of the tab on \(edge)")
+    }
+    print("arrival: four edges end exactly tucked, sliver never below half the peek")
+}
+
+if wants("reveal") {
+    for edge in Dock.Edge.allCases {
+        var model = makeModel(.tucked(edge, along: 0.3))
+        model.send(.pointer(nil))
+        model.send(.reveal)
+        precondition(isPeeking(model), "reveal did not peek")
+        var elapsed = 0.0
+        var tuckedAt: Double?
+        while elapsed < 6 {
+            model.advance(by: 1 / 60)
+            elapsed += 1 / 60
+            if tuckedAt == nil, isTucked(model) { tuckedAt = elapsed }
+        }
+        precondition(tuckedAt != nil, "a reveal with no pointer never tucked again")
+        precondition(tuckedAt! <= PuckMotion.revealGrace + 0.05 && tuckedAt! >= PuckMotion.revealGrace - 0.05,
+                     "tucked after \(tuckedAt!) s, not after the reveal grace")
+        checkRest(model, "reveal \(edge)")
+    }
+    print("reveal: a peek nobody is hovering tucks after the grace on every edge")
+}
+
+if wants("tab_end") {
+    for edge in Dock.Edge.allCases {
+        for end in 0..<4 {
+            for onTheEdge in [true, false] {
+                var model = makeModel(.tucked(edge, along: 0.5))
+                let rect = model.tabFootprint(edge, along: 0.5)
+                var point = CGPoint(x: (end % 2 == 0) ? rect.minX : rect.maxX,
+                                    y: (end / 2 == 0) ? rect.minY : rect.maxY)
+                if !onTheEdge {
+                    point.x += (end % 2 == 0) ? 1 : -1
+                    point.y += (end / 2 == 0) ? 1 : -1
+                }
+                model.send(.pointer(point))
+                var flips = 0
+                var last = kind(model.pose)
+                run(&model, for: 10, context: "tab end \(edge) \(end)") { current in
+                    if kind(current.pose) != last { flips += 1; last = kind(current.pose) }
+                }
+                precondition(flips <= 1, "pointer parked on a tab end flipped \(flips) times on \(edge) end \(end)")
+                checkRest(model, "tab end")
+            }
+        }
+    }
+    print("tab_end: a pointer parked on any tab end peeks once and stays")
+}
+
+if wants("quick_grab") {
+    var model = makePeeking(.right, along: 0.5)
+    model.send(.pointer(nil))
+    run(&model, until: { isTucked($0) }, limit: 2, "never tucked")
+    run(&model, for: 0.1)
+    precondition(!model.isAtRest, "the grab was meant to catch the tuck in flight")
+    model.send(.pressed)
+    let grip = centre(model)
+    model.send(.dragBegan(grip))
+    for step in 1...10 {
+        let t = CGFloat(step) / 10
+        model.send(.dragged(CGPoint(x: grip.x + (600 - grip.x) * t, y: grip.y + (400 - grip.y) * t)))
+        model.advance(by: 1 / 60)
+    }
+    model.send(.released(CGPoint(x: 600, y: 400)))
+    precondition(model.pose == .free, "a puck dragged to the middle of the screen is not free")
+    let shown = model.presentation
+    precondition(shown.alpha == 1 && shown.amount == 0 && shown.edge == nil,
+                 "a puck grabbed during a tuck came out dim or merged: alpha \(shown.alpha) amount \(shown.amount)")
+    run(&model, for: 1)
+    checkRest(model, "quick grab")
+    print("quick_grab: a drag begun inside the tuck's slide ends free with alpha exactly 1")
+}
+
+if wants("press_mid_spring") {
+    for release in 0..<3 {
+        var model = makeModel(.tucked(.left, along: 0.6))
+        model.send(.pointer(nil))
+        model.send(.reveal)
+        run(&model, for: 0.1)
+        let frozen = model.position
+        model.send(.pressed)
+        run(&model, for: 1.0)
+        precondition(model.position == frozen, "a pressed puck kept moving")
+        precondition(!model.isAtRest, "a pressed puck mid-spring cannot be at rest")
+        switch release {
+        case 0:
+            model.send(.clicked)
+        case 1:
+            model.send(.released(centre(model)))
+        default:
+            model.send(.dragBegan(centre(model)))
+            model.send(.released(centre(model)))
+        }
+        run(&model, for: 8)
+        checkRest(model, "press mid spring \(release)")
+    }
+    var lost = makeModel(.tucked(.top, along: 0.5))
+    lost.send(.reveal)
+    run(&lost, for: 0.05)
+    lost.send(.pressed)
+    run(&lost, for: PuckMotion.pressLimit + PuckMotion.revealGrace + 4)
+    checkRest(lost, "a lost mouse-up")
+    print("press_mid_spring: a press frozen mid-flight settles after click, release, drag or a lost mouse-up")
+}
+
+if wants("deadline") {
+    let undamped = SpringMotionPhysics(
+        configuration: SpringConfiguration(angularFrequency: PuckMotion.angularFrequency, dampingRatio: 0),
+        timeStep: Float(PuckMotion.step))
+    var model = makeModel(.tucked(.right, along: 0.5), using: undamped)
+    model.send(.reveal)
+    let origin = model.revealedOrigin(.right, along: 0.5)
+    model.send(.pointer(CGPoint(x: origin.x + panelSize.width / 2, y: origin.y + panelSize.height / 2)))
+    var elapsed = 0.0
+    var lastMoving = 0.0
+    while !model.isAtRest {
+        model.advance(by: 1 / 60)
+        elapsed += 1 / 60
+        if !model.isAtRest { lastMoving = elapsed }
+        precondition(elapsed <= PuckMotion.deadline + 0.05, "a spring that cannot converge outlived the deadline")
+    }
+    precondition(lastMoving > PuckMotion.nominalSettle, "the undamped spring should still be moving at the nominal time")
+    precondition(elapsed >= PuckMotion.deadline - 0.05, "snapped before the deadline")
+    checkRest(model, "deadline")
+    print("deadline: an unconverging spring is snapped to rest at \(elapsed) s")
+}
+
+if wants("retarget") {
+    var model = makePeeking(.right, along: 0.5)
+    model.send(.pointer(nil))
+    run(&model, until: { isTucked($0) }, limit: 2, "never tucked")
+    run(&model, for: 0.06)
+    let moving = model.velocity.horizontal
+    let place = model.position
+    precondition(abs(moving) > 10, "the tuck should still be moving")
+    model.send(.reveal)
+    precondition(model.velocity.horizontal == moving && model.position == place,
+                 "retargeting lost position or velocity")
+    let origin = model.revealedOrigin(.right, along: 0.5)
+    model.send(.pointer(CGPoint(x: origin.x + panelSize.width / 2, y: origin.y + panelSize.height / 2)))
+    run(&model, for: 3)
+    checkRest(model, "retarget")
+    print("retarget: reversing a tuck mid-flight keeps position and velocity and ends exactly revealed")
+}
+
+if wants("release") {
+    let cases: [(gap: CGFloat, tucks: Bool)] = [
+        (0, true), (10, true), (24, true), (26, true), (28, true), (28.5, false), (40, false),
+    ]
+    for (gap, tucks) in cases {
+        var model = makeModel(.free(CGPoint(x: 500, y: 300)))
+        dragAndRelease(&model, toward: .right, gap: gap, along: 0.5)
+        precondition(isTucked(model) == tucks, "release at gap \(gap) should tuck: \(tucks)")
+        let heard = model.drainNotes()
+        precondition(heard.contains(.placed(model.place)), "release said nothing about where it was left")
+        run(&model, for: 3)
+        checkRest(model, "release \(gap)")
+    }
+    // Continuity: what the hand showed is what the first frame after release shows.
+    var model = makeModel(.free(CGPoint(x: 500, y: 300)))
+    dragAndRelease(&model, toward: .left, gap: 10, along: 0.5, releasing: false)
+    let shownByHand = model.presentation
+    precondition(shownByHand.held && shownByHand.edge == .left && shownByHand.amount > 0.5 && shownByHand.amount < 1,
+                 "held outline missing")
+    model.send(.released(centre(model)))
+    let afterRelease = model.presentation
+    precondition(abs(afterRelease.amount - shownByHand.amount) < 1e-9 && afterRelease.release != nil,
+                 "release changed the outline")
+    run(&model, for: 3)
+    checkRest(model, "release continuity")
+    print("release: the magnet takes a body up to 28 pt, the outline continues, and rest is exact")
+}
+
+if wants("quiet_modes") {
+    var model = makeModel(.tucked(.bottom, along: 0.5))
+    model.send(.reduceMotion(true))
+    model.send(.reveal)
+    precondition(model.isAtRest && isPeeking(model), "reduce motion did not apply the end pose")
+    checkRest(model, "reduce motion")
+    model.send(.pointer(nil))
+    model.advance(by: PuckMotion.revealGrace + 0.01)
+    precondition(model.isAtRest && isTucked(model), "reduce motion tuck was not immediate")
+    checkRest(model, "reduce motion tuck")
+
+    var clicked = makeModel(.tucked(.left, along: 0.5))
+    clicked.send(.pointer(centre(clicked)))
+    clicked.send(.pressed)
+    clicked.send(.clicked)
+    precondition(isPeeking(clicked), "a click on a tab did not peek")
+
+    var hanging = makeModel(.hanging(CGPoint(x: 600, y: 300)))
+    hanging.send(.dragBegan(CGPoint(x: 700, y: 400)))
+    precondition(hanging.drainNotes().isEmpty, "left hanging before it moved")
+    hanging.send(.dragged(CGPoint(x: 710, y: 390)))
+    precondition(hanging.drainNotes() == [.leftHanging], "the first movement did not leave hanging")
+    hanging.send(.released(CGPoint(x: 710, y: 390)))
+    precondition(hanging.pose == .free, "a hanging puck carried off is not free")
+    print("quiet_modes: reduce motion, click-to-peek and leaving the hanging pose")
+}
+
+if wants("needs_time") {
+    // Every kind of rest, driven by the app's rule (time only while needsTime,
+    // asked again after every event): a pointer arriving still peeks after the
+    // dwell, and one leaving still tucks after the grace.
+    func on(_ model: Dock, _ edge: Dock.Edge, along: CGFloat) -> CGPoint {
+        let rect = model.tabFootprint(edge, along: along)
+        return CGPoint(x: rect.midX, y: rect.midY)
+    }
+    for edge in Dock.Edge.allCases {
+        var idle = makeModel(.tucked(edge, along: 0.5))
+        precondition(!idle.needsTime, "a tucked puck with no pointer asked for time")
+        run(&idle, for: 5)
+        precondition(isTucked(idle), "an idle tab moved")
+        idle.send(.pointer(on(idle, edge, along: 0.5)))
+        precondition(idle.needsTime, "a pointer on a tab did not ask for time")
+        run(&idle, for: PuckMotion.dwell + 0.1)
+        precondition(isPeeking(idle), "a pointer arriving at an idle tab never peeked on \(edge)")
+        run(&idle, for: 2)
+        precondition(isPeeking(idle) && !idle.needsTime, "a peek with the pointer on it did not stay out and go idle")
+        idle.send(.pointer(nil))
+        precondition(idle.needsTime, "a peek with the pointer gone did not ask for time")
+        run(&idle, for: PuckMotion.grace - 0.1)
+        precondition(isPeeking(idle), "tucked before the grace")
+        run(&idle, for: 0.3)
+        precondition(isTucked(idle), "a pointer leaving never tucked a peek on \(edge)")
+        run(&idle, for: 2)
+        checkRest(idle, "needs time \(edge)")
+
+        // A skim that left before the dwell must not leave a count behind.
+        var skim = makeModel(.tucked(edge, along: 0.5))
+        skim.send(.pointer(on(skim, edge, along: 0.5)))
+        run(&skim, for: 0.15)
+        skim.send(.pointer(nil))
+        run(&skim, for: 1)
+        skim.send(.pointer(on(skim, edge, along: 0.5)))
+        run(&skim, for: 0.1)
+        precondition(isTucked(skim), "a stale dwell made a skim peek early")
+        run(&skim, for: 0.2)
+        precondition(isPeeking(skim), "the second visit never peeked")
+    }
+    for place in [Dock.Place.free(CGPoint(x: 300, y: 300)), .hanging(CGPoint(x: 300, y: 300))] {
+        var model = makeModel(place)
+        model.send(.pointer(CGPoint(x: 400, y: 400)))
+        precondition(!model.needsTime, "a puck that is not at an edge asked for time")
+    }
+    print("needs_time: a driver that ticks only while needsTime still peeks and tucks, and idles otherwise")
+}
+
+if wants("reveal_grace") {
+    // Nobody pointing: out for the long first wait, then gone.
+    var alone = makeModel(.tucked(.right, along: 0.5))
+    alone.send(.reveal)
+    run(&alone, for: PuckMotion.revealGrace - 0.2)
+    precondition(isPeeking(alone) && alone.needsTime, "a reveal gave up before the reveal grace")
+    run(&alone, for: 0.4)
+    precondition(isTucked(alone), "a reveal nobody pointed at never tucked")
+    run(&alone, for: 3)
+    checkRest(alone, "reveal alone")
+
+    // A pointer that has been on it hands over to the ordinary grace.
+    var used = makeModel(.tucked(.right, along: 0.5))
+    used.send(.reveal)
+    run(&used, for: 1)
+    let origin = used.revealedOrigin(.right, along: 0.5)
+    used.send(.pointer(CGPoint(x: origin.x + panelSize.width / 2, y: origin.y + panelSize.height / 2)))
+    run(&used, for: 1)
+    precondition(isPeeking(used) && !used.needsTime, "a pointer on a revealed puck did not hold it")
+    used.send(.pointer(nil))
+    run(&used, for: PuckMotion.grace + 0.1)
+    precondition(isTucked(used), "after the pointer had been on it the grace was not the ordinary one")
+
+    // A click on a tab with the pointer elsewhere gets the long wait too.
+    var click = makeModel(.tucked(.left, along: 0.5))
+    click.send(.pressed)
+    click.send(.clicked)
+    run(&click, for: PuckMotion.grace + 1)
+    precondition(isPeeking(click), "a click with no pointer on the tab was taken back at the ordinary grace")
+    run(&click, for: PuckMotion.revealGrace)
+    precondition(isTucked(click), "a click with no pointer on the tab never tucked")
+    print("reveal_grace: a menu reveal stays out for the long wait, then the ordinary grace governs")
+}
+
+if wants("tracking_gap") {
+    // The strip of tab nearest the screen's edge is inside the window but outside
+    // the view's tracking area, so a pointer parked there is never reported
+    // leaving. The clock must go on reading it, and must tuck once it has gone.
+    for edge in Dock.Edge.allCases {
+        rereads = true
+        defer { rereads = false }
+        var model = makeModel(.tucked(edge, along: 0.5))
+        physical = nil
+        let rect = model.tabFootprint(edge, along: 0.5)
+        var parked = CGPoint(x: rect.midX, y: rect.midY)
+        switch edge {
+        case .right: parked.x = rect.maxX - 0.5
+        case .left: parked.x = rect.minX + 0.5
+        case .top: parked.y = rect.maxY - 0.5
+        case .bottom: parked.y = rect.minY + 0.5
+        }
+        movePointer(&model, to: parked)
+        run(&model, for: PuckMotion.dwell + 2)
+        precondition(isPeeking(model), "a pointer on the tab never peeked on \(edge)")
+        precondition(model.keepsPeeking(parked, edge, along: 0.5), "the parked point is not in the keep region")
+        precondition(!model.trackedByView(parked), "the parked point was meant to be outside the tracking area on \(edge)")
+        precondition(model.needsTime, "a pointer no exit can be reported for let the clock stop on \(edge)")
+        run(&model, for: 5)
+        precondition(isPeeking(model), "the parked pointer lost its peek on \(edge)")
+        // leaves with no event, because it was never inside the tracking area
+        movePointer(&model, to: CGPoint(x: 700, y: 400))
+        run(&model, for: PuckMotion.grace + 0.3)
+        precondition(isTucked(model), "a pointer that left unannounced never tucked the peek on \(edge)")
+        run(&model, for: 2)
+        checkRest(model, "tracking gap \(edge)")
+
+        // inside the tracking area the exit is promised, so the clock may stop
+        var inside = makePeeking(edge, along: 0.5)
+        let origin = inside.revealedOrigin(edge, along: 0.5)
+        movePointer(&inside, to: CGPoint(x: origin.x + panelSize.width / 2, y: origin.y + panelSize.height / 2))
+        run(&inside, for: 1)
+        precondition(!inside.needsTime, "a pointer in the tracking area kept the clock running on \(edge)")
+    }
+    print("tracking_gap: a pointer parked where no exit is promised keeps the clock reading it")
+}
+
+if wants("partly_shared_edge") {
+    // A neighbour covers the middle of the left edge (y 300...600). The open
+    // half still takes a tab; the shared half never does, and a drag across the
+    // seam is never captured on the way.
+    let shared = screen(covered: [.left: [300...600]])
+    var open = makeModel(.free(CGPoint(x: 500, y: 20)), on: shared)
+    dragAndRelease(&open, toward: .left, gap: 10, along: 0.3)
+    precondition(isTucked(open) && edgePose(open)?.edge == .left, "the open part of a shared edge refused a tab")
+    run(&open, for: 3)
+    checkRest(open, "open half")
+
+    var covered = makeModel(.free(CGPoint(x: 500, y: 20)), on: shared)
+    dragAndRelease(&covered, toward: .left, gap: 10, along: 0.5)
+    precondition(covered.pose == .free, "the shared part of an edge took a tab")
+    run(&covered, for: 1)
+    checkRest(covered, "shared half")
+
+    // carried from the open part onto the shared span, 10 pt from the edge all the way
+    var across = makeModel(.free(CGPoint(x: 500, y: 100)), on: shared)
+    across.send(.pressed)
+    across.send(.dragBegan(CGPoint(x: 620, y: 230)))
+    var sawTab = false
+    for step in 0...22 {
+        let y = 160 + CGFloat(step) * 15
+        across.send(.dragged(CGPoint(x: 106, y: y)))
+        let middle = across.position.y + panelSize.height / 2
+        if (300...600).contains(middle) {
+            precondition(across.presentation.edge == nil && across.presentation.amount == 0,
+                         "a drag across the seam was captured at y \(y)")
+        } else if across.presentation.edge == .left && across.presentation.amount > 0 {
+            sawTab = true
+        }
+    }
+    precondition(sawTab, "the open part of the edge never showed a tab during the drag")
+    across.send(.released(CGPoint(x: 106, y: 490)))
+    precondition(across.pose == .free, "a puck let go on the seam was tucked")
+
+    // restore: the model says whether an edge is open at the remembered place
+    precondition(!shared.isOpen(.left, at: 450) && shared.isOpen(.left, at: 100) && shared.isOpen(.right, at: 450),
+                 "Screen.isOpen disagrees with its spans")
+    let probe = makeModel(.free(CGPoint(x: 500, y: 300)), on: shared)
+    precondition(!probe.isOpen(.left, along: 0.5) && probe.isOpen(.left, along: 0.3) && probe.isOpen(.right, along: 0.5),
+                 "the model cannot say whether a remembered edge is open")
+
+    // a neighbour arriving under a resting tab frees the puck, fully lit
+    var arriving = makeModel(.tucked(.left, along: 0.5))
+    arriving.send(.screenChanged(shared))
+    precondition(arriving.pose == .free && arriving.isAtRest, "a tab against a new seam stayed")
+    precondition(arriving.drainNotes().contains(.placed(.free(arriving.position))), "the new place was not remembered")
+    checkRest(arriving, "tab against a new seam")
+    print("partly_shared_edge: tabs only grow where the edge is open")
+}
+
+if wants("screen_change_at_rest") {
+    // The visible frame changes under a resting puck (the system Dock or menu bar
+    // resizes): it is re-anchored on the spot, exactly.
+    for edge in Dock.Edge.allCases {
+        var tucked = makeModel(.tucked(edge, along: 0.5))
+        tucked.send(.screenChanged(screen(1300, 800)))
+        checkRest(tucked, "tucked after the frame changed \(edge)")
+        var peeking = makePeeking(edge, along: 0.5)
+        peeking.send(.screenChanged(screen(1300, 800)))
+        checkRest(peeking, "peeking after the frame changed \(edge)")
+        precondition(peeking.presentation.origin == peeking.revealedOrigin(edge, along: 0.5), "peek not re-anchored")
+    }
+    print("screen_change_at_rest: a changed visible frame re-anchors resting tabs and peeks exactly")
+}
+
+if wants("hold_ended") {
+    // The window hid or the dock went away under a hand: the hold is ended where
+    // the puck is, and wherever that leaves it must come to rest legally.
+    for gap in [CGFloat(10), 26, 90] {
+        var model = makeModel(.free(CGPoint(x: 500, y: 300)))
+        dragAndRelease(&model, toward: .right, gap: gap, along: 0.5, releasing: false)
+        precondition(!model.isAtRest, "a held puck was at rest")
+        model.send(.released(model.pointer ?? centre(model)))
+        model.send(.pointer(nil))
+        run(&model, for: 6)
+        checkRest(model, "hold ended at gap \(gap)")
+    }
+    var grabbed = makeModel(.tucked(.left, along: 0.4))
+    grabbed.send(.pressed)
+    grabbed.send(.dragBegan(centre(grabbed)))
+    grabbed.send(.released(grabbed.pointer ?? centre(grabbed)))
+    grabbed.send(.pointer(nil))
+    run(&grabbed, for: 6)
+    checkRest(grabbed, "tucked grab ended")
+    print("hold_ended: a hold ended without its hand comes to rest in a legal pose")
+}

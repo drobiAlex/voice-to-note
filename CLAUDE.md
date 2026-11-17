@@ -162,7 +162,10 @@ replaces `sys.stderr` with a capture object whose `fileno()` is -1, which `multi
 ## Swift on the remote Mac
 
 Puck motion is configured in `PuckMotion` in `native/menubar.swift`; window physics and
-Core Animation springs derive from the same constants. `native/springs.swift` is vendored
+Core Animation springs derive from the same constants. `PuckDockModel` (also there, Foundation
+geometry only, tested by `tests/dock_model_harness.swift`) owns where the puck is and how merged
+with a screen edge it looks; `Dock` only tells it what happened, applies its presentation in one
+place and runs a clock while it needs time. `native/springs.swift` is vendored
 CocoaSprings physics: preserve its upstream formatting and headers, and exempt it from the
 prose-docstring rule so future upstream comparisons remain meaningful.
 
