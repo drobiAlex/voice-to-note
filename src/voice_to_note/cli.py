@@ -665,7 +665,7 @@ def cmd_delete(args: argparse.Namespace) -> None:
             ):
                 status("kept")
                 return
-            filename = services.purge_memo(repo, args.id)
+            filename = services.purge_memo(repo, args.id, log=status)
             status(f"deleted memo {args.id} — {filename} for good")
             return
         filename = services.delete_memo(repo, args.id)
@@ -697,22 +697,37 @@ def cmd_bin(args: argparse.Namespace) -> None:
 
 
 def cmd_bin_empty(args: argparse.Namespace) -> None:
-    """Throws everything in the bin away for good, after saying how many memos
-    that is and asking, unless told --yes. The count is the point of the
-    prompt: emptying is the one thing that cannot be undone from here."""
+    """Throws the memos in the bin away for good, after saying how many that is
+    and asking, unless told --yes. The ids the question counted are the ones
+    that go: a memo another process binned while the question was open was never
+    shown, so it stays, and the line that closes the command says so. The count
+    is the point of the prompt: emptying is the one thing that cannot be undone
+    from here."""
+    if args.json:
+        sys.exit("bin empty prints nothing to read as JSON — drop --json")
     with Repository() as repo:
-        count = services.binned_count(repo)
-        if not count:
+        shown = [m.id for m in services.binned_memos(repo)]
+        if not shown:
             status("the bin is already empty")
             return
-        plural = "" if count == 1 else "s"
+        plural = "" if len(shown) == 1 else "s"
         if not _confirmed_for_good(
-            f"delete {count} memo{plural} in the bin for good? it cannot be undone.", args.yes
+            f"delete {len(shown)} memo{plural} in the bin for good? it cannot be undone.",
+            args.yes,
         ):
             status("kept")
             return
-        services.empty_bin(repo)
-    status(f"emptied the bin — {count} memo{plural} deleted for good")
+        result = services.empty_bin(repo, shown, log=status)
+    status(
+        f"emptied the bin — {result.purged} memo{'' if result.purged == 1 else 's'}"
+        " deleted for good"
+    )
+    if result.arrived:
+        status(f"{result.arrived} more arrived in the bin meanwhile and were kept")
+    if result.restored:
+        status(f"{result.restored} were restored meanwhile and were kept")
+    if result.refused:
+        status(f"{result.refused} could not be deleted, see above")
 
 
 def cmd_archive(args: argparse.Namespace) -> None:

@@ -326,11 +326,11 @@ def test_emptying_the_bin_removes_every_binned_memo_and_no_live_one(repo, wav):
     services.delete_memo(repo, first)
     services.delete_memo(repo, second)
 
-    assert services.empty_bin(repo) == 2
+    assert services.empty_bin(repo).purged == 2
 
     assert repo.binned() == []
     assert repo.memo(live) is not None
-    assert services.empty_bin(repo) == 0
+    assert services.empty_bin(repo).purged == 0
 
 
 # --- an old database --------------------------------------------------------

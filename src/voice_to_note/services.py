@@ -2614,10 +2614,16 @@ def delete_memo(repo: Repository, memo_id: int) -> str:
     recordings are matched against — a name only recognised from this one memo
     stops being recognised while it is in the bin, and is again once it is out.
 
+    A memo still being recorded cannot be binned: the live session is appending
+    to it, and a recording that vanished from every list would still be taping.
+    Whether a memo is mid-processing is something only the screen running the
+    job knows, so that refusal is the screen's.
+
     Deleting a memo already in the bin is not an error, the same way archiving
     an archived one is not: the request and the result already agree, and the
     memo keeps the date it really went in."""
     memo = require_memo(repo, memo_id, binned_ok=True)
+    _require_not_recording(memo)
     repo.set_binned(memo_id, True)
     return memo.filename
 
@@ -2633,23 +2639,52 @@ def restore_memo(repo: Repository, memo_id: int) -> str:
     return memo.filename
 
 
-def purge_memo(repo: Repository, memo_id: int) -> str:
+class NotInBin(InvalidInput):
+    """A memo somebody confirmed deleting for good is no longer in the bin: it
+    was restored while the question was on screen. Nothing was deleted."""
+
+    def __init__(self, memo_id: int) -> None:
+        super().__init__(f"memo {memo_id} was restored meanwhile — nothing was deleted")
+        self.memo_id = memo_id
+
+
+def purge_memo(
+    repo: Repository, memo_id: int, *, only_if_binned: bool = False, log: Log = _silent
+) -> str:
     """Throws a memo away for good, whether or not it is in the bin, reporting
     what it was called so the caller can say what went. The transcript, the
     notes and the speakers go with it, and with them the memo's place in any
     conversation.
 
-    Only the converted wav this app wrote is deleted from disk. The recording it
-    was made from is left where it is: that copy is the user's own archive of
-    the audio, and deleting a memo means dropping what was made of a recording,
-    not the recording itself. Asking first is the front end's job; nothing here
-    does, and nothing in the app calls this on its own — no age, no timer, no
-    startup sweep."""
+    only_if_binned is for a caller that asked about the bin: somebody who was
+    shown a binned memo and said yes meant that memo as it was then, and
+    another process may have restored it while the question was open. Then
+    nothing is deleted and NotInBin says so. Without it any memo goes, which is
+    what `delete --forever` on a live memo means and what its prompt names.
+
+    A memo still being recorded is refused either way.
+
+    Only the converted wav this app wrote is deleted from disk, and only when
+    the memo has one: a video import stores no path at all, and an empty path
+    would otherwise name the current directory. The recording it was made from
+    is left where it is: that copy is the user's own archive of the audio, and
+    deleting a memo means dropping what was made of a recording, not the
+    recording itself. A file that cannot be removed is reported through log and
+    does not stop the deletion, which has already happened by then. Asking
+    first is the front end's job; nothing here does, and nothing in the app
+    calls this on its own — no age, no timer, no startup sweep."""
     memo = require_memo(repo, memo_id, binned_ok=True)
+    _require_not_recording(memo)
+    if only_if_binned and not memo.deleted_at:
+        raise NotInBin(memo_id)
     repo.delete_memo(memo_id)
     # the row is what says a memo exists, so it goes first and the file follows:
     # a wav already removed by hand must not leave a memo that cannot be deleted
-    Path(memo.wav_path).unlink(missing_ok=True)
+    if memo.wav_path:
+        try:
+            Path(memo.wav_path).unlink(missing_ok=True)
+        except OSError as e:
+            log(f"memo {memo_id} deleted, but its audio {memo.wav_path} could not be removed: {e}")
     return memo.filename
 
 
@@ -2677,14 +2712,45 @@ def binned_count(repo: Repository) -> int:
     return repo.binned_count()
 
 
-def empty_bin(repo: Repository) -> int:
-    """Throws everything in the bin away for good and reports how many memos
-    went. Each one goes the way `purge_memo` sends one, so a wav already gone
-    from disk cannot leave the rest of the bin standing."""
-    doomed = repo.binned()
-    for memo in doomed:
-        purge_memo(repo, memo.id)
-    return len(doomed)
+@dataclass(frozen=True)
+class EmptiedBin:
+    """What emptying the bin did, against what was shown when it was asked for."""
+
+    purged: int
+    # shown, then restored before the yes: kept, as they are live memos now
+    restored: int
+    # binned after the question was put: kept, since nobody saw them
+    arrived: int
+    # shown and still binned but refused, a recording that cannot go
+    refused: int
+
+
+def empty_bin(
+    repo: Repository, shown: Sequence[int] | None = None, log: Log = _silent
+) -> EmptiedBin:
+    """Throws away for good the memos somebody was shown in the bin and agreed
+    to lose. `shown` is the ids the question named; only those still in the bin
+    go, so a memo another process binned after the question was asked is kept,
+    and one it restored is not touched. Without `shown` everything in the bin
+    now goes. Each goes the way `purge_memo` sends one, and one whose audio
+    cannot be removed or which cannot go at all does not stop the rest."""
+    now = [m.id for m in repo.binned()]
+    wanted = now if shown is None else list(dict.fromkeys(shown))
+    purged = refused = 0
+    for memo_id in wanted:
+        try:
+            purge_memo(repo, memo_id, only_if_binned=True, log=log)
+        except NotInBin:
+            continue
+        except (NotFound, InvalidInput) as why:
+            log(str(why))
+            refused += 1
+            continue
+        purged += 1
+    gone = set(wanted)
+    restored = sum(1 for memo_id in gone if memo_id not in now)
+    arrived = sum(1 for memo_id in now if memo_id not in gone)
+    return EmptiedBin(purged, restored, arrived, refused)
 
 
 def _audio_bytes(wav_path: str) -> int:

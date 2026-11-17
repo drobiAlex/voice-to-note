@@ -836,7 +836,9 @@ class ConfirmDelete(ModalScreen[bool]):
     so the question names the memo it is about: the row under the cursor is
     not always the one somebody thinks they are pointing at."""
 
-    BINDINGS = [("y,enter", "delete", "Delete it"), ("n,escape", "keep", "Keep it")]
+    # only an explicit y destroys: Enter is what a hand presses to get a dialog
+    # out of the way, and here that must keep the memo
+    BINDINGS = [("y", "delete", "Delete it"), ("n,escape,enter", "keep", "Keep it")]
 
     def __init__(self, filename: str) -> None:
         """Opens on the memo about to go."""
@@ -864,7 +866,8 @@ class ConfirmEmptyBin(ModalScreen[bool]):
     The question carries the count, because how much is about to go is the
     one fact that tells somebody whether to say yes."""
 
-    BINDINGS = [("y,enter", "empty", "Empty it"), ("n,escape", "keep", "Keep them")]
+    # an explicit y only, for ConfirmDelete's reason
+    BINDINGS = [("y", "empty", "Empty it"), ("n,escape,enter", "keep", "Keep them")]
 
     def __init__(self, count: int) -> None:
         """Opens on how many memos are about to go."""
@@ -2559,6 +2562,11 @@ class MemoApp(App[None]):
         if version == self.seen_version:
             return
         self.seen_version = version
+        # an id another process has purged may be handed to the next memo
+        # stored, so the undo stack keeps only what is still in the bin
+        self.deleted_here = [
+            i for i in self.deleted_here if services.memo_is_binned(self.repo, i)
+        ]
         self.load_projects()
         self._relist_in_place()
         # another process may have sent the memo being read to the bin, or
@@ -3374,7 +3382,16 @@ class MemoApp(App[None]):
         memo_id = self._target_memo()
         if memo_id is None:
             return
-        filename = services.delete_memo(self.repo, memo_id)
+        if memo_id in self.jobs:
+            # a pass is writing to this memo from another thread; binning it now
+            # would have the pass finish into a memo that has left every list
+            self.notify("memo is being worked on — try again once it finishes", severity="warning")
+            return
+        try:
+            filename = services.delete_memo(self.repo, memo_id)
+        except services.InvalidInput as refused:
+            self.notify(str(refused), severity="warning")
+            return
         self.deleted_here.append(memo_id)
         self._left_the_list(memo_id)
         self.notify(f'moved "{filename}" to the bin — u to undo')
@@ -3432,27 +3449,54 @@ class MemoApp(App[None]):
         bin without it. Says what went by name, since its row is gone."""
         if not confirmed:
             return
-        filename = services.purge_memo(self.repo, memo_id)
+        try:
+            filename = services.purge_memo(
+                self.repo, memo_id, only_if_binned=True, log=self._warn
+            )
+        except services.InvalidInput as refused:
+            # restored while the question was up, or a recording: nothing went
+            self.load_projects()
+            self._relist()
+            self.notify(str(refused), severity="warning")
+            return
+        self._forget_deleted(memo_id)
         self.load_projects()
         self._relist()
         self.notify(f'deleted "{filename}" for good')
 
+    def _warn(self, message: str) -> None:
+        """Says something went wrong with a file while a memo was being deleted
+        for good — the memo is gone either way."""
+        self.notify(message, severity="warning")
+
+    def _forget_deleted(self, *memo_ids: int) -> None:
+        """Drops memos from the undo stack once they are gone for good. sqlite
+        hands a deleted row's id to the next memo stored, so an id left behind
+        could one day make u restore somebody else's memo."""
+        self.deleted_here = [i for i in self.deleted_here if i not in memo_ids]
+
     def action_empty_bin(self) -> None:
         """Offers to remove everything in the bin permanently, stating how many
         memos that is while it asks."""
-        count = services.binned_count(self.repo)
-        if not self._in_bin() or not count:
+        if not self._in_bin() or not services.binned_count(self.repo):
             return
-        self.push_screen(ConfirmEmptyBin(count), self._empty_bin)
+        # the memos the question counted are the ones that go
+        shown = [m.id for m in services.binned_memos(self.repo)]
+        self.push_screen(
+            ConfirmEmptyBin(len(shown)), lambda confirmed: self._empty_bin(shown, confirmed)
+        )
 
-    def _empty_bin(self, confirmed: bool | None) -> None:
-        """Empties the bin once they have said to."""
+    def _empty_bin(self, shown: list[int], confirmed: bool | None) -> None:
+        """Empties the bin of the memos the question named, once they have said
+        to. Memos binned since stay, and the notice says how many."""
         if not confirmed:
             return
-        count = services.empty_bin(self.repo)
+        result = services.empty_bin(self.repo, shown, log=self._warn)
+        self._forget_deleted(*shown)
         self.load_projects()
         self._relist()
-        self.notify(f"emptied the bin — {count} deleted for good")
+        kept = f", {result.arrived} binned since were kept" if result.arrived else ""
+        self.notify(f"emptied the bin — {result.purged} deleted for good{kept}")
 
     def action_toggle_archive(self) -> None:
         """Puts the pointed-at memo away, or takes it back out when it is

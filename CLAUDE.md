@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```sh
-uv run pytest -q                  # 1160 tests, spread over the cores by default
+uv run pytest -q                  # 1184 tests (4 more skipped), spread over the cores by default
 uv run pytest -m "not ui"         # skip the Textual Pilot tests (tests/test_tui.py)
 uv run pytest tests/test_services.py::test_name   # single test
 uv run mypy src
@@ -111,7 +111,7 @@ ask/chat all just work. Duplicates are recognised by the canonical `source_url` 
 `recorded_at` (the upload day only stamps midnight). yt-dlp is a subprocess on purpose: the user
 keeps it current with brew as YouTube churns, which is also the first fix for any fetch failure.
 
-**Delete means the bin.** `memos.deleted_at` set means the memo is in the bin: every row under it and the wav are untouched, and `services.delete_memo` does nothing else. A binned memo must be absent from every listing and count — list, archive drawer, projects, tags, the to-do board, chat listings and scopes, and the voice pool later recordings are matched against — so a new query that lists memos, or joins from a child table to them, filters `deleted_at IS NULL` or it resurrects what somebody deleted. `deleted_at` is independent of `archived_at`, which is preserved through bin and restore. `services.require_memo` raises `InBin` (a `NotFound`: `memo 12 is in the bin — vtn restore 12`) for every by-id use case; only restore, `purge_memo` and `info` pass `binned_ok`. Permanent removal is `purge_memo` / `empty_bin` only, behind a confirmation in the front end, and nothing purges on its own — no age, timer or startup sweep. In the TUI the memo keys act on the highlighted row (`_target_memo`), never on the memo left open below the list.
+**Delete means the bin.** `memos.deleted_at` set means the memo is in the bin: every row under it and the wav are untouched, and `services.delete_memo` does nothing else. A binned memo must be absent from every listing and count — list, archive drawer, projects, tags, the to-do board, chat listings and scopes, and the voice pool later recordings are matched against — so a new query that lists memos, or joins from a child table to them, filters `deleted_at IS NULL` or it resurrects what somebody deleted. `deleted_at` is independent of `archived_at`, which is preserved through bin and restore. `services.require_memo` raises `InBin` (a `NotFound`: `memo 12 is in the bin — vtn restore 12`) for every by-id use case; only restore, `purge_memo` and `info` pass `binned_ok`. Permanent removal is `purge_memo` / `empty_bin` only, behind a confirmation in the front end that purges only the ids it showed and only while they are still binned (`empty_bin(shown=…)`, `purge_memo(only_if_binned=True)`); a recording is never binned or purged, and nothing purges on its own — no age, timer or startup sweep. In the TUI the memo keys act on the highlighted row (`_target_memo`), never on the memo left open below the list.
 
 **Migrations are additive.** `Repository._migrate` guards each `ALTER TABLE` with
 `PRAGMA table_info`; there is no version table. A brand-new `todos` table triggers a one-off

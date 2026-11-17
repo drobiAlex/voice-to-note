@@ -621,15 +621,29 @@ class Repository:
         """Files everything under one project into another in a single statement,
         reporting how many memos that carried. Renaming a project and emptying
         one are both this: a project is only a value on its memos, so there is
-        nothing else anywhere to rename or delete."""
+        nothing else anywhere to rename or delete.
+
+        Memos in the bin follow the live ones, so a restore lands in the project
+        as it is now named rather than in one that no longer exists, but they
+        are neither counted nor stamped: the count is what somebody could see
+        move, and a binned memo has not been changed by anyone as far as its
+        reader knows — its place in a list ordered by update is its own when it
+        comes back. A project holding only binned memos has nothing visible to
+        move, so it is left alone and reports none."""
         with self.con:
             # the stamp _touch makes, written in here rather than called: this is
             # one statement over a whole project by contract, and folding it in
             # keeps the rowcount the count of memos carried
             cur = self.con.execute(
-                "UPDATE memos SET project=?, updated_at=datetime('now') WHERE project=?",
+                "UPDATE memos SET project=?, updated_at=datetime('now')"
+                " WHERE project=? AND deleted_at IS NULL",
                 (new, old),
             )
+            if cur.rowcount:
+                self.con.execute(
+                    "UPDATE memos SET project=? WHERE project=? AND deleted_at IS NOT NULL",
+                    (new, old),
+                )
         return cur.rowcount
 
     def memo(self, memo_id: int) -> Memo | None:
