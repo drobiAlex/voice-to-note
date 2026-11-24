@@ -52,7 +52,7 @@ vtn ask 3 "who owns the launch?"  # ask a question about a memo
 - To-dos survive re-extraction: checked-off items stay checked.
 - Projects, tags, an archive drawer and a bin that deleted memos wait in until you empty it, from the TUI or the CLI.
 - Live transcription while a meeting records.
-- Custom note templates beside the built-in ones.
+- Custom note templates beside the built-in ones. A template can add sections of its own with a few lines of TOML front matter (the shipped `video` template asks "Worth watching?", "Questions answered" and "Hidden insights"), each kind of source has its own default (`vtn config` → `youtube_template`, `record_template`, `file_template`), and a memo remembers its template for the next re-extraction.
 - A menu bar recorder: [`docs/menubar.md`](docs/menubar.md).
 
 ## Roadmap

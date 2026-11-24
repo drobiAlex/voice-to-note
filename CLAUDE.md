@@ -103,7 +103,25 @@ the parser downstream enforces. The subset a `--template` flag may pick lives in
 `llm.NOTE_TEMPLATES` (notes/interview/lecture/tutorial/learning, all sharing `_NOTES_SHAPE`);
 `services.note_templates()` filters anything registered in `TEMPLATES` out of the custom-file list,
 so a new shipped note template goes into `NOTE_TEMPLATES` — putting it only in `TEMPLATES` hides
-it. `vtn template new <name> --from <existing>` copies one into a custom file.
+it (and into `services._TEMPLATE_DOCS`). `vtn template new <name> --from <existing>` copies one
+into a custom file, front matter included.
+
+A template may open with TOML front matter between two `+++` lines; `transforms.templates.
+parse_template` splits it into a frozen `ParsedTemplate(body, sections, tables)`. `[sections]`
+(heading = what goes there, in file order) makes vtn itself add the instruction for an optional
+`sections` key to the prompt, ahead of the trailing `Transcript:` line — the author never edits the
+JSON shape. Other tables are kept in `tables`, not rejected. `parse_notes` keeps well-formed section
+entries and drops the rest; both renderers show them after the fixed sections. Broken front matter
+raises `InvalidInput` naming the file (`llm.parsed_template` adds the path, `services.note_template`
+converts it, so every `--template` check catches it early).
+
+Each source has a default template — settings `youtube_template` (`video`), `record_template` and
+`file_template` (`notes`) — resolved in `services.default_template(source)` / `resolve_template`.
+They are free text because custom names are only known at run time, so they are validated at use,
+and a stale name raises an error that names the setting. `--template` is None unless given. The
+`extractions.template` column remembers the name; `run_extraction` without one uses
+`extraction_template` (stored name if it still exists, else the source default — a memo with
+`source_url` is a video, anything else counts as a file since a recording leaves no mark).
 
 **A memo can come from a video.** `vtn youtube <url>` stores YouTube captions as ordinary timed
 segments with `wav_path=''` and no speakers — status lands `'transcribed'`, so extract/refine/

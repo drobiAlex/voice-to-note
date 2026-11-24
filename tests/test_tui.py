@@ -2020,7 +2020,7 @@ async def test_a_youtube_video_is_imported_and_extracted_off_the_ui_thread(
         await finish_jobs(pilot)
 
         assert not showing(pilot.app, "#youtube-url")
-        assert extracted and extracted[0][1] == "notes"
+        assert extracted and extracted[0][1] == "video"
         assert "A useful lecture" in memo_names(pilot.app)
         assert any("is memo" in message for message in said(pilot))
 
@@ -2031,7 +2031,7 @@ async def test_writing_the_notes_again_extracts_them_for_the_memo_on_screen(repo
     # the real cross-thread path and not just the key binding
     _work, home = seed(repo)
 
-    def extract(worker_repo, memo_id, force=False):
+    def extract(worker_repo, memo_id, force=False, template=None):
         worker_repo.save_extraction(memo_id, "claude", {**NOTES, "title": "Shopping list"})
         return "claude"
 
@@ -2039,7 +2039,7 @@ async def test_writing_the_notes_again_extracts_them_for_the_memo_on_screen(repo
 
     async with MemoApp(repo).run_test() as pilot:
         await open_memo(pilot, home)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await finish_jobs(pilot)
 
         assert said(pilot) == ["writing notes: memo 2 \"shopping.m4a\" …", "notes written for memo 2 via claude"]
@@ -2072,7 +2072,7 @@ async def test_a_second_job_on_one_memo_is_refused_rather_than_queued(repo, monk
     work, _home = seed(repo)
     holding = threading.Event()
 
-    def slow(_repo, _memo_id, force=False):
+    def slow(_repo, _memo_id, force=False, template=None):
         holding.wait(timeout=5)
         return "claude"
 
@@ -2080,9 +2080,9 @@ async def test_a_second_job_on_one_memo_is_refused_rather_than_queued(repo, monk
 
     async with MemoApp(repo).run_test() as pilot:
         await open_memo(pilot, work)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await pilot.pause()
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await pilot.pause()
 
         assert said(pilot) == ["writing notes: memo 1 \"standup.m4a\" …", 'memo 1 "standup.m4a" is already busy']
@@ -2097,7 +2097,7 @@ async def test_two_memos_can_be_worked_on_at_the_same_time(repo, monkeypatch):
     work, home = seed(repo)
     holding = threading.Event()
 
-    def slow(_repo, _memo_id, force=False):
+    def slow(_repo, _memo_id, force=False, template=None):
         holding.wait(timeout=5)
         return "claude"
 
@@ -2105,10 +2105,10 @@ async def test_two_memos_can_be_worked_on_at_the_same_time(repo, monkeypatch):
 
     async with MemoApp(repo).run_test() as pilot:
         await open_memo(pilot, work)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await pilot.pause()
         await open_memo(pilot, home)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await pilot.pause()
 
         assert pilot.app.jobs == {work, home}
@@ -2123,14 +2123,14 @@ async def test_a_gateway_that_is_down_says_so_instead_of_taking_the_app_down(rep
     # a worker that raises kills the whole app, so the known failures are caught
     work, _home = seed(repo)
 
-    def unavailable(_repo, _memo_id, force=False):
+    def unavailable(_repo, _memo_id, force=False, template=None):
         raise GatewayError("ollama is not running")
 
     monkeypatch.setattr(services, "run_extraction", unavailable)
 
     async with MemoApp(repo).run_test() as pilot:
         await open_memo(pilot, work)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await finish_jobs(pilot)
 
         assert said(pilot) == ["writing notes: memo 1 \"standup.m4a\" …", "ollama is not running"]
@@ -2142,7 +2142,7 @@ async def test_a_memo_can_be_worked_on_again_once_its_job_has_finished(repo, mon
     work, _home = seed(repo)
     runs: list[int] = []
 
-    def extract(_repo, memo_id, force=False):
+    def extract(_repo, memo_id, force=False, template=None):
         runs.append(memo_id)
         return "claude"
 
@@ -2150,9 +2150,9 @@ async def test_a_memo_can_be_worked_on_again_once_its_job_has_finished(repo, mon
 
     async with MemoApp(repo).run_test() as pilot:
         await open_memo(pilot, work)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await finish_jobs(pilot)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await finish_jobs(pilot)
 
         assert runs == [work, work]
@@ -2170,7 +2170,7 @@ async def test_extracting_over_a_note_somebody_wrote_asks_first(repo, monkeypatc
 
     async with MemoApp(repo).run_test() as pilot:
         await open_memo(pilot, work)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await pilot.pause()
 
         assert showing(pilot.app, "#confirm-force")
@@ -2183,7 +2183,7 @@ async def test_agreeing_to_overwrite_extracts_over_the_edit(repo, monkeypatch):
     repo.save_notes_md(work, "# My own words")
     seen: dict = {}
 
-    def extract(_repo, _memo_id, force=False):
+    def extract(_repo, _memo_id, force=False, template=None):
         seen["force"] = force
         return "claude"
 
@@ -2191,7 +2191,7 @@ async def test_agreeing_to_overwrite_extracts_over_the_edit(repo, monkeypatch):
 
     async with MemoApp(repo).run_test() as pilot:
         await open_memo(pilot, work)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await pilot.pause()
         await pilot.press("y")
         await finish_jobs(pilot)
@@ -2205,12 +2205,12 @@ async def test_declining_to_overwrite_runs_nothing_at_all(repo, monkeypatch):
     repo.save_notes_md(work, "# My own words")
     ran = []
     monkeypatch.setattr(
-        services, "run_extraction", lambda _r, _i, force=False: ran.append(force)
+        services, "run_extraction", lambda _r, _i, force=False, template=None: ran.append(force)
     )
 
     async with MemoApp(repo).run_test() as pilot:
         await open_memo(pilot, work)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await pilot.pause()
         assert showing(pilot.app, "#confirm-force")
 
@@ -2230,7 +2230,7 @@ async def test_work_finishing_on_a_memo_you_have_left_does_not_redraw_it(repo, m
     # test proves nothing about what happens to somebody who walked away
     holding = threading.Event()
 
-    def extract(worker_repo, memo_id, force=False):
+    def extract(worker_repo, memo_id, force=False, template=None):
         holding.wait(timeout=5)
         # a title the seeded notes do not already carry, or this proves nothing
         worker_repo.save_extraction(memo_id, "claude", {**NOTES, "title": "Fresh off the model"})
@@ -2240,7 +2240,7 @@ async def test_work_finishing_on_a_memo_you_have_left_does_not_redraw_it(repo, m
 
     async with MemoApp(repo).run_test() as pilot:
         await open_memo(pilot, work)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await pilot.pause()
         await open_memo(pilot, home)
 
@@ -2345,7 +2345,7 @@ async def test_extracting_from_the_keyboard_moves_the_row_on_to_extracted(
     # project and comes back
     _work, home = seed(repo)
 
-    def extract(worker_repo, memo_id, force=False):
+    def extract(worker_repo, memo_id, force=False, template=None):
         worker_repo.save_extraction(memo_id, "claude", NOTES)
         return "claude"
 
@@ -2355,7 +2355,7 @@ async def test_extracting_from_the_keyboard_moves_the_row_on_to_extracted(
         await listed_memo(pilot, "personal", home)
         assert row_for(pilot.app, "shopping.m4a")["status"] == "transcribed"
 
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await finish_jobs(pilot)
 
         assert row_for(pilot.app, "shopping.m4a")["status"] == "extracted"
@@ -2667,6 +2667,15 @@ async def from_menu(pilot, opener: str, key: str) -> None:
     await pilot.press(opener)
     await pilot.pause()
     await pilot.press(key)
+    await pilot.pause()
+
+
+async def write_notes(pilot) -> None:
+    """Asks for the notes to be written again from the menu and takes the
+    template the chooser opens on, the way a person who wants the same kind of
+    notes again does: the chooser is what stands between the key and the job."""
+    await from_menu(pilot, "space", "w")
+    await pilot.press("enter")
     await pilot.pause()
 
 
@@ -5337,7 +5346,7 @@ async def test_with_the_focus_in_the_open_memos_notes_extract_means_that_memo(re
     opened, highlighted = two_work_memos(repo)
     seen = []
 
-    def extract(_repo, memo_id, force=False):
+    def extract(_repo, memo_id, force=False, template=None):
         seen.append(memo_id)
         return "claude"
 
@@ -5347,6 +5356,8 @@ async def test_with_the_focus_in_the_open_memos_notes_extract_means_that_memo(re
         await open_then_highlight_the_other(pilot, "planning.m4a", "retro.m4a")
         await focus_a_notes_pane(pilot)
         await pilot.app.run_action("extract")
+        await pilot.pause()
+        await pilot.press("enter")
         await finish_jobs(pilot)
 
         assert seen == [opened]
@@ -5378,3 +5389,202 @@ async def test_the_notice_for_a_move_and_a_rename_names_the_memo_they_changed(re
 
         assert 'moved "retro.m4a" to side' in said(pilot)
         assert 'renamed "planning.m4a" to "Planning"' in said(pilot)
+
+
+# --- the note template an import or a re-extraction opens on ------------------
+
+
+@pytest.mark.asyncio
+async def test_the_youtube_form_opens_on_the_configured_youtube_template(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+
+        assert pilot.app.screen.query_one("#youtube-template", Select).value == "video"
+
+
+@pytest.mark.asyncio
+async def test_the_youtube_form_follows_the_setting_when_it_names_another_template(
+    repo, monkeypatch
+):
+    seed(repo)
+    monkeypatch.setattr(config, "YOUTUBE_TEMPLATE", "lecture")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+
+        assert pilot.app.screen.query_one("#youtube-template", Select).value == "lecture"
+
+
+@pytest.mark.asyncio
+async def test_the_recording_form_opens_on_the_configured_file_template(
+    repo, tmp_path, monkeypatch
+):
+    seed(repo)
+    monkeypatch.setattr(config, "FILE_TEMPLATE", "interview")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_add_modal(pilot, tmp_path)
+
+        assert pilot.app.screen.query_one("#note-template", Select).value == "interview"
+
+
+@pytest.mark.asyncio
+async def test_a_form_whose_configured_template_is_gone_opens_on_notes_and_says_why(
+    repo, monkeypatch
+):
+    seed(repo)
+    monkeypatch.setattr(config, "YOUTUBE_TEMPLATE", "gone")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+
+        assert pilot.app.screen.query_one("#youtube-template", Select).value == "notes"
+        assert any("youtube_template" in message for message in said(pilot))
+
+
+@pytest.mark.asyncio
+async def test_writing_the_notes_again_offers_the_template_they_were_made_with(
+    repo, monkeypatch
+):
+    work, _home = seed(repo)
+    repo.save_extraction(work, "claude", NOTES, template="lecture")
+    seen: dict = {}
+
+    def extract(_repo, memo_id, force=False, template=None):
+        seen["template"] = template
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", extract)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("space", "w")
+        await pilot.pause()
+
+        choices = pilot.app.screen.query_one("#template-choices", ListView)
+        assert choices.highlighted_child.name == "lecture"
+
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert seen == {"template": "lecture"}
+
+
+@pytest.mark.asyncio
+async def test_a_different_template_can_be_chosen_for_the_second_extraction(repo, monkeypatch):
+    work, _home = seed(repo)
+    repo.save_extraction(work, "claude", NOTES, template="notes")
+    seen: dict = {}
+
+    def extract(_repo, memo_id, force=False, template=None):
+        seen["template"] = template
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", extract)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("space", "w")
+        await pilot.pause()
+        await pilot.press("down", "enter")
+        await finish_jobs(pilot)
+
+        assert seen == {"template": "interview"}
+
+
+@pytest.mark.asyncio
+async def test_escaping_the_template_chooser_extracts_nothing(repo, monkeypatch):
+    work, _home = seed(repo)
+    ran = []
+    monkeypatch.setattr(
+        services, "run_extraction", lambda *a, **k: ran.append(k) or "claude"
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("space", "w")
+        await pilot.pause()
+        await pilot.press("escape")
+        await finish_jobs(pilot)
+
+        assert ran == []
+        assert pilot.app.jobs == set()
+
+
+@pytest.mark.asyncio
+async def test_a_memo_with_no_remembered_template_opens_the_chooser_on_its_source_default(
+    repo,
+):
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("space", "w")
+        await pilot.pause()
+
+        choices = pilot.app.screen.query_one("#template-choices", ListView)
+        assert choices.highlighted_child.name == "notes"
+
+
+@pytest.mark.asyncio
+async def test_the_chooser_shows_the_sections_a_template_adds(repo):
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("space", "w")
+        await pilot.pause()
+
+        rows = {
+            row.name: str(row.query_one(Label).render())
+            for row in pilot.app.screen.query_one("#template-choices", ListView).children
+        }
+        assert "Worth watching?" in rows["video"]
+        assert rows["notes"] == "notes"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_default_template_still_lets_the_chooser_open_on_notes(
+    repo, monkeypatch
+):
+    work, _home = seed(repo)
+    monkeypatch.setattr(config, "FILE_TEMPLATE", "gone")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("space", "w")
+        await pilot.pause()
+
+        choices = pilot.app.screen.query_one("#template-choices", ListView)
+        assert choices.highlighted_child.name == "notes"
+        assert any("file_template" in message for message in said(pilot))
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_template_file_is_listed_by_the_chooser_and_refused_when_chosen(
+    repo, tmp_path, monkeypatch
+):
+    work, _home = seed(repo)
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "binary.md").write_bytes(b"\xff\xfe\x00 not text")
+    monkeypatch.setattr(config, "TEMPLATES_DIR", templates)
+    ran = []
+    monkeypatch.setattr(services, "run_extraction", lambda *a, **k: ran.append(k) or "claude")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("space", "w")
+        await pilot.pause()
+        choices = pilot.app.screen.query_one("#template-choices", ListView)
+        names = [row.name for row in choices.children]
+        assert "binary" in names
+
+        choices.index = names.index("binary")
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert ran == []
+        assert any("binary.md" in message for message in said(pilot))

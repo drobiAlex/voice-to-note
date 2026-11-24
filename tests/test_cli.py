@@ -1,3 +1,4 @@
+import argparse
 import inspect
 import json
 import os
@@ -1747,3 +1748,148 @@ def test_youtube_passes_the_chosen_options_through_to_the_import(monkeypatch, ca
     )
 
     assert seen["call"] == ("abc123", "learning", "de")
+
+
+# --- a default note template per source ---------------------------------------
+
+
+def extraction_seen(monkeypatch) -> list:
+    """Stubs the pipeline around extraction and records the template each
+    run_extraction call was handed."""
+    seen: list = []
+
+    def run_extraction(_repo, _memo_id, force=False, template=None):
+        seen.append(template)
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", run_extraction)
+    monkeypatch.setattr(services, "notes", lambda *a, **k: "the notes")
+    return seen
+
+
+def stub_process(monkeypatch) -> None:
+    monkeypatch.setattr(
+        services,
+        "process_memo",
+        lambda _repo, _src, project="other", log=None, num_speakers=None, diarize=True: (
+            services.ProcessResult(1, 0, [], "en")
+        ),
+    )
+    fresh_import(monkeypatch)
+
+
+def test_processing_a_file_extracts_with_the_file_default_template(
+    tmp_path, monkeypatch, capsys
+):
+    src = tmp_path / "standup.m4a"
+    src.write_bytes(b"fake audio")
+    stub_process(monkeypatch)
+    seen = extraction_seen(monkeypatch)
+    monkeypatch.setattr(config, "FILE_TEMPLATE", "lecture")
+
+    run(monkeypatch, StubRepo(), "process", str(src))
+
+    assert seen == ["lecture"]
+
+
+def test_a_template_flag_overrides_the_file_default(tmp_path, monkeypatch, capsys):
+    src = tmp_path / "standup.m4a"
+    src.write_bytes(b"fake audio")
+    stub_process(monkeypatch)
+    seen = extraction_seen(monkeypatch)
+    monkeypatch.setattr(config, "FILE_TEMPLATE", "lecture")
+
+    run(monkeypatch, StubRepo(), "process", str(src), "--template", "interview")
+
+    assert seen == ["interview"]
+
+
+def test_a_file_default_naming_a_deleted_template_refuses_before_the_pipeline(
+    tmp_path, monkeypatch, capsys
+):
+    src = tmp_path / "standup.m4a"
+    src.write_bytes(b"fake audio")
+    monkeypatch.setattr(config, "FILE_TEMPLATE", "gone")
+    monkeypatch.setattr(
+        services, "process_memo", lambda *a, **k: pytest.fail("ran with a stale default")
+    )
+
+    with pytest.raises(SystemExit) as err:
+        run(monkeypatch, StubRepo(), "process", str(src))
+
+    assert "file_template" in str(err.value.code)
+
+
+def test_a_recording_takes_the_record_default_and_a_flag_overrides_it(monkeypatch):
+    monkeypatch.setattr(config, "RECORD_TEMPLATE", "interview")
+    args = argparse.Namespace(template=None)
+    cli._settled_template(args, "record")
+    assert args.template == "interview"
+
+    args = argparse.Namespace(template="lecture")
+    cli._settled_template(args, "record")
+    assert args.template == "lecture"
+
+
+def test_youtube_extracts_with_the_video_template_by_default(monkeypatch, capsys):
+    monkeypatch.setattr(services, "youtube_video", lambda _url: yt_video())
+    monkeypatch.setattr(
+        services,
+        "import_youtube",
+        lambda repo, video, project="other", lang=None, log=None: services.ProcessResult(
+            7, 3, [], "en"
+        ),
+    )
+    seen = extraction_seen(monkeypatch)
+
+    run(monkeypatch, StubRepo(), "youtube", "https://youtu.be/abc123")
+
+    assert seen == ["video"]
+
+
+def test_youtube_template_flag_overrides_the_configured_default(monkeypatch, capsys):
+    monkeypatch.setattr(services, "youtube_video", lambda _url: yt_video())
+    monkeypatch.setattr(
+        services,
+        "import_youtube",
+        lambda repo, video, project="other", lang=None, log=None: services.ProcessResult(
+            7, 3, [], "en"
+        ),
+    )
+    seen = extraction_seen(monkeypatch)
+
+    run(monkeypatch, StubRepo(), "youtube", "https://youtu.be/abc123", "--template", "lecture")
+
+    assert seen == ["lecture"]
+
+
+def test_youtube_with_a_deleted_default_template_never_touches_the_network(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(config, "YOUTUBE_TEMPLATE", "gone")
+    monkeypatch.setattr(
+        services, "youtube_video", lambda _url: pytest.fail("fetched despite a stale default")
+    )
+
+    with pytest.raises(SystemExit) as err:
+        run(monkeypatch, StubRepo(), "youtube", "https://youtu.be/abc123")
+
+    assert "youtube_template" in str(err.value.code)
+
+
+def test_re_extracting_without_a_template_leaves_the_choice_to_the_memo(monkeypatch, capsys):
+    seen = extraction_seen(monkeypatch)
+    monkeypatch.setattr(services, "require_memo", lambda _repo, _id: None)
+
+    run(monkeypatch, StubRepo(), "extract", "3")
+
+    assert seen == [None]
+
+
+def test_the_template_listing_names_the_sections_a_template_adds(monkeypatch, capsys):
+    run(monkeypatch, StubRepo(), "template")
+
+    lines = capsys.readouterr().out.splitlines()
+    video = next(line for line in lines if line.startswith("video"))
+    assert "Worth watching?, Questions answered, Hidden insights" in video
+    assert "+" not in next(line for line in lines if line.startswith("notes "))
