@@ -5543,3 +5543,48 @@ async def test_the_chooser_shows_the_sections_a_template_adds(repo):
         }
         assert "Worth watching?" in rows["video"]
         assert rows["notes"] == "notes"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_default_template_still_lets_the_chooser_open_on_notes(
+    repo, monkeypatch
+):
+    work, _home = seed(repo)
+    monkeypatch.setattr(config, "FILE_TEMPLATE", "gone")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("space", "w")
+        await pilot.pause()
+
+        choices = pilot.app.screen.query_one("#template-choices", ListView)
+        assert choices.highlighted_child.name == "notes"
+        assert any("file_template" in message for message in said(pilot))
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_template_file_is_listed_by_the_chooser_and_refused_when_chosen(
+    repo, tmp_path, monkeypatch
+):
+    work, _home = seed(repo)
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "binary.md").write_bytes(b"\xff\xfe\x00 not text")
+    monkeypatch.setattr(config, "TEMPLATES_DIR", templates)
+    ran = []
+    monkeypatch.setattr(services, "run_extraction", lambda *a, **k: ran.append(k) or "claude")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("space", "w")
+        await pilot.pause()
+        choices = pilot.app.screen.query_one("#template-choices", ListView)
+        names = [row.name for row in choices.children]
+        assert "binary" in names
+
+        choices.index = names.index("binary")
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert ran == []
+        assert any("binary.md" in message for message in said(pilot))

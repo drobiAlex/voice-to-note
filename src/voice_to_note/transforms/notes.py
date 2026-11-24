@@ -3,6 +3,7 @@ from collections.abc import Container
 from typing import cast
 
 from ..domain import Extraction, NotesPayload
+from .templates import MAX_SECTIONS, clean_heading
 from .todos import normalize
 
 SCHEMA = {
@@ -87,18 +88,18 @@ def _well_formed_sections(raw: object) -> list[dict[str, str]]:
     and a string body, both with something in them. The extras are a bonus on
     top of notes that are otherwise complete, so one malformed entry — or a
     whole key of the wrong type — costs that entry and not the extraction the
-    person waited minutes for."""
+    person waited minutes for. Headings are made single lines and the count is
+    capped; bodies stay as the model wrote them."""
     if not isinstance(raw, list):
         return []
-    return [
-        {"heading": e["heading"].strip(), "body": e["body"].strip()}
+    cleaned = [
+        {"heading": clean_heading(e["heading"]), "body": e["body"].strip()}
         for e in raw
         if isinstance(e, dict)
         and isinstance(e.get("heading"), str)
         and isinstance(e.get("body"), str)
-        and e["heading"].strip()
-        and e["body"].strip()
     ]
+    return [s for s in cleaned if s["heading"] and s["body"]][:MAX_SECTIONS]
 
 
 def _provenance(extraction: Extraction, sep: str) -> str:

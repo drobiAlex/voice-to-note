@@ -1043,10 +1043,14 @@ def template_text(name: str) -> str:
     """One template's effective text: a saved override if the user wrote one,
     else the text this app ships with. A custom note template has no
     built-in text underneath, so its file is simply read as written."""
-    if _custom_note_template(name):
-        return _template_override_path(name).read_text()
-    _registered_template(name)
-    return llm.template(name)
+    path = _template_override_path(name)
+    try:
+        if _custom_note_template(name):
+            return path.read_text()
+        _registered_template(name)
+        return llm.template(name)
+    except (UnicodeDecodeError, OSError) as e:
+        raise InvalidInput(f"{path}: cannot be read ({e})") from e
 
 
 def template_reset(name: str) -> str:
