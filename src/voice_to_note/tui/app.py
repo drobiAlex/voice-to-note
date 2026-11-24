@@ -325,6 +325,17 @@ class AudioTree(DirectoryTree):
         ]
 
 
+def _form_template(source: str) -> tuple[str, str | None]:
+    """The note template an import form opens on — the one configured for its
+    source — and, when that setting names a template that no longer exists, the
+    warning to show. The form still opens on `notes` in that case: a stale
+    setting must not lock somebody out of importing, only be said out loud."""
+    try:
+        return services.default_template(source), None
+    except services.InvalidInput as stale:
+        return "notes", str(stale)
+
+
 @dataclass(frozen=True)
 class ImportOptions:
     """How one recording is brought in, past the file and the project it is
@@ -438,6 +449,7 @@ class ProcessMemo(ModalScreen[None]):
         self.project = project
         self.store = store
         self.duplicate = duplicate
+        self.template, self.stale_template = _form_template("file")
 
     def compose(self) -> ComposeResult:
         """Where the recording is, what to file it under, how it should be run
@@ -452,7 +464,7 @@ class ProcessMemo(ModalScreen[None]):
             yield Input(placeholder="3", id="speakers-count", disabled=True)
         yield Select(
             [(name, name) for name in services.note_templates()],
-            value="notes",
+            value=self.template,
             id="note-template",
         )
         with Horizontal(id="steps-row"):
@@ -469,6 +481,8 @@ class ProcessMemo(ModalScreen[None]):
     def on_mount(self) -> None:
         """Cursor on the path, the one part nobody can guess for them."""
         self.query_one("#source-path", Input).focus()
+        if self.stale_template:
+            self.notify(self.stale_template, severity="warning")
 
     def on_directory_tree_file_selected(self, event: DirectoryTree.FileSelected) -> None:
         """Writes the chosen recording into the line and hands the cursor back
@@ -516,7 +530,7 @@ class ProcessMemo(ModalScreen[None]):
         )
         template = self.query_one("#note-template", Select).value
         if template is Select.NULL:
-            template = "notes"
+            template = self.template
         if self.query_one("#custom-steps", Switch).value:
             steps = frozenset(self.query_one("#step-list", SelectionList).selected)
         else:
@@ -579,6 +593,7 @@ class ImportYouTube(ModalScreen[None]):
         super().__init__()
         self.project = project
         self.store = store
+        self.template, self.stale_template = _form_template("youtube")
 
     def compose(self) -> ComposeResult:
         yield Input(placeholder="YouTube URL", id="youtube-url")
@@ -588,7 +603,7 @@ class ImportYouTube(ModalScreen[None]):
         )
         yield Select(
             [(name, name) for name in services.note_templates()],
-            value="notes",
+            value=self.template,
             id="youtube-template",
         )
         yield SelectionList(
@@ -598,6 +613,8 @@ class ImportYouTube(ModalScreen[None]):
 
     def on_mount(self) -> None:
         self.query_one("#youtube-url", Input).focus()
+        if self.stale_template:
+            self.notify(self.stale_template, severity="warning")
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         self._send()
@@ -616,7 +633,7 @@ class ImportYouTube(ModalScreen[None]):
             )
             template = self.query_one("#youtube-template", Select).value
             if template is Select.NULL:
-                template = "notes"
+                template = self.template
             template = str(template)
             services.note_template(template)
             language = self.query_one("#youtube-language", Input).value.strip() or None
@@ -750,6 +767,58 @@ class ConfirmForce(ModalScreen[bool]):
     def action_keep(self) -> None:
         """Leaves the note as they wrote it, and runs nothing."""
         self.dismiss(False)
+
+
+class ChooseTemplate(ModalScreen[str | None]):
+    """Which note template a re-extraction should use. The list opens with the
+    one the memo's notes were last made with picked out, so enter alone repeats
+    the extraction as it was, and the arrows are all it takes to ask for a
+    different kind of notes from the same transcript. The choice goes back to
+    whoever opened this as the screen's result rather than through a callback,
+    so a question asked next lands on top of the app instead of on top of this
+    screen as it closes."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, names: Sequence[str], current: str) -> None:
+        """Opens on the templates to choose from and the one to preselect."""
+        super().__init__()
+        self.names = list(names)
+        self.current = current
+
+    def compose(self) -> ComposeResult:
+        """The templates, each with what it declares beyond the fixed notes."""
+        yield Static("Extract notes with which template?", id="choose-template-title")
+        yield ListView(
+            *(ListItem(Label(self._label(name)), name=name) for name in self.names),
+            id="template-choices",
+        )
+
+    def _label(self, name: str) -> str:
+        """A template's row: its name, and the sections it adds, if any. A file
+        whose front matter cannot be read is still offered — picking it says
+        why it will not run, which beats it quietly missing from the list."""
+        try:
+            headings = services.template_sections(name)
+        except services.InvalidInput:
+            headings = []
+        return f"{name} — {', '.join(headings)}" if headings else name
+
+    def on_mount(self) -> None:
+        """The remembered template picked out and the list focused."""
+        choices = self.query_one("#template-choices", ListView)
+        choices.index = self.names.index(self.current) if self.current in self.names else 0
+        choices.focus()
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """Takes the template under the cursor."""
+        # the screen behind this modal listens for list selections of its own
+        event.stop()
+        self.dismiss(event.item.name or None)
+
+    def action_cancel(self) -> None:
+        """Extracts nothing."""
+        self.dismiss(None)
 
 
 class TagSearch(Picker):
@@ -2827,31 +2896,56 @@ class MemoApp(App[None]):
             self.show_memo(memo_id)
 
     def action_extract(self) -> None:
-        """Turns the memo being pointed at into notes, asking first when that
-        would go over a note somebody wrote by hand."""
+        """Turns the memo being pointed at into notes: first asking which note
+        template to use, preselecting the one its notes were made with, then —
+        when that would go over a note somebody wrote by hand — asking whether
+        that is meant."""
         memo_id = self._target_memo()
         if memo_id is None:
             return
+        try:
+            current = services.extraction_template(self.repo, memo_id)
+        except services.InvalidInput as refused:
+            self.notify(str(refused), severity="warning")
+            return
+        self.push_screen(
+            ChooseTemplate(services.note_templates(), current),
+            lambda name: self._extract_with(memo_id, name),
+        )
+
+    def _extract_with(self, memo_id: int, template: str | None) -> None:
+        """Goes on from the template chosen — nothing at all when none was —
+        straight to the extraction, or to the question first when a hand-edited
+        note stands to be replaced. A template whose file cannot be read is
+        refused here, before anything is asked of a backend."""
+        if template is None:
+            return
+        try:
+            services.note_template(template)
+        except services.InvalidInput as refused:
+            self.notify(str(refused), severity="warning")
+            return
         if services.memo_info(self.repo, memo_id).edited:
             self.push_screen(
-                ConfirmForce(), lambda agreed: self._extract_over_edit(memo_id, agreed)
+                ConfirmForce(),
+                lambda agreed: self._extract_over_edit(memo_id, template, agreed),
             )
         else:
-            self._extract(memo_id, force=False)
+            self._extract(memo_id, template, force=False)
 
-    def _extract_over_edit(self, memo_id: int, agreed: bool | None) -> None:
+    def _extract_over_edit(self, memo_id: int, template: str, agreed: bool | None) -> None:
         """Extracts only once they have said the edit can go."""
         if agreed:
-            self._extract(memo_id, force=True)
+            self._extract(memo_id, template, force=True)
 
-    def _extract(self, memo_id: int, *, force: bool) -> None:
+    def _extract(self, memo_id: int, template: str, *, force: bool) -> None:
         """Sends the extraction off, naming the backend that answered."""
         self._start_memo_job(
             memo_id,
             "writing notes",
             lambda repo: (
                 f"notes written for memo {memo_id}"
-                f" via {services.run_extraction(repo, memo_id, force=force)}"
+                f" via {services.run_extraction(repo, memo_id, force=force, template=template)}"
             ),
         )
 

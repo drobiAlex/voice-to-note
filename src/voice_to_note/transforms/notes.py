@@ -42,6 +42,17 @@ SCHEMA = {
             },
         },
         "tags": {"type": "array", "items": {"type": "string"}},
+        # optional, so it stays out of "required": only a template that declares
+        # extra sections asks for it, and a backend that is handed this schema
+        # may produce it without being made to invent one for every other template
+        "sections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"heading": {"type": "string"}, "body": {"type": "string"}},
+                "required": ["heading", "body"],
+            },
+        },
     },
     "required": [
         "title", "summary", "action_items", "decisions",
@@ -63,8 +74,41 @@ def parse_notes(text: str) -> NotesPayload:
     missing = [k for k in SCHEMA["required"] if k not in data]
     if missing:
         raise ValueError(f"missing keys: {missing}")
+    if "sections" in data:
+        data["sections"] = _well_formed_sections(data["sections"])
+        if not data["sections"]:
+            del data["sections"]
     # the check above is what makes this true — json.loads promises nothing
     return cast(NotesPayload, data)
+
+
+def _well_formed_sections(raw: object) -> list[dict[str, str]]:
+    """The entries of a reply's `sections` that can be shown: a string heading
+    and a string body, both with something in them. The extras are a bonus on
+    top of notes that are otherwise complete, so one malformed entry — or a
+    whole key of the wrong type — costs that entry and not the extraction the
+    person waited minutes for."""
+    if not isinstance(raw, list):
+        return []
+    return [
+        {"heading": e["heading"].strip(), "body": e["body"].strip()}
+        for e in raw
+        if isinstance(e, dict)
+        and isinstance(e.get("heading"), str)
+        and isinstance(e.get("body"), str)
+        and e["heading"].strip()
+        and e["body"].strip()
+    ]
+
+
+def _provenance(extraction: Extraction, sep: str) -> str:
+    """Which backend wrote the notes, when, and from which note template, so a
+    reader of a video's notes can see they were asked for as a video's. Notes
+    stored before the template was remembered simply do not say."""
+    parts = [extraction.backend, extraction.created_at]
+    if extraction.template:
+        parts.append(f"template {extraction.template}")
+    return sep.join(parts)
 
 
 def _box(task: str, done: Container[str] | None) -> str:
@@ -83,7 +127,7 @@ def render_notes(extraction: Extraction, done: Container[str] | None = None) -> 
     d = extraction.data
     lines = [
         f"# {d['title']}",
-        f"  ({extraction.backend}, {extraction.created_at})",
+        f"  ({_provenance(extraction, ', ')})",
         "",
         d["summary"],
         "",
@@ -109,6 +153,10 @@ def render_notes(extraction: Extraction, done: Container[str] | None = None) -> 
         lines.append("DATES")
         lines.extend(f"  - {x['date']}: {x['context']}" for x in d["dates"])
         lines.append("")
+    for section in d.get("sections", []):
+        lines.append(section["heading"].upper())
+        lines.extend(f"  {line}" if line else "" for line in section["body"].splitlines())
+        lines.append("")
     if d["tags"]:
         lines.append("tags: " + ", ".join(d["tags"]))
     return "\n".join(lines)
@@ -125,7 +173,7 @@ def render_notes_markdown(
     lines = [
         f"# {d['title']}",
         "",
-        f"*{extraction.backend} · {extraction.created_at}*",
+        f"*{_provenance(extraction, ' · ')}*",
         "",
         d["summary"],
         "",
@@ -150,6 +198,8 @@ def render_notes_markdown(
             lines += [header, "", *(f"- {item}" for item in items), ""]
     if d["dates"]:
         lines += ["## Dates", "", *(f"- **{x['date']}** — {x['context']}" for x in d["dates"]), ""]
+    for section in d.get("sections", []):
+        lines += [f"## {section['heading']}", "", section["body"], ""]
     if d["tags"]:
         lines.append("Tags: " + ", ".join(f"`{t}`" for t in d["tags"]))
     return "\n".join(lines).rstrip() + "\n"

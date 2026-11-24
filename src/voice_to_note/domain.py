@@ -19,13 +19,23 @@ class DateMention(TypedDict):
     context: str
 
 
+class Section(TypedDict):
+    """One extra part of the notes a template asked for beyond the fixed ones:
+    a heading to show and the Markdown a reader finds under it."""
+
+    heading: str
+    body: str
+
+
 class NotesPayload(TypedDict):
     """The notes an LLM produces for one memo. Every section a reader is shown
     is required: a backend that omits one has not done the job. The project the
     memo belongs to is the exception — it is a suggestion for filing rather than
     something the notes display, so a backend that has nothing to say about it,
     or a note template written before it was asked for, still produces usable
-    notes."""
+    notes. The sections a template declares for itself are optional for the same
+    reason: the fixed fields are what titles, to-dos and tags are built from, so
+    a reply that skipped the extras is still notes."""
 
     title: str
     project: NotRequired[str]
@@ -36,6 +46,7 @@ class NotesPayload(TypedDict):
     open_questions: list[str]
     dates: list[DateMention]
     tags: list[str]
+    sections: NotRequired[list[Section]]
 
 
 @dataclass(frozen=True)
@@ -167,6 +178,9 @@ class Extraction:
     backend: str
     data: NotesPayload
     created_at: str
+    # the note template that shaped it; None for notes stored before the name
+    # was kept, which no longer say what they were asked to be
+    template: str | None = None
 
 
 @dataclass(frozen=True)

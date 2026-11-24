@@ -170,10 +170,15 @@ class Repository:
         recording already stored, `archived_at` for one made before a memo
         could be put away without being deleted, and `source_url` for one made
         before a memo could come from a video instead of a recording, and
-        `deleted_at` for one made before a deleted memo went to the bin."""
+        `deleted_at` for one made before a deleted memo went to the bin, and
+        an extraction's `template` for one made before the note template was
+        remembered — those rows keep NULL, which reads as "not known"."""
         cols = {r["name"] for r in self.con.execute("PRAGMA table_info(speakers)")}
         if "embedding" not in cols:
             self.con.execute("ALTER TABLE speakers ADD COLUMN embedding BLOB")
+        cols = {r["name"] for r in self.con.execute("PRAGMA table_info(extractions)")}
+        if "template" not in cols:
+            self.con.execute("ALTER TABLE extractions ADD COLUMN template TEXT")
         cols = {r["name"] for r in self.con.execute("PRAGMA table_info(segments)")}
         if "refined_text" not in cols:
             self.con.execute("ALTER TABLE segments ADD COLUMN refined_text TEXT")
@@ -882,9 +887,17 @@ class Repository:
     # --- extractions ---------------------------------------------------
 
     def save_extraction(
-        self, memo_id: int, backend: str, data: NotesPayload, *, clear_edited: bool = False
+        self,
+        memo_id: int,
+        backend: str,
+        data: NotesPayload,
+        *,
+        clear_edited: bool = False,
+        template: str | None = None,
     ) -> None:
-        """Files notes against a memo, replacing any earlier attempt. Clearing a
+        """Files notes against a memo, replacing any earlier attempt, together
+        with the name of the note template that shaped them so a re-extraction
+        can ask for the same kind of notes again. Clearing a
         hand-edited note happens in this same transaction rather than after it:
         a forced re-extraction either lands and takes the edit with it or does
         neither, so an edit can never be left masking notes it was never written
@@ -893,8 +906,8 @@ class Repository:
         with self.con:
             self.con.execute("DELETE FROM extractions WHERE memo_id=?", (memo_id,))
             self.con.execute(
-                "INSERT INTO extractions (memo_id, backend, json) VALUES (?,?,?)",
-                (memo_id, backend, json.dumps(data, ensure_ascii=False)),
+                "INSERT INTO extractions (memo_id, backend, json, template) VALUES (?,?,?,?)",
+                (memo_id, backend, json.dumps(data, ensure_ascii=False), template),
             )
             self.con.execute("UPDATE memos SET status='extracted' WHERE id=?", (memo_id,))
             if clear_edited:
@@ -904,14 +917,14 @@ class Repository:
     def extraction(self, memo_id: int) -> Extraction | None:
         """A memo's stored notes, if extraction has run for it."""
         row = self.con.execute(
-            "SELECT backend, json, created_at FROM extractions WHERE memo_id=?",
+            "SELECT backend, json, created_at, template FROM extractions WHERE memo_id=?",
             (memo_id,),
         ).fetchone()
         if not row:
             return None
         # only parse_notes writes here, so the stored JSON already passed its check
         data = cast(NotesPayload, json.loads(row["json"]))
-        return Extraction(row["backend"], data, row["created_at"])
+        return Extraction(row["backend"], data, row["created_at"], row["template"])
 
     # --- to-dos ----------------------------------------------------------
 

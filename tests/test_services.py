@@ -1879,7 +1879,7 @@ def test_resetting_a_template_already_built_in_reports_so_without_erroring(templ
 # --- custom note templates ---------------------------------------------------
 
 
-BUILTIN_NOTE_TEMPLATES = ["notes", "interview", "lecture", "tutorial", "learning"]
+BUILTIN_NOTE_TEMPLATES = ["notes", "interview", "lecture", "tutorial", "learning", "video"]
 
 
 def test_note_templates_is_the_builtins_when_the_directory_is_empty_or_missing(templates_dir):
@@ -3138,3 +3138,190 @@ def test_setup_rebuilds_the_recorder_when_only_the_vendored_spring_source_change
     assert services.config.MENUBAR_STAMP.read_text() == services._source_stamp(
         [services.config.MENUBAR_SRC, springs, services.config.MENUBAR_PLIST]
     )
+
+
+# --- per-source templates, sections and the remembered template ---------------
+
+VIDEO_SECTIONS = [{"heading": "Worth watching?", "body": "Yes, briefly."}]
+
+
+def video_memo(repo, wav) -> int:
+    return repo.create_memo(
+        filename="A talk",
+        wav_path=str(wav),
+        duration_s=1.0,
+        language="en",
+        segments=[Segment(0, 1000, "Ship it")],
+        speakers=[],
+        source_url="https://www.youtube.com/watch?v=abc",
+    )
+
+
+def test_each_source_has_its_own_default_template(monkeypatch, templates_dir):
+    assert services.default_template("youtube") == "video"
+    assert services.default_template("record") == "notes"
+    assert services.default_template("file") == "notes"
+
+    monkeypatch.setattr(config, "RECORD_TEMPLATE", "interview")
+    monkeypatch.setattr(config, "FILE_TEMPLATE", "lecture")
+    assert services.default_template("record") == "interview"
+    assert services.default_template("file") == "lecture"
+
+
+def test_a_named_template_beats_the_source_default(templates_dir):
+    assert services.resolve_template("youtube", "lecture") == "lecture"
+    assert services.resolve_template("youtube", None) == "video"
+
+
+def test_a_default_naming_a_template_that_no_longer_exists_names_the_setting(
+    monkeypatch, templates_dir
+):
+    monkeypatch.setattr(config, "YOUTUBE_TEMPLATE", "gone")
+
+    with pytest.raises(services.InvalidInput, match="youtube_template.*gone"):
+        services.default_template("youtube")
+
+
+def test_a_default_can_name_a_custom_template_dropped_into_the_templates_folder(
+    monkeypatch, templates_dir
+):
+    templates_dir.mkdir()
+    (templates_dir / "standup.md").write_text("Summarize:\n")
+    monkeypatch.setattr(config, "FILE_TEMPLATE", "standup")
+
+    assert services.default_template("file") == "standup"
+
+
+def test_extraction_without_a_template_uses_the_default_for_a_memos_source(
+    repo, wav, monkeypatch, templates_dir
+):
+    memo_id = video_memo(repo, wav)
+    prompts = fake_llm(monkeypatch, claude=json.dumps(NOTES))
+
+    services.run_extraction(repo, memo_id)
+
+    assert "video somebody watched" in prompts[0]
+    assert repo.extraction(memo_id).template == "video"
+
+
+def test_a_memo_without_a_source_url_is_extracted_with_the_file_default(
+    repo, wav, monkeypatch, templates_dir
+):
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Ship it", speaker="S1")])
+    fake_llm(monkeypatch, claude=json.dumps(NOTES))
+
+    services.run_extraction(repo, memo_id)
+
+    assert repo.extraction(memo_id).template == "notes"
+
+
+def test_re_extracting_repeats_the_template_the_notes_were_made_with(
+    repo, wav, monkeypatch, templates_dir
+):
+    memo_id = video_memo(repo, wav)
+    prompts = fake_llm(monkeypatch, claude=json.dumps(NOTES))
+    services.run_extraction(repo, memo_id, template="lecture")
+
+    services.run_extraction(repo, memo_id)
+
+    assert repo.extraction(memo_id).template == "lecture"
+    assert "video somebody watched" not in prompts[1]
+
+
+def test_re_extracting_falls_back_to_the_source_default_when_the_template_was_deleted(
+    repo, wav, monkeypatch, templates_dir
+):
+    templates_dir.mkdir()
+    custom = templates_dir / "standup.md"
+    custom.write_text("Summarize:\n")
+    memo_id = video_memo(repo, wav)
+    fake_llm(monkeypatch, claude=json.dumps(NOTES))
+    services.run_extraction(repo, memo_id, template="standup")
+    custom.unlink()
+
+    assert services.extraction_template(repo, memo_id) == "video"
+    services.run_extraction(repo, memo_id)
+    assert repo.extraction(memo_id).template == "video"
+
+
+def test_an_explicit_template_beats_the_remembered_one(repo, wav, monkeypatch, templates_dir):
+    memo_id = video_memo(repo, wav)
+    fake_llm(monkeypatch, claude=json.dumps(NOTES))
+    services.run_extraction(repo, memo_id, template="lecture")
+
+    services.run_extraction(repo, memo_id, template="interview")
+
+    assert repo.extraction(memo_id).template == "interview"
+
+
+def test_a_template_with_sections_asks_for_them_and_the_notes_show_them(
+    repo, wav, monkeypatch, templates_dir
+):
+    memo_id = video_memo(repo, wav)
+    prompts = fake_llm(monkeypatch, claude=json.dumps({**NOTES, "sections": VIDEO_SECTIONS}))
+
+    services.run_extraction(repo, memo_id)
+
+    assert '"Hidden insights"' in prompts[0]
+    assert prompts[0].rindex("Transcript:") > prompts[0].index('"Hidden insights"')
+    assert "Yes, briefly." in services.notes(repo, memo_id)
+    assert "## Worth watching?" in services.notes_markdown(repo, memo_id)
+    assert "## Worth watching?" in services.export_notes(repo, memo_id).read_text()
+
+
+def test_a_templates_sections_reach_the_chat_context_through_the_notes(
+    repo, wav, templates_dir
+):
+    memo_id = video_memo(repo, wav)
+    repo.save_extraction(memo_id, "claude", {**NOTES, "sections": VIDEO_SECTIONS})
+
+    convo = services.require_conversation(repo, services.start_chat(repo, [memo_id]))
+
+    assert "Yes, briefly." in services._chat_context(repo, convo)
+
+
+def test_a_template_with_broken_front_matter_is_refused_naming_its_file(
+    repo, wav, monkeypatch, templates_dir
+):
+    templates_dir.mkdir()
+    (templates_dir / "broken.md").write_text("+++\n[sections\n+++\nbody\nTranscript:\n")
+    memo_id = add_memo(repo, wav, segments=[Segment(0, 1000, "Ship it", speaker="S1")])
+    prompts = fake_llm(monkeypatch, claude=json.dumps(NOTES))
+
+    with pytest.raises(services.InvalidInput, match=r"broken\.md"):
+        services.run_extraction(repo, memo_id, template="broken")
+
+    assert prompts == []
+
+
+def test_template_new_from_video_copies_the_front_matter_too(templates_dir):
+    services.template_new("watched", source="video")
+
+    assert (templates_dir / "watched.md").read_text().startswith("+++\n[sections]")
+    assert services.template_sections("watched") == [
+        "Worth watching?",
+        "Questions answered",
+        "Hidden insights",
+    ]
+
+
+def test_a_templates_sections_can_be_listed_and_a_plain_one_has_none(templates_dir):
+    assert services.template_sections("video")[0] == "Worth watching?"
+    assert services.template_sections("notes") == []
+    assert services.template_sections("refine") == []
+
+
+def test_the_video_template_is_documented_beside_the_others(templates_dir):
+    assert "video" in {name for name, *_ in services.template_infos()}
+    assert "video" in services._TEMPLATE_DOCS
+
+
+def test_memo_info_names_the_template_behind_the_notes(repo, wav, templates_dir):
+    memo_id = video_memo(repo, wav)
+    assert services.memo_info(repo, memo_id).template == ""
+    assert "template" not in services.memo_info_text(repo, memo_id)
+
+    repo.save_extraction(memo_id, "claude", NOTES, template="video")
+
+    assert services.memo_info(repo, memo_id).template == "video"
+    assert "template:" in services.memo_info_text(repo, memo_id)
