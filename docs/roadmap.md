@@ -33,6 +33,7 @@ What vtn can do today, and what has been planned but not built.
 ### Notes and to-dos
 
 - [x] Edit extracted notes, and write your own note templates beside the built-ins
+- [x] Note templates that add their own sections (TOML front matter), a `video` template for YouTube imports, a default template per source (`youtube_template`, `record_template`, `file_template`), and a memo that remembers the template its notes were made with; templates can ask questions (`[ask]`, answered in the TUI or with `--var`) and the model is told a video's title, channel, link and upload date
 - [x] Extract notes with claude, codex, gemini or ollama, tried in the order you set
 - [x] Track to-dos per memo and check them off from the board, beside a note or with `vtn todo`
 - [x] Ask a question about a memo with `vtn ask`

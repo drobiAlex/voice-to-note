@@ -2005,7 +2005,7 @@ async def import_youtube_into(pilot, monkeypatch, typed: str | None) -> dict:
         )
         return services.ProcessResult(memo_id, 1, [], "en")
 
-    def extract(worker_repo, memo_id, force=False, template="notes", may_file=True):
+    def extract(worker_repo, memo_id, force=False, template="notes", answers=None, may_file=True):
         seen["may_file"] = may_file
         return "claude"
 
@@ -2013,6 +2013,8 @@ async def import_youtube_into(pilot, monkeypatch, typed: str | None) -> dict:
     monkeypatch.setattr(services, "find_youtube_duplicate", lambda _repo, _video: None)
     monkeypatch.setattr(services, "import_youtube", import_video)
     monkeypatch.setattr(services, "run_extraction", extract)
+    # a template that asks nothing, so the form goes straight to the job
+    monkeypatch.setattr(config, "YOUTUBE_TEMPLATE", "notes")
     await open_youtube_modal(pilot)
     pilot.app.screen.query_one("#youtube-url", Input).value = video.url
     if typed is not None:
@@ -2100,7 +2102,7 @@ async def test_a_youtube_video_is_imported_and_extracted_off_the_ui_thread(
             language=lang or "en",
             segments=[Segment(0, 1000, "the useful idea")],
             speakers=(),
-            project=project,
+            project=project or "other",
             source_url=video.url,
         )
         return services.ProcessResult(memo_id, 1, [], lang or "en")
@@ -2108,7 +2110,7 @@ async def test_a_youtube_video_is_imported_and_extracted_off_the_ui_thread(
     monkeypatch.setattr(services, "import_youtube", import_video)
     extracted: list[tuple[int, str]] = []
 
-    def extract(worker_repo, memo_id, force=False, template="notes", may_file=True):
+    def extract(worker_repo, memo_id, force=False, template="notes", answers=None, may_file=True):
         extracted.append((memo_id, template))
         worker_repo.save_extraction(memo_id, "claude", NOTES)
         return "claude"
@@ -2120,10 +2122,14 @@ async def test_a_youtube_video_is_imported_and_extracted_off_the_ui_thread(
         await open_youtube_modal(pilot)
         pilot.app.screen.query_one("#youtube-url", Input).value = video.url
         await pilot.press("enter")
+        await pilot.pause()
+        # the video template asks what it is wanted for; nothing is required
+        assert showing(pilot.app, "#answer-goal")
+        await pilot.press("enter")
         await finish_jobs(pilot)
 
         assert not showing(pilot.app, "#youtube-url")
-        assert extracted and extracted[0][1] == "notes"
+        assert extracted and extracted[0][1] == "video"
         assert "A useful lecture" in memo_names(pilot.app)
         assert any("is memo" in message for message in said(pilot))
 
@@ -2134,7 +2140,7 @@ async def test_writing_the_notes_again_extracts_them_for_the_memo_on_screen(repo
     # the real cross-thread path and not just the key binding
     _work, home = seed(repo)
 
-    def extract(worker_repo, memo_id, force=False):
+    def extract(worker_repo, memo_id, force=False, template=None, answers=None, may_file=True):
         worker_repo.save_extraction(memo_id, "claude", {**NOTES, "title": "Shopping list"})
         return "claude"
 
@@ -2142,7 +2148,7 @@ async def test_writing_the_notes_again_extracts_them_for_the_memo_on_screen(repo
 
     async with MemoApp(repo).run_test() as pilot:
         await open_memo(pilot, home)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await finish_jobs(pilot)
 
         assert said(pilot) == ["writing notes: memo 2 \"shopping.m4a\" …", "notes written for memo 2 via claude"]
@@ -2175,7 +2181,7 @@ async def test_a_second_job_on_one_memo_is_refused_rather_than_queued(repo, monk
     work, _home = seed(repo)
     holding = threading.Event()
 
-    def slow(_repo, _memo_id, force=False):
+    def slow(_repo, _memo_id, force=False, template=None, answers=None, may_file=True):
         holding.wait(timeout=5)
         return "claude"
 
@@ -2183,9 +2189,9 @@ async def test_a_second_job_on_one_memo_is_refused_rather_than_queued(repo, monk
 
     async with MemoApp(repo).run_test() as pilot:
         await open_memo(pilot, work)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await pilot.pause()
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await pilot.pause()
 
         assert said(pilot) == ["writing notes: memo 1 \"standup.m4a\" …", 'memo 1 "standup.m4a" is already busy']
@@ -2200,7 +2206,7 @@ async def test_two_memos_can_be_worked_on_at_the_same_time(repo, monkeypatch):
     work, home = seed(repo)
     holding = threading.Event()
 
-    def slow(_repo, _memo_id, force=False):
+    def slow(_repo, _memo_id, force=False, template=None, answers=None, may_file=True):
         holding.wait(timeout=5)
         return "claude"
 
@@ -2208,10 +2214,10 @@ async def test_two_memos_can_be_worked_on_at_the_same_time(repo, monkeypatch):
 
     async with MemoApp(repo).run_test() as pilot:
         await open_memo(pilot, work)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await pilot.pause()
         await open_memo(pilot, home)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await pilot.pause()
 
         assert pilot.app.jobs == {work, home}
@@ -2226,14 +2232,14 @@ async def test_a_gateway_that_is_down_says_so_instead_of_taking_the_app_down(rep
     # a worker that raises kills the whole app, so the known failures are caught
     work, _home = seed(repo)
 
-    def unavailable(_repo, _memo_id, force=False):
+    def unavailable(_repo, _memo_id, force=False, template=None, answers=None, may_file=True):
         raise GatewayError("ollama is not running")
 
     monkeypatch.setattr(services, "run_extraction", unavailable)
 
     async with MemoApp(repo).run_test() as pilot:
         await open_memo(pilot, work)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await finish_jobs(pilot)
 
         assert said(pilot) == ["writing notes: memo 1 \"standup.m4a\" …", "ollama is not running"]
@@ -2245,7 +2251,7 @@ async def test_a_memo_can_be_worked_on_again_once_its_job_has_finished(repo, mon
     work, _home = seed(repo)
     runs: list[int] = []
 
-    def extract(_repo, memo_id, force=False):
+    def extract(_repo, memo_id, force=False, template=None, answers=None, may_file=True):
         runs.append(memo_id)
         return "claude"
 
@@ -2253,9 +2259,9 @@ async def test_a_memo_can_be_worked_on_again_once_its_job_has_finished(repo, mon
 
     async with MemoApp(repo).run_test() as pilot:
         await open_memo(pilot, work)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await finish_jobs(pilot)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await finish_jobs(pilot)
 
         assert runs == [work, work]
@@ -2268,12 +2274,12 @@ async def test_extracting_over_a_note_somebody_wrote_asks_first(repo, monkeypatc
     work, _home = seed(repo)
     repo.save_notes_md(work, "# My own words")
     monkeypatch.setattr(
-        services, "run_extraction", lambda _r, _i, force=False, template="notes", may_file=True: "claude"
+        services, "run_extraction", lambda _r, _i, force=False, template="notes", answers=None, may_file=True: "claude"
     )
 
     async with MemoApp(repo).run_test() as pilot:
         await open_memo(pilot, work)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await pilot.pause()
 
         assert showing(pilot.app, "#confirm-force")
@@ -2286,7 +2292,7 @@ async def test_agreeing_to_overwrite_extracts_over_the_edit(repo, monkeypatch):
     repo.save_notes_md(work, "# My own words")
     seen: dict = {}
 
-    def extract(_repo, _memo_id, force=False):
+    def extract(_repo, _memo_id, force=False, template=None, answers=None, may_file=True):
         seen["force"] = force
         return "claude"
 
@@ -2294,7 +2300,7 @@ async def test_agreeing_to_overwrite_extracts_over_the_edit(repo, monkeypatch):
 
     async with MemoApp(repo).run_test() as pilot:
         await open_memo(pilot, work)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await pilot.pause()
         await pilot.press("y")
         await finish_jobs(pilot)
@@ -2308,12 +2314,12 @@ async def test_declining_to_overwrite_runs_nothing_at_all(repo, monkeypatch):
     repo.save_notes_md(work, "# My own words")
     ran = []
     monkeypatch.setattr(
-        services, "run_extraction", lambda _r, _i, force=False: ran.append(force)
+        services, "run_extraction", lambda _r, _i, force=False, template=None, answers=None, may_file=True: ran.append(force)
     )
 
     async with MemoApp(repo).run_test() as pilot:
         await open_memo(pilot, work)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await pilot.pause()
         assert showing(pilot.app, "#confirm-force")
 
@@ -2333,7 +2339,7 @@ async def test_work_finishing_on_a_memo_you_have_left_does_not_redraw_it(repo, m
     # test proves nothing about what happens to somebody who walked away
     holding = threading.Event()
 
-    def extract(worker_repo, memo_id, force=False):
+    def extract(worker_repo, memo_id, force=False, template=None, answers=None, may_file=True):
         holding.wait(timeout=5)
         # a title the seeded notes do not already carry, or this proves nothing
         worker_repo.save_extraction(memo_id, "claude", {**NOTES, "title": "Fresh off the model"})
@@ -2343,7 +2349,7 @@ async def test_work_finishing_on_a_memo_you_have_left_does_not_redraw_it(repo, m
 
     async with MemoApp(repo).run_test() as pilot:
         await open_memo(pilot, work)
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await pilot.pause()
         await open_memo(pilot, home)
 
@@ -2448,7 +2454,7 @@ async def test_extracting_from_the_keyboard_moves_the_row_on_to_extracted(
     # project and comes back
     _work, home = seed(repo)
 
-    def extract(worker_repo, memo_id, force=False):
+    def extract(worker_repo, memo_id, force=False, template=None, answers=None, may_file=True):
         worker_repo.save_extraction(memo_id, "claude", NOTES)
         return "claude"
 
@@ -2458,7 +2464,7 @@ async def test_extracting_from_the_keyboard_moves_the_row_on_to_extracted(
         await listed_memo(pilot, "personal", home)
         assert row_for(pilot.app, "shopping.m4a")["status"] == "transcribed"
 
-        await from_menu(pilot, "space", "w")
+        await write_notes(pilot)
         await finish_jobs(pilot)
 
         assert row_for(pilot.app, "shopping.m4a")["status"] == "extracted"
@@ -2773,6 +2779,15 @@ async def from_menu(pilot, opener: str, key: str) -> None:
     await pilot.pause()
 
 
+async def write_notes(pilot) -> None:
+    """Asks for the notes to be written again from the menu and takes the
+    template the chooser opens on, the way a person who wants the same kind of
+    notes again does: the chooser is what stands between the key and the job."""
+    await from_menu(pilot, "space", "w")
+    await pilot.press("enter")
+    await pilot.pause()
+
+
 async def open_add_modal(pilot, root) -> None:
     """Opens the add-recording modal with its file tree pointed somewhere the
     test owns. Left at its default the tree would read the real home folder of
@@ -2895,7 +2910,7 @@ def filing_pipeline(monkeypatch):
         seen["project"] = project
         return stored(worker_repo, src, project, **kwargs)
 
-    def extract(worker_repo, memo_id, force=False, template="notes", may_file=True):
+    def extract(worker_repo, memo_id, force=False, template="notes", answers=None, may_file=True):
         seen["may_file"] = may_file
         return "claude"
 
@@ -2955,7 +2970,7 @@ async def test_a_processed_recording_joins_the_project_on_screen(repo, tmp_path,
     seed(repo)
     monkeypatch.setattr(services, "process_memo", stores_a_memo())
     monkeypatch.setattr(
-        services, "run_extraction", lambda _r, _i, force=False, template="notes", may_file=True: "claude"
+        services, "run_extraction", lambda _r, _i, force=False, template="notes", answers=None, may_file=True: "claude"
     )
 
     async with MemoApp(repo).run_test() as pilot:
@@ -2987,7 +3002,7 @@ async def test_a_processed_recording_does_not_pull_you_off_what_you_are_reading(
     work, _home = seed(repo)
     monkeypatch.setattr(services, "process_memo", stores_a_memo())
     monkeypatch.setattr(
-        services, "run_extraction", lambda _r, _i, force=False, template="notes", may_file=True: "claude"
+        services, "run_extraction", lambda _r, _i, force=False, template="notes", answers=None, may_file=True: "claude"
     )
 
     async with MemoApp(repo).run_test() as pilot:
@@ -3009,7 +3024,7 @@ async def test_a_processed_recording_gets_its_notes_extracted_in_the_same_job(
     monkeypatch.setattr(services, "process_memo", stores_a_memo())
     extracted: list[int] = []
 
-    def extract(worker_repo, memo_id, force=False, template="notes", may_file=True):
+    def extract(worker_repo, memo_id, force=False, template="notes", answers=None, may_file=True):
         extracted.append(memo_id)
         worker_repo.save_extraction(memo_id, "claude", {**NOTES, "title": "From upload"})
         return "claude"
@@ -3036,7 +3051,7 @@ async def test_a_processed_recordings_row_shows_extracted_once_the_job_finishes(
     seed(repo)
     monkeypatch.setattr(services, "process_memo", stores_a_memo())
 
-    def extract(worker_repo, memo_id, force=False, template="notes", may_file=True):
+    def extract(worker_repo, memo_id, force=False, template="notes", answers=None, may_file=True):
         worker_repo.save_extraction(memo_id, "claude", NOTES)
         return "claude"
 
@@ -3059,7 +3074,7 @@ async def test_extraction_failing_after_a_recording_is_stored_still_leaves_it_li
     seed(repo)
     monkeypatch.setattr(services, "process_memo", stores_a_memo())
 
-    def unavailable(worker_repo, memo_id, force=False, template="notes", may_file=True):
+    def unavailable(worker_repo, memo_id, force=False, template="notes", answers=None, may_file=True):
         raise GatewayError("ollama is not running")
 
     monkeypatch.setattr(services, "run_extraction", unavailable)
@@ -3091,7 +3106,7 @@ async def test_the_stages_of_a_long_job_are_said_as_they_happen(repo, tmp_path, 
 
     monkeypatch.setattr(services, "process_memo", process)
     monkeypatch.setattr(
-        services, "run_extraction", lambda _r, _i, force=False, template="notes", may_file=True: "claude"
+        services, "run_extraction", lambda _r, _i, force=False, template="notes", answers=None, may_file=True: "claude"
     )
 
     async with MemoApp(repo).run_test() as pilot:
@@ -3169,7 +3184,7 @@ async def test_one_recording_is_not_brought_in_twice_at_once(repo, tmp_path, mon
 
     monkeypatch.setattr(services, "process_memo", slow)
     monkeypatch.setattr(
-        services, "run_extraction", lambda _r, _i, force=False, template="notes", may_file=True: "claude"
+        services, "run_extraction", lambda _r, _i, force=False, template="notes", answers=None, may_file=True: "claude"
     )
     src = recording(tmp_path)
 
@@ -3327,7 +3342,7 @@ async def test_saying_the_second_copy_is_wanted_brings_it_in(
     already_stored(repo)
     monkeypatch.setattr(services, "process_memo", stores_a_memo())
     monkeypatch.setattr(
-        services, "run_extraction", lambda _r, _i, force=False, template="notes", may_file=True: "claude"
+        services, "run_extraction", lambda _r, _i, force=False, template="notes", answers=None, may_file=True: "claude"
     )
 
     async with MemoApp(repo).run_test() as pilot:
@@ -3351,7 +3366,7 @@ async def test_a_recording_nothing_here_matches_is_brought_in_unasked(
     seed(repo)  # memos carrying no taping moment at all, which matches nothing
     monkeypatch.setattr(services, "process_memo", stores_a_memo())
     monkeypatch.setattr(
-        services, "run_extraction", lambda _r, _i, force=False, template="notes", may_file=True: "claude"
+        services, "run_extraction", lambda _r, _i, force=False, template="notes", answers=None, may_file=True: "claude"
     )
 
     async with MemoApp(repo).run_test() as pilot:
@@ -3381,7 +3396,7 @@ async def test_a_recording_ffprobe_cannot_read_is_no_duplicate_and_no_crash(
     monkeypatch.setattr(services.audio, "recorded_at", unreadable)
     monkeypatch.setattr(services, "process_memo", stores_a_memo())
     monkeypatch.setattr(
-        services, "run_extraction", lambda _r, _i, force=False, template="notes", may_file=True: "claude"
+        services, "run_extraction", lambda _r, _i, force=False, template="notes", answers=None, may_file=True: "claude"
     )
 
     async with MemoApp(repo).run_test() as pilot:
@@ -3410,7 +3425,7 @@ async def test_pressing_straight_through_reproduces_todays_default_pipeline(
     monkeypatch.setattr(services, "process_memo", stores_a_memo(calls=process_calls))
     extract_calls: list[dict] = []
 
-    def extract(worker_repo, memo_id, force=False, template="notes", may_file=True):
+    def extract(worker_repo, memo_id, force=False, template="notes", answers=None, may_file=True):
         extract_calls.append({"template": template})
         return "claude"
 
@@ -3430,7 +3445,7 @@ async def test_turning_auto_off_and_typing_a_count_pins_it(repo, tmp_path, monke
     process_calls: list[dict] = []
     monkeypatch.setattr(services, "process_memo", stores_a_memo(calls=process_calls))
     monkeypatch.setattr(
-        services, "run_extraction", lambda _r, _i, force=False, template="notes", may_file=True: "claude"
+        services, "run_extraction", lambda _r, _i, force=False, template="notes", answers=None, may_file=True: "claude"
     )
 
     async with MemoApp(repo).run_test() as pilot:
@@ -3568,7 +3583,7 @@ async def test_a_recording_being_brought_in_is_listed_while_it_is_on_its_way(
     holding = threading.Event()
     monkeypatch.setattr(services, "process_memo", held_import(holding))
     monkeypatch.setattr(
-        services, "run_extraction", lambda _r, _i, force=False, template="notes", may_file=True: "claude"
+        services, "run_extraction", lambda _r, _i, force=False, template="notes", answers=None, may_file=True: "claude"
     )
 
     async with MemoApp(repo).run_test() as pilot:
@@ -3594,7 +3609,7 @@ async def test_the_memo_keys_go_while_the_cursor_rests_on_a_recording_coming_in(
     holding = threading.Event()
     monkeypatch.setattr(services, "process_memo", held_import(holding))
     monkeypatch.setattr(
-        services, "run_extraction", lambda _r, _i, force=False, template="notes", may_file=True: "claude"
+        services, "run_extraction", lambda _r, _i, force=False, template="notes", answers=None, may_file=True: "claude"
     )
 
     async with MemoApp(repo).run_test() as pilot:
@@ -3624,7 +3639,7 @@ async def test_pressing_enter_on_a_recording_coming_in_opens_nothing(
     holding = threading.Event()
     monkeypatch.setattr(services, "process_memo", held_import(holding))
     monkeypatch.setattr(
-        services, "run_extraction", lambda _r, _i, force=False, template="notes", may_file=True: "claude"
+        services, "run_extraction", lambda _r, _i, force=False, template="notes", answers=None, may_file=True: "claude"
     )
 
     async with MemoApp(repo).run_test() as pilot:
@@ -3665,7 +3680,7 @@ async def test_the_row_of_a_recording_walks_the_stages_of_the_pipeline(
     }
     monkeypatch.setattr(services, "process_memo", staged_import(released))
 
-    def held_extraction(worker_repo, memo_id, force=False, template="notes", may_file=True):
+    def held_extraction(worker_repo, memo_id, force=False, template="notes", answers=None, may_file=True):
         released["extracting notes"].wait(timeout=5)
         return "claude"
 
@@ -3697,7 +3712,7 @@ async def test_the_row_of_a_recording_gives_way_to_the_memo_it_became(
     seed(repo)
     monkeypatch.setattr(services, "process_memo", stores_a_memo())
     monkeypatch.setattr(
-        services, "run_extraction", lambda _r, _i, force=False, template="notes", may_file=True: "claude"
+        services, "run_extraction", lambda _r, _i, force=False, template="notes", answers=None, may_file=True: "claude"
     )
 
     async with MemoApp(repo).run_test() as pilot:
@@ -3747,7 +3762,7 @@ async def test_a_recording_on_its_way_in_survives_the_list_being_redrawn(
     holding = threading.Event()
     monkeypatch.setattr(services, "process_memo", held_import(holding))
     monkeypatch.setattr(
-        services, "run_extraction", lambda _r, _i, force=False, template="notes", may_file=True: "claude"
+        services, "run_extraction", lambda _r, _i, force=False, template="notes", answers=None, may_file=True: "claude"
     )
 
     async with MemoApp(repo).run_test() as pilot:
@@ -3777,7 +3792,7 @@ async def test_a_recording_refused_as_a_duplicate_is_listed_once(
     holding = threading.Event()
     monkeypatch.setattr(services, "process_memo", held_import(holding))
     monkeypatch.setattr(
-        services, "run_extraction", lambda _r, _i, force=False, template="notes", may_file=True: "claude"
+        services, "run_extraction", lambda _r, _i, force=False, template="notes", answers=None, may_file=True: "claude"
     )
     src = recording(tmp_path, "retro.m4a")
 
@@ -3969,7 +3984,7 @@ async def test_a_recording_picked_from_the_tree_goes_the_same_way_as_a_typed_one
     one_recording_among(tmp_path)
     monkeypatch.setattr(services, "process_memo", stores_a_memo())
     monkeypatch.setattr(
-        services, "run_extraction", lambda _r, _i, force=False, template="notes", may_file=True: "claude"
+        services, "run_extraction", lambda _r, _i, force=False, template="notes", answers=None, may_file=True: "claude"
     )
 
     async with MemoApp(repo).run_test() as pilot:
@@ -5572,7 +5587,7 @@ async def test_with_the_focus_in_the_open_memos_notes_extract_means_that_memo(re
     opened, highlighted = two_work_memos(repo)
     seen = []
 
-    def extract(_repo, memo_id, force=False):
+    def extract(_repo, memo_id, force=False, template=None, answers=None, may_file=True):
         seen.append(memo_id)
         return "claude"
 
@@ -5582,6 +5597,8 @@ async def test_with_the_focus_in_the_open_memos_notes_extract_means_that_memo(re
         await open_then_highlight_the_other(pilot, "planning.m4a", "retro.m4a")
         await focus_a_notes_pane(pilot)
         await pilot.app.run_action("extract")
+        await pilot.pause()
+        await pilot.press("enter")
         await finish_jobs(pilot)
 
         assert seen == [opened]
@@ -5691,3 +5708,655 @@ async def test_the_notice_for_a_move_names_the_spelling_that_was_stored(repo):
         await pilot.pause()
 
         assert 'moved "shopping.m4a" to work' in said(pilot)
+
+# --- the note template an import or a re-extraction opens on ------------------
+
+
+@pytest.mark.asyncio
+async def test_the_youtube_form_opens_on_the_configured_youtube_template(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+
+        assert pilot.app.screen.query_one("#youtube-template", Select).value == "video"
+
+
+@pytest.mark.asyncio
+async def test_the_youtube_form_follows_the_setting_when_it_names_another_template(
+    repo, monkeypatch
+):
+    seed(repo)
+    monkeypatch.setattr(config, "YOUTUBE_TEMPLATE", "lecture")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+
+        assert pilot.app.screen.query_one("#youtube-template", Select).value == "lecture"
+
+
+@pytest.mark.asyncio
+async def test_the_recording_form_opens_on_the_configured_file_template(
+    repo, tmp_path, monkeypatch
+):
+    seed(repo)
+    monkeypatch.setattr(config, "FILE_TEMPLATE", "interview")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_add_modal(pilot, tmp_path)
+
+        assert pilot.app.screen.query_one("#note-template", Select).value == "interview"
+
+
+@pytest.mark.asyncio
+async def test_a_form_whose_configured_template_is_gone_opens_on_notes_and_says_why(
+    repo, monkeypatch
+):
+    seed(repo)
+    monkeypatch.setattr(config, "YOUTUBE_TEMPLATE", "gone")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+
+        assert pilot.app.screen.query_one("#youtube-template", Select).value == "notes"
+        assert any("youtube_template" in message for message in said(pilot))
+
+
+@pytest.mark.asyncio
+async def test_writing_the_notes_again_offers_the_template_they_were_made_with(
+    repo, monkeypatch
+):
+    work, _home = seed(repo)
+    repo.save_extraction(work, "claude", NOTES, template="lecture")
+    seen: dict = {}
+
+    def extract(_repo, memo_id, force=False, template=None, answers=None, may_file=True):
+        seen["template"] = template
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", extract)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("space", "w")
+        await pilot.pause()
+
+        choices = pilot.app.screen.query_one("#template-choices", ListView)
+        assert choices.highlighted_child.name == "lecture"
+
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert seen == {"template": "lecture"}
+
+
+@pytest.mark.asyncio
+async def test_a_different_template_can_be_chosen_for_the_second_extraction(repo, monkeypatch):
+    work, _home = seed(repo)
+    repo.save_extraction(work, "claude", NOTES, template="notes")
+    seen: dict = {}
+
+    def extract(_repo, memo_id, force=False, template=None, answers=None, may_file=True):
+        seen["template"] = template
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", extract)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("space", "w")
+        await pilot.pause()
+        await pilot.press("down", "enter")
+        await finish_jobs(pilot)
+
+        assert seen == {"template": "interview"}
+
+
+@pytest.mark.asyncio
+async def test_escaping_the_template_chooser_extracts_nothing(repo, monkeypatch):
+    work, _home = seed(repo)
+    ran = []
+    monkeypatch.setattr(
+        services, "run_extraction", lambda *a, **k: ran.append(k) or "claude"
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("space", "w")
+        await pilot.pause()
+        await pilot.press("escape")
+        await finish_jobs(pilot)
+
+        assert ran == []
+        assert pilot.app.jobs == set()
+
+
+@pytest.mark.asyncio
+async def test_a_memo_with_no_remembered_template_opens_the_chooser_on_its_source_default(
+    repo,
+):
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("space", "w")
+        await pilot.pause()
+
+        choices = pilot.app.screen.query_one("#template-choices", ListView)
+        assert choices.highlighted_child.name == "notes"
+
+
+@pytest.mark.asyncio
+async def test_the_chooser_shows_the_sections_a_template_adds(repo):
+    work, _home = seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("space", "w")
+        await pilot.pause()
+
+        rows = {
+            row.name: str(row.query_one(Label).render())
+            for row in pilot.app.screen.query_one("#template-choices", ListView).children
+        }
+        assert "Worth watching?" in rows["video"]
+        assert rows["notes"] == "notes"
+
+
+# --- a template that asks questions ------------------------------------------
+
+
+@pytest.fixture
+def asking(monkeypatch, tmp_path):
+    """A note template that asks two questions and one that asks none, in a
+    scratch template folder, so what the forms do with each is told apart from
+    what the shipped templates happen to declare."""
+    folder = tmp_path / "templates"
+    folder.mkdir()
+    (folder / "asks.md").write_text(
+        '+++\n[ask]\ngoal = "What is it for?"\naudience = "Who reads it?"\n+++\n'
+        "Notes.\n\nTranscript:\n"
+    )
+    (folder / "quiet.md").write_text("Notes.\n\nTranscript:\n")
+    monkeypatch.setattr(config, "TEMPLATES_DIR", folder)
+    return folder
+
+
+def extraction_recorder(monkeypatch) -> list[dict]:
+    """Stands in for extraction and records what it was asked to do."""
+    calls: list[dict] = []
+
+    def extract(worker_repo, memo_id, force=False, template=None, answers=None, may_file=True):
+        calls.append({"template": template, "answers": answers})
+        worker_repo.save_extraction(memo_id, "claude", NOTES, template=template, answers=answers)
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", extract)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_the_file_form_asks_the_templates_questions_after_submit_and_sends_the_answers(
+    repo, tmp_path, monkeypatch, asking
+):
+    seed(repo)
+    monkeypatch.setattr(config, "FILE_TEMPLATE", "asks")
+    monkeypatch.setattr(services, "process_memo", stores_a_memo())
+    calls = extraction_recorder(monkeypatch)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await process_file(pilot, recording(tmp_path))
+        await pilot.pause()
+
+        assert showing(pilot.app, "#answer-goal") and showing(pilot.app, "#answer-audience")
+        assert [str(label.content) for label in pilot.app.screen.query(".question")] == [
+            "What is it for?",
+            "Who reads it?",
+        ]
+        await pilot.press(*"shipit")
+        await pilot.press("ctrl+s")
+        await finish_jobs(pilot)
+
+        assert not showing(pilot.app, "#source-path")
+        assert calls == [{"template": "asks", "answers": {"goal": "shipit", "audience": ""}}]
+
+
+@pytest.mark.asyncio
+async def test_escaping_the_questions_starts_nothing_and_leaves_the_file_form_as_typed(
+    repo, tmp_path, monkeypatch, asking
+):
+    seed(repo)
+    monkeypatch.setattr(config, "FILE_TEMPLATE", "asks")
+    ran: list = []
+    monkeypatch.setattr(services, "process_memo", lambda *a, **k: ran.append(a) or None)
+    src = recording(tmp_path)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await process_file(pilot, src, "work")
+        await pilot.pause()
+        await pilot.press("escape")
+        await finish_jobs(pilot)
+
+        assert showing(pilot.app, "#source-path")
+        assert pilot.app.screen.query_one("#source-path", Input).value == str(src)
+        assert ran == []
+
+
+@pytest.mark.asyncio
+async def test_a_second_copy_is_asked_about_before_the_questions(
+    repo, tmp_path, monkeypatch, asking
+):
+    already_stored(repo)
+    monkeypatch.setattr(config, "FILE_TEMPLATE", "asks")
+    monkeypatch.setattr(services, "process_memo", stores_a_memo())
+    calls = extraction_recorder(monkeypatch)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await process_file(pilot, recording(tmp_path, "again.m4a"))
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+
+        assert showing(pilot.app, "#answer-goal")
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert not showing(pilot.app, "#source-path")
+        assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_template_without_questions_shows_no_question_screen_on_the_file_form(
+    repo, tmp_path, monkeypatch, asking
+):
+    seed(repo)
+    monkeypatch.setattr(config, "FILE_TEMPLATE", "quiet")
+    monkeypatch.setattr(services, "process_memo", stores_a_memo())
+    calls = extraction_recorder(monkeypatch)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await process_file(pilot, recording(tmp_path))
+        await finish_jobs(pilot)
+
+        assert not showing(pilot.app, "#questions-title")
+        assert calls == [{"template": "quiet", "answers": {}}]
+
+
+def video_for_form(monkeypatch):
+    """A video the import form can be pointed at without any network."""
+    video = services.YouTubeVideo(
+        video_id="abc", url="https://www.youtube.com/watch?v=abc", title="A lecture",
+        channel="Teacher", duration_s=60.0, uploaded_at="2026-01-01T00:00:00Z", language="en",
+        is_live=False, subtitles={}, automatic_captions={},
+    )
+    monkeypatch.setattr(services, "youtube_video", lambda _url: video)
+    monkeypatch.setattr(services, "find_youtube_duplicate", lambda _repo, _video: None)
+
+    def import_video(worker_repo, _video, project="other", lang=None, log=None):
+        memo_id = worker_repo.create_memo(
+            filename=video.title, wav_path="", duration_s=60.0, language="en",
+            segments=[Segment(0, 1000, "idea")], speakers=(), project=project or "other",
+            source_url=video.url,
+        )
+        return services.ProcessResult(memo_id, 1, [], "en")
+
+    monkeypatch.setattr(services, "import_youtube", import_video)
+    return video
+
+
+@pytest.mark.asyncio
+async def test_the_youtube_form_asks_the_templates_questions_and_sends_the_answers(
+    repo, monkeypatch, asking
+):
+    seed(repo)
+    monkeypatch.setattr(config, "YOUTUBE_TEMPLATE", "asks")
+    video = video_for_form(monkeypatch)
+    calls = extraction_recorder(monkeypatch)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+        pilot.app.screen.query_one("#youtube-url", Input).value = video.url
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press("tab", *"juniors")
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert not showing(pilot.app, "#youtube-url")
+        assert calls == [{"template": "asks", "answers": {"goal": "", "audience": "juniors"}}]
+
+
+@pytest.mark.asyncio
+async def test_escaping_the_questions_starts_no_video_import(repo, monkeypatch, asking):
+    seed(repo)
+    monkeypatch.setattr(config, "YOUTUBE_TEMPLATE", "asks")
+    video = video_for_form(monkeypatch)
+    calls = extraction_recorder(monkeypatch)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+        pilot.app.screen.query_one("#youtube-url", Input).value = video.url
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press("escape")
+        await finish_jobs(pilot)
+
+        assert showing(pilot.app, "#youtube-url")
+        assert pilot.app.screen.query_one("#youtube-url", Input).value == video.url
+        assert calls == []
+        assert "A lecture" not in memo_names(pilot.app)
+
+
+@pytest.mark.asyncio
+async def test_a_template_without_questions_shows_no_question_screen_on_the_youtube_form(
+    repo, monkeypatch, asking
+):
+    seed(repo)
+    monkeypatch.setattr(config, "YOUTUBE_TEMPLATE", "quiet")
+    video = video_for_form(monkeypatch)
+    calls = extraction_recorder(monkeypatch)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+        pilot.app.screen.query_one("#youtube-url", Input).value = video.url
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert not showing(pilot.app, "#questions-title")
+        assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_re_extracting_opens_the_questions_prefilled_with_the_stored_answers(
+    repo, monkeypatch, asking
+):
+    work, _home = seed(repo)
+    repo.save_extraction(
+        work, "claude", NOTES, template="asks", answers={"goal": "ship", "audience": "me"}
+    )
+    calls = extraction_recorder(monkeypatch)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await write_notes(pilot)
+
+        assert pilot.app.screen.query_one("#answer-goal", Input).value == "ship"
+        assert pilot.app.screen.query_one("#answer-audience", Input).value == "me"
+        pilot.app.screen.query_one("#answer-goal", Input).value = "ship and learn"
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert calls == [
+            {"template": "asks", "answers": {"goal": "ship and learn", "audience": "me"}}
+        ]
+
+
+@pytest.mark.asyncio
+async def test_escaping_the_questions_on_re_extract_writes_no_notes(repo, monkeypatch, asking):
+    work, _home = seed(repo)
+    repo.save_extraction(work, "claude", NOTES, template="asks", answers={"goal": "ship"})
+    calls = extraction_recorder(monkeypatch)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await write_notes(pilot)
+        await pilot.press("escape")
+        await finish_jobs(pilot)
+
+        assert not showing(pilot.app, "#questions-title")
+        assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_re_extracting_with_a_template_that_asks_nothing_shows_no_question_screen(
+    repo, monkeypatch, asking
+):
+    work, _home = seed(repo)
+    repo.save_extraction(work, "claude", NOTES, template="quiet")
+    calls = extraction_recorder(monkeypatch)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await write_notes(pilot)
+        await finish_jobs(pilot)
+
+        assert not showing(pilot.app, "#questions-title")
+        assert calls == [{"template": "quiet", "answers": {}}]
+
+
+@pytest.mark.asyncio
+async def test_a_stale_default_template_still_lets_the_chooser_open_on_notes(
+    repo, monkeypatch
+):
+    work, _home = seed(repo)
+    monkeypatch.setattr(config, "FILE_TEMPLATE", "gone")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("space", "w")
+        await pilot.pause()
+
+        choices = pilot.app.screen.query_one("#template-choices", ListView)
+        assert choices.highlighted_child.name == "notes"
+        assert any("file_template" in message for message in said(pilot))
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_template_file_is_listed_by_the_chooser_and_refused_when_chosen(
+    repo, tmp_path, monkeypatch
+):
+    work, _home = seed(repo)
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "binary.md").write_bytes(b"\xff\xfe\x00 not text")
+    monkeypatch.setattr(config, "TEMPLATES_DIR", templates)
+    ran = []
+    monkeypatch.setattr(services, "run_extraction", lambda *a, **k: ran.append(k) or "claude")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("space", "w")
+        await pilot.pause()
+        choices = pilot.app.screen.query_one("#template-choices", ListView)
+        names = [row.name for row in choices.children]
+        assert "binary" in names
+
+        choices.index = names.index("binary")
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert ran == []
+        assert any("binary.md" in message for message in said(pilot))
+
+
+@pytest.mark.asyncio
+async def test_a_template_that_became_unreadable_is_said_on_the_file_form_and_nothing_starts(
+    repo, tmp_path, monkeypatch, asking
+):
+    seed(repo)
+    monkeypatch.setattr(config, "FILE_TEMPLATE", "asks")
+    monkeypatch.setattr(config, "YOUTUBE_TEMPLATE", "asks")
+    ran: list = []
+    monkeypatch.setattr(services, "process_memo", lambda *a, **k: ran.append(a) or None)
+    broken = b"+++\n[ask]\ngoal = \xff\n+++\nbody"
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_add_modal(pilot, tmp_path)
+        pilot.app.screen.query_one("#source-path", Input).value = str(recording(tmp_path))
+        (asking / "asks.md").write_bytes(broken)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert showing(pilot.app, "#source-path") and not showing(pilot.app, "#questions-title")
+        assert ran == []
+
+
+@pytest.mark.asyncio
+async def test_the_file_form_does_not_ask_when_the_notes_step_is_off(
+    repo, tmp_path, monkeypatch, asking
+):
+    seed(repo)
+    monkeypatch.setattr(config, "FILE_TEMPLATE", "asks")
+    monkeypatch.setattr(services, "process_memo", stores_a_memo())
+    calls = extraction_recorder(monkeypatch)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_add_modal(pilot, tmp_path)
+        pilot.app.screen.query_one("#source-path", Input).value = str(recording(tmp_path))
+        pilot.app.screen.query_one("#custom-steps", Switch).value = True
+        await pilot.pause()
+        pilot.app.screen.query_one("#step-list", SelectionList).deselect("notes")
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert not showing(pilot.app, "#questions-title")
+        assert not showing(pilot.app, "#source-path")
+        assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_youtube_form_does_not_ask_when_the_notes_step_is_off(
+    repo, monkeypatch, asking
+):
+    seed(repo)
+    monkeypatch.setattr(config, "YOUTUBE_TEMPLATE", "asks")
+    video = video_for_form(monkeypatch)
+    calls = extraction_recorder(monkeypatch)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+        pilot.app.screen.query_one("#youtube-url", Input).value = video.url
+        pilot.app.screen.query_one("#youtube-steps", SelectionList).deselect("notes")
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert not showing(pilot.app, "#questions-title")
+        assert not showing(pilot.app, "#youtube-url")
+        assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ["not json", "[1,2]", '"str"', '{"goal":5}', '{"goal":null}'])
+async def test_odd_stored_answers_open_the_questions_empty_and_re_extract_still_runs(
+    repo, monkeypatch, asking, raw
+):
+    work, _home = seed(repo)
+    repo.save_extraction(work, "claude", NOTES, template="asks", answers={"goal": "x"})
+    repo.con.execute("UPDATE extractions SET answers=? WHERE memo_id=?", (raw, work))
+    repo.con.commit()
+    calls = extraction_recorder(monkeypatch)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await write_notes(pilot)
+
+        assert pilot.app.screen.query_one("#answer-goal", Input).value == ""
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_edited_note_is_asked_about_after_the_questions_and_extracts_exactly_once(
+    repo, monkeypatch, asking
+):
+    work, _home = seed(repo)
+    repo.save_extraction(work, "claude", NOTES, template="asks", answers={"goal": "ship"})
+    repo.save_notes_md(work, "# my own note")
+    forced: list[bool] = []
+
+    def extract(worker_repo, memo_id, force=False, template=None, answers=None, may_file=True):
+        forced.append(force)
+        worker_repo.save_extraction(
+            memo_id, "claude", NOTES, clear_edited=force, template=template, answers=answers
+        )
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", extract)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await write_notes(pilot)
+        assert showing(pilot.app, "#answer-goal")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not showing(pilot.app, "#answer-goal")
+        assert forced == []
+        await pilot.press("y")
+        await finish_jobs(pilot)
+
+        assert forced == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_question_removed_from_the_template_while_the_modal_was_open_is_a_one_line_error(
+    repo, monkeypatch, asking
+):
+    work, _home = seed(repo)
+    repo.save_extraction(work, "claude", NOTES, template="asks", answers={"goal": "ship"})
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await write_notes(pilot)
+        (asking / "asks.md").write_text(
+            '+++\n[ask]\naudience = "Who reads it?"\n+++\nNotes.\n\nTranscript:\n'
+        )
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert any("no question 'goal'" in message for message in said(pilot))
+        assert not pilot.app.jobs
+
+
+async def import_asking_youtube_into(pilot, monkeypatch, typed: str | None) -> dict:
+    """Imports a video through the form with a template that asks questions,
+    the project line set the way a person would and the question answered in
+    the modal between submit and job; reports what extraction was handed."""
+    video = video_for_form(monkeypatch)
+    seen: dict = {}
+
+    def extract(worker_repo, memo_id, force=False, template=None, answers=None, may_file=True):
+        seen.update(template=template, answers=answers, may_file=may_file)
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", extract)
+    await open_youtube_modal(pilot)
+    pilot.app.screen.query_one("#youtube-url", Input).value = video.url
+    if typed is not None:
+        pilot.app.screen.query_one("#youtube-project", Input).value = typed
+    await pilot.press("enter")
+    await pilot.pause()
+    await pilot.press("tab", *"juniors")
+    await pilot.press("enter")
+    await finish_jobs(pilot)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_a_typed_project_survives_the_questions_and_keeps_the_notes_from_refiling_it(
+    repo, monkeypatch, asking
+):
+    seed(repo)
+    monkeypatch.setattr(config, "YOUTUBE_TEMPLATE", "asks")
+
+    async with MemoApp(repo).run_test() as pilot:
+        seen = await import_asking_youtube_into(pilot, monkeypatch, "orbit")
+
+    assert [m.project for m in repo.memos() if m.filename == "A lecture"] == ["orbit"]
+    assert seen["answers"] == {"goal": "", "audience": "juniors"}
+    assert seen["may_file"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_empty_project_survives_the_questions_and_leaves_the_filing_to_the_notes(
+    repo, monkeypatch, asking
+):
+    seed(repo)
+    monkeypatch.setattr(config, "YOUTUBE_TEMPLATE", "asks")
+
+    async with MemoApp(repo).run_test() as pilot:
+        seen = await import_asking_youtube_into(pilot, monkeypatch, None)
+
+    assert [m.project for m in repo.memos() if m.filename == "A lecture"] == ["other"]
+    assert seen["answers"] == {"goal": "", "audience": "juniors"}
+    assert seen["may_file"] is True

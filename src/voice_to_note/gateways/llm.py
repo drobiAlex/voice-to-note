@@ -3,12 +3,19 @@ import shutil
 import subprocess
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from .. import config
 from ..domain import Message, Segment
 from ..transforms.refine import Chunk
+from ..transforms.templates import (
+    Details,
+    ParsedTemplate,
+    TemplateError,
+    compose_prompt,
+    parse_template,
+)
 from . import GatewayError
 
 # an availability check runs ahead of every extraction, so it gives up quickly
@@ -124,6 +131,35 @@ Rules:
 Transcript:
 """
 
+VIDEO_PROMPT = f"""+++
+[ask]
+goal = "What do you want out of this video? (optional)"
+
+[sections]
+"Worth watching?" = "Yes or no, and why, in two sentences. When the person's goal is given, judge it against that goal; otherwise judge it on its own merits."
+"Questions answered" = "Each question the video answers, with its answer in a line or two."
+"Hidden insights" = "What a casual viewer would miss: asides, implications, claims that deserve a second look."
++++
+Extract structured notes from this transcript of a video somebody watched, so they can decide what it is worth and keep what mattered.
+
+What the person wants out of this video: {{goal}}
+
+{_NOTES_SHAPE}
+
+Rules:
+- project: the subject area, lowercase, a word or two
+- summary: what the video argues or shows, and for whom
+- key_insights: the claims and facts worth remembering, one per entry, each followed by its [mm:ss] timestamp
+- decisions: conclusions the speaker commits to
+- action_items: things worth trying or doing because of this video; owner null
+- open_questions: what the video leaves unanswered or glosses over
+- dates: every date/time mentioned, with its context
+- tags: lowercase keywords for the topics covered
+- Empty arrays are fine. Never invent content not in the transcript.
+
+Transcript:
+"""
+
 ASK_PROMPT = """Answer the question using only this voice-memo transcript. Reference speakers and timestamps where helpful. If the answer is not in the transcript, say so plainly. Be concise."""
 
 CHAT_PROMPT = """You are talking with someone about their own voice memos: the notes and transcripts below are what they recorded, and your job is to help them think about that material.
@@ -158,14 +194,16 @@ Lines:
 
 # the templates a --template flag may pick from, apart so callers listing
 # what shapes a *note* extraction never offer refine/ask/chat, which shape
-# different calls entirely. All five ask for the same JSON; they differ only
-# in what kind of content they tell the model to put into each field
+# different calls entirely. All of them ask for the same JSON; they differ only
+# in what kind of content they tell the model to put into each field, and in
+# the extra sections a template's front matter may declare
 NOTE_TEMPLATES: dict[str, str] = {
     "notes": NOTES_PROMPT,
     "interview": INTERVIEW_PROMPT,
     "lecture": LECTURE_PROMPT,
     "tutorial": TUTORIAL_PROMPT,
     "learning": LEARNING_PROMPT,
+    "video": VIDEO_PROMPT,
 }
 
 # every static prompt block a caller can put a saved override in front of.
@@ -191,16 +229,38 @@ def template(name: str) -> str:
     return TEMPLATES[name]
 
 
+def parsed_template(name: str) -> ParsedTemplate:
+    """A note template's effective text split into the prompt and what its
+    front matter declares. A front-matter mistake is reported with the file it
+    is in — the user's override, or the built-in's name — since the person who
+    has to fix it is looking at a file, not at this call."""
+    override = config.TEMPLATES_DIR / f"{name}.md"
+    where = str(override) if override.exists() else f"built-in template {name}"
+    try:
+        return parse_template(template(name))
+    except (UnicodeDecodeError, OSError) as e:
+        raise TemplateError(f"{where}: cannot be read ({e})") from e
+    except TemplateError as e:
+        raise TemplateError(f"{where}: {e}") from e
+
+
 class BackendError(GatewayError):
     """A backend was installed but the call to it failed."""
 
 
-def notes_prompt(transcript: str, template_name: str = "notes") -> str:
+def notes_prompt(
+    transcript: str,
+    template_name: str = "notes",
+    answers: Mapping[str, str] | None = None,
+    details: Details | None = None,
+) -> str:
     """Asks for the notes in the exact shape the app can store. The caller
     picks which note template shapes the extraction — a saved override, or
     one of the user's own templates dropped beside them — while the reply is
-    still held to the one JSON shape the parser downstream accepts."""
-    return template(template_name) + transcript
+    still held to the one JSON shape the parser downstream accepts. What the
+    person answered and what is known about the recording go in beside the
+    transcript, never in place of any of it."""
+    return compose_prompt(parsed_template(template_name), transcript, answers, details)
 
 
 def ask_prompt(transcript: str, question: str) -> str:

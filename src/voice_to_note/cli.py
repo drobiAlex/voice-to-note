@@ -60,12 +60,58 @@ def cmd_setup(args: argparse.Namespace) -> None:
         print(services.setup(log, download))
 
 
+def _add_var(sp: argparse.ArgumentParser) -> None:
+    """Adds the repeatable `--var key=value` that answers a template's
+    questions. The command line never asks them interactively: whatever drives
+    it — an agent, a script, the menu bar — has no one to type at a prompt."""
+    sp.add_argument(
+        "--var",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="answer a question the note template asks (repeatable; see: vtn template)",
+    )
+
+
+def _answers(args: argparse.Namespace, template: str) -> dict[str, str]:
+    """The `--var` pairs read against the template that will run, before any
+    audio is touched, so a mistyped key costs a line and not a transcription."""
+    return services.parse_vars(template, getattr(args, "var", None) or [])
+
+
+def _settled_template(
+    args: argparse.Namespace, source: str, steps: frozenset[str] | None = None
+) -> None:
+    """Turns `--template` into the one note template this run uses: the flag if
+    given, else the default configured for the source (file or record), written
+    back to `args` so every step after reads the same name. Done before the
+    options are checked and before any audio is touched, so a stale setting
+    is refused as early as a mistyped flag would be. A run whose steps leave
+    out the notes never uses a template, so a stale default is not its
+    business and is left unresolved; a name given on the command line is
+    still checked."""
+    if args.template is None and steps is not None and "notes" not in steps:
+        # no template will run, so there is nothing for a `--var` to answer;
+        # saying so beats accepting an answer that goes nowhere
+        if getattr(args, "var", None):
+            raise services.InvalidInput(
+                "--var answers a note template's questions, but --steps leaves out notes"
+            )
+        args.answers = {}
+        return
+    args.template = services.resolve_template(source, args.template)
+    args.answers = _answers(args, args.template)
+
+
 def _checked(args: argparse.Namespace) -> tuple[frozenset[str], int | None]:
     """The options that decide what the pipeline does, all read before any
     audio is: a typo in a template, a step or a speaker count must not survive
     minutes of converting, transcribing and diarizing — or a whole meeting —
-    only to fail at the last step."""
-    services.note_template(args.template)
+    only to fail at the last step. The template is checked here too; a caller
+    has already settled which one (see _settled_template), so a name that is
+    no longer a note template is the only thing left to catch."""
+    if args.template is not None:
+        services.note_template(args.template)
     return services.process_steps(args.steps), services.speaker_count(args.speakers)
 
 
@@ -164,6 +210,7 @@ def _finished(
                 template=args.template,
                 # a project given on the command line is kept, "other" included
                 may_file=services.project_typed(args.project) is None,
+                answers=getattr(args, "answers", None),
             )
             status(f"extracted via {backend}\n")
             print(services.notes(repo, result.memo_id))
@@ -228,6 +275,7 @@ def cmd_process(args: argparse.Namespace) -> None:
     if not src.exists():
         sys.exit(f"no such file: {src}")
     steps, count = _checked(args)
+    _settled_template(args, "file", steps)
     with Repository() as repo:
         stored = services.find_duplicate(repo, src)
         if stored is not None and not _confirmed(
@@ -250,8 +298,8 @@ def cmd_youtube(args: argparse.Namespace) -> None:
     first when the same video is already here. The options are checked before
     the network is touched, and the video is named before its captions are
     fetched, so a mispasted link is caught at the earliest line it can be."""
-    services.note_template(args.template)
     steps = services.youtube_steps(args.steps)
+    _settled_template(args, "youtube", steps)
     with Repository() as repo:
         status("fetching video info …")
         video = services.youtube_video(args.url)
@@ -339,6 +387,7 @@ def cmd_record(args: argparse.Namespace) -> None:
         # stop this job without ever signalling the host or the user's shell.
         os.setpgrp()
     steps, count = _checked(args)
+    _settled_template(args, "record", steps)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     tracks = config.RECORDINGS_DIR / stamp
     system_wav, mic_wav = tracks / "system.wav", tracks / "mic.wav"
@@ -819,8 +868,20 @@ def cmd_extract(args: argparse.Namespace) -> None:
     """Redoes note extraction, for when it was skipped or came out poorly."""
     with Repository() as repo:
         services.require_memo(repo, args.id)
+        template, answers = args.template, None
+        if args.var:
+            # the template this run will use is settled here only to read
+            # `--var` against it; run_extraction settles it again, to the same
+            template = (
+                services.note_template(template)
+                if template
+                else services.extraction_template(repo, args.id)
+            )
+            answers = _answers(args, template)
         status(f"extracting memo {args.id} …")
-        backend = services.run_extraction(repo, args.id, force=args.force, template=args.template)
+        backend = services.run_extraction(
+            repo, args.id, force=args.force, template=template, answers=answers
+        )
         status(f"done via {backend}\n")
         print(services.notes(repo, args.id))
 
@@ -916,9 +977,20 @@ def cmd_config_reset(args: argparse.Namespace) -> None:
 
 def cmd_template(args: argparse.Namespace) -> None:
     """Lists every prompt template: whether it is built-in or a saved
-    override, and where an override file would go."""
+    override, and where an override file would go — and, for a note template
+    that adds sections of its own, which ones, and the keys of the questions it
+    asks, which are what `--var` takes. A template whose front matter
+    cannot be read is still listed, saying so: the listing is how somebody
+    finds out which file to fix."""
     for name, state in services.template_rows():
-        print(f"{name:<10} {state:<10} {config.TEMPLATES_DIR / f'{name}.md'}")
+        try:
+            headings = services.template_sections(name)
+            asked = [key for key, _ in services.template_questions(name)]
+            extra = f"  + {', '.join(headings)}" if headings else ""
+            extra += f"  ? {', '.join(asked)}" if asked else ""
+        except services.InvalidInput:
+            extra = "  (front matter unreadable)"
+        print(f"{name:<10} {state:<10} {config.TEMPLATES_DIR / f'{name}.md'}{extra}")
     status("\ncreate a custom one with: vtn template new <name> --from notes")
 
 
@@ -982,9 +1054,10 @@ def main() -> None:
     )
     sp.add_argument(
         "--template",
-        default="notes",
-        help="note template to extract with (see: vtn template)",
+        default=None,
+        help="note template to extract with (default: set per source in vtn config; see: vtn template)",
     )
+    _add_var(sp)
     sp.add_argument(
         "--speakers",
         default="auto",
@@ -1012,9 +1085,10 @@ def main() -> None:
     )
     sp.add_argument(
         "--template",
-        default="notes",
-        help="note template to extract with (see: vtn template)",
+        default=None,
+        help="note template to extract with (default: set per source in vtn config; see: vtn template)",
     )
+    _add_var(sp)
     sp.add_argument(
         "--speakers",
         default="auto",
@@ -1060,9 +1134,10 @@ def main() -> None:
     )
     sp.add_argument(
         "--template",
-        default="notes",
-        help="note template to extract with (see: vtn template)",
+        default=None,
+        help="note template to extract with (default: set per source in vtn config; see: vtn template)",
     )
+    _add_var(sp)
     sp.add_argument(
         "--lang",
         metavar="LANG",
@@ -1239,9 +1314,10 @@ def main() -> None:
     )
     sp.add_argument(
         "--template",
-        default="notes",
-        help="note template to extract with (see: vtn template)",
+        default=None,
+        help="note template to extract with (default: set per source in vtn config; see: vtn template)",
     )
+    _add_var(sp)
     sp.set_defaults(fn=cmd_extract)
 
     sp = sub.add_parser("notes", help="show extracted notes for a memo")

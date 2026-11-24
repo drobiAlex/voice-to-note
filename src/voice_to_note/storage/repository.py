@@ -123,7 +123,7 @@ CREATE INDEX IF NOT EXISTS run_stages_by_run ON run_stages(run_id);
 
 MEMO_COLUMNS = (
     "id, filename, wav_path, duration_s, language, status, created_at, project,"
-    " updated_at, recorded_at, archived_at, source_url, deleted_at"
+    " updated_at, recorded_at, archived_at, source_url, deleted_at, channel"
 )
 
 
@@ -170,10 +170,20 @@ class Repository:
         recording already stored, `archived_at` for one made before a memo
         could be put away without being deleted, and `source_url` for one made
         before a memo could come from a video instead of a recording, and
-        `deleted_at` for one made before a deleted memo went to the bin."""
+        `deleted_at` for one made before a deleted memo went to the bin, and
+        an extraction's `template` for one made before the note template was
+        remembered, its `answers` for one made before a template could ask
+        questions, and a memo's `channel` for one made before a video's
+        publisher was kept — those rows keep NULL, which reads as "not
+        known"."""
         cols = {r["name"] for r in self.con.execute("PRAGMA table_info(speakers)")}
         if "embedding" not in cols:
             self.con.execute("ALTER TABLE speakers ADD COLUMN embedding BLOB")
+        cols = {r["name"] for r in self.con.execute("PRAGMA table_info(extractions)")}
+        if "template" not in cols:
+            self.con.execute("ALTER TABLE extractions ADD COLUMN template TEXT")
+        if "answers" not in cols:
+            self.con.execute("ALTER TABLE extractions ADD COLUMN answers TEXT")
         cols = {r["name"] for r in self.con.execute("PRAGMA table_info(segments)")}
         if "refined_text" not in cols:
             self.con.execute("ALTER TABLE segments ADD COLUMN refined_text TEXT")
@@ -194,6 +204,8 @@ class Repository:
             self.con.execute("ALTER TABLE memos ADD COLUMN source_url TEXT")
         if "deleted_at" not in cols:
             self.con.execute("ALTER TABLE memos ADD COLUMN deleted_at TEXT")
+        if "channel" not in cols:
+            self.con.execute("ALTER TABLE memos ADD COLUMN channel TEXT")
 
     def close(self) -> None:
         """Closes the memo database."""
@@ -237,18 +249,24 @@ class Repository:
         project: str = "other",
         recorded_at: str | None = None,
         source_url: str | None = None,
+        channel: str | None = None,
     ) -> int:
         """Stores a finished transcription: memo, segments and speakers together.
         When the recording was made is stored beside it where the source said so
         — the fact a later import is recognised by — and left empty where it did
         not, which is not the same as a recording made at no particular time.
         A memo whose words came off a video instead of a recording carries that
-        video's canonical URL the same way, for the same recognition."""
+        video's canonical URL the same way, for the same recognition, and the
+        channel that published it, which only the notes' prompt reads."""
         with self.con:
             cur = self.con.execute(
                 "INSERT INTO memos (filename, wav_path, duration_s, language, status,"
-                " project, recorded_at, source_url) VALUES (?,?,?,?,'transcribed',?,?,?)",
-                (filename, wav_path, duration_s, language, project, recorded_at, source_url),
+                " project, recorded_at, source_url, channel)"
+                " VALUES (?,?,?,?,'transcribed',?,?,?,?)",
+                (
+                    filename, wav_path, duration_s, language, project,
+                    recorded_at, source_url, channel,
+                ),
             )
             # sqlite always reports the row it just inserted; the check narrows
             # the type for everything downstream that treats this as an id
@@ -895,9 +913,19 @@ class Repository:
     # --- extractions ---------------------------------------------------
 
     def save_extraction(
-        self, memo_id: int, backend: str, data: NotesPayload, *, clear_edited: bool = False
+        self,
+        memo_id: int,
+        backend: str,
+        data: NotesPayload,
+        *,
+        clear_edited: bool = False,
+        template: str | None = None,
+        answers: Mapping[str, str] | None = None,
     ) -> None:
-        """Files notes against a memo, replacing any earlier attempt. Clearing a
+        """Files notes against a memo, replacing any earlier attempt, together
+        with the name of the note template that shaped them, and the answers
+        the person gave its questions, so a re-extraction can ask for the same
+        kind of notes again without asking again. Clearing a
         hand-edited note happens in this same transaction rather than after it:
         a forced re-extraction either lands and takes the edit with it or does
         neither, so an edit can never be left masking notes it was never written
@@ -906,8 +934,15 @@ class Repository:
         with self.con:
             self.con.execute("DELETE FROM extractions WHERE memo_id=?", (memo_id,))
             self.con.execute(
-                "INSERT INTO extractions (memo_id, backend, json) VALUES (?,?,?)",
-                (memo_id, backend, json.dumps(data, ensure_ascii=False)),
+                "INSERT INTO extractions (memo_id, backend, json, template, answers)"
+                " VALUES (?,?,?,?,?)",
+                (
+                    memo_id,
+                    backend,
+                    json.dumps(data, ensure_ascii=False),
+                    template,
+                    json.dumps(dict(answers), ensure_ascii=False) if answers else None,
+                ),
             )
             self.con.execute("UPDATE memos SET status='extracted' WHERE id=?", (memo_id,))
             if clear_edited:
@@ -917,14 +952,17 @@ class Repository:
     def extraction(self, memo_id: int) -> Extraction | None:
         """A memo's stored notes, if extraction has run for it."""
         row = self.con.execute(
-            "SELECT backend, json, created_at FROM extractions WHERE memo_id=?",
+            "SELECT backend, json, created_at, template, answers FROM extractions"
+            " WHERE memo_id=?",
             (memo_id,),
         ).fetchone()
         if not row:
             return None
         # only parse_notes writes here, so the stored JSON already passed its check
         data = cast(NotesPayload, json.loads(row["json"]))
-        return Extraction(row["backend"], data, row["created_at"])
+        return Extraction(
+            row["backend"], data, row["created_at"], row["template"], _stored_answers(row["answers"])
+        )
 
     # --- to-dos ----------------------------------------------------------
 
@@ -1252,6 +1290,22 @@ class Repository:
         return bool(cur.rowcount)
 
 
+def _stored_answers(raw: str | None) -> dict[str, str]:
+    """The answers column read tolerantly: whatever is not a JSON object gives
+    none, and inside an object only string keys with string values are kept.
+    A hand-edited or damaged value must not block the re-extraction that would
+    overwrite it, nor take down every screen that reads the extraction."""
+    if not raw:
+        return {}
+    try:
+        stored = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(stored, dict):
+        return {}
+    return {k: v for k, v in stored.items() if isinstance(k, str) and isinstance(v, str)}
+
+
 def _memo(row: sqlite3.Row) -> Memo:
     """Presents a stored row as a memo."""
     return Memo(
@@ -1268,4 +1322,5 @@ def _memo(row: sqlite3.Row) -> Memo:
         row["archived_at"],
         row["source_url"],
         row["deleted_at"],
+        row["channel"],
     )

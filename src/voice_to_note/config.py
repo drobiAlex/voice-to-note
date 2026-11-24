@@ -244,6 +244,25 @@ SETTINGS: dict[str, Setting] = {
         str,
         "caption languages preferred for a youtube import, in order; first available wins",
     ),
+    # the three template settings take any note template, built-in or one the
+    # user dropped into templates/, and those are only known at run time — so
+    # they are free text here and checked against the real list where they are
+    # used, with an error that names the setting
+    "youtube_template": Setting(
+        "video",
+        str,
+        "note template a youtube import is extracted with unless --template says otherwise",
+    ),
+    "record_template": Setting(
+        "notes",
+        str,
+        "note template a recorded meeting is extracted with unless --template says otherwise",
+    ),
+    "file_template": Setting(
+        "notes",
+        str,
+        "note template an audio file is extracted with unless --template says otherwise",
+    ),
     "youtube_timeout_s": Setting(
         120, int, "seconds before a stuck yt-dlp or caption download is given up on", kind="int"
     ),
@@ -355,6 +374,9 @@ CHAT_CONTEXT_CHARS: int = _setting("chat_context_chars")
 
 YOUTUBE_LANG: str = _setting("youtube_lang")
 YOUTUBE_TIMEOUT_S: int = _setting("youtube_timeout_s")
+YOUTUBE_TEMPLATE: str = _setting("youtube_template")
+RECORD_TEMPLATE: str = _setting("record_template")
+FILE_TEMPLATE: str = _setting("file_template")
 
 LOG_MAX_MB: float = _setting("log_max_mb")
 METRICS_KEEP_RUNS: int = _setting("metrics_keep_runs")

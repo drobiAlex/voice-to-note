@@ -1203,3 +1203,36 @@ def test_an_older_database_gains_the_conversation_tables_on_open(tmp_path):
         assert repo.conversation_listings() == []
     finally:
         repo.close()
+
+
+def test_a_database_from_before_templates_were_remembered_learns_the_column(tmp_path):
+    path = tmp_path / "old.db"
+    con = sqlite3.connect(path)
+    con.executescript(PRE_ARCHIVE_SCHEMA)
+    con.execute(
+        "CREATE TABLE extractions (id INTEGER PRIMARY KEY, memo_id INTEGER NOT NULL,"
+        " backend TEXT NOT NULL, json TEXT NOT NULL,"
+        " created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+    )
+    con.execute("INSERT INTO memos (filename, wav_path) VALUES ('old.m4a', '/tmp/old.wav')")
+    con.execute(
+        "INSERT INTO extractions (memo_id, backend, json) VALUES (1, 'claude', '{\"title\": \"t\"}')"
+    )
+    con.commit()
+    con.close()
+
+    repo = Repository(path)
+
+    stored = repo.extraction(1)
+    assert stored is not None and stored.template is None
+    repo.save_extraction(1, "claude", {"title": "t"}, template="video")
+    assert repo.extraction(1).template == "video"
+    repo.close()
+
+
+def test_an_extraction_remembers_the_template_it_was_made_with(repo):
+    memo_id = make_memo(repo)
+
+    repo.save_extraction(memo_id, "claude", {"title": "t"}, template="lecture")
+
+    assert repo.extraction(memo_id).template == "lecture"
