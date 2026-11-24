@@ -972,10 +972,10 @@ def extraction_answers(
 def recording_details(memo: Memo) -> Details:
     """What the prompt may say about a memo: for a video its title, channel,
     link and upload day; for anything else the day it was recorded. A memo
-    with no recorded day falls back to the day it was stored, which is the
-    nearest true thing there is to say."""
+    with no recorded day says none: the day it was imported is not when it
+    was recorded or uploaded, and stating it as that would be a false fact."""
     video = bool(memo.source_url)
-    when = memo.recorded_at or memo.created_at or ""
+    when = memo.recorded_at or ""
     return Details(
         title=memo.filename,
         channel=memo.channel or "",
@@ -3123,7 +3123,7 @@ def memo_info_text(repo: Repository, memo_id: int) -> str:
     if info.template:
         rows.append(("template", info.template))
     for question, answer in info.answers:
-        rows.append(("answer", f"{question} — {answer}"))
+        rows.append(("answer", f"{question} — {' '.join(answer.split())}"))
     if info.binned:
         # only said when it is true: the one command that describes a binned
         # memo has to say so, and every other memo has nothing to add

@@ -626,7 +626,12 @@ class ProcessMemo(ModalScreen[None]):
         try:
             options = self._options()
             services.note_template(options.template)
-            questions = services.template_questions(options.template)
+            # with the notes step off the answers would go nowhere
+            questions = (
+                services.template_questions(options.template)
+                if "notes" in options.steps
+                else []
+            )
         except services.InvalidInput as refused:
             self.notify(str(refused), severity="warning")
             return
@@ -725,7 +730,7 @@ class ImportYouTube(ModalScreen[None]):
                 self.query_one("#youtube-steps", SelectionList).selected
             )
             options = YouTubeOptions(project, language, template, steps)
-            questions = services.template_questions(template)
+            questions = services.template_questions(template) if "notes" in steps else []
             if not questions:
                 self.store(url, options)
         except services.InvalidInput as refused:

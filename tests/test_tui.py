@@ -5874,3 +5874,121 @@ async def test_a_template_that_became_unreadable_is_said_on_the_file_form_and_no
         await pilot.pause()
         assert showing(pilot.app, "#source-path") and not showing(pilot.app, "#questions-title")
         assert ran == []
+
+
+@pytest.mark.asyncio
+async def test_the_file_form_does_not_ask_when_the_notes_step_is_off(
+    repo, tmp_path, monkeypatch, asking
+):
+    seed(repo)
+    monkeypatch.setattr(config, "FILE_TEMPLATE", "asks")
+    monkeypatch.setattr(services, "process_memo", stores_a_memo())
+    calls = extraction_recorder(monkeypatch)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_add_modal(pilot, tmp_path)
+        pilot.app.screen.query_one("#source-path", Input).value = str(recording(tmp_path))
+        pilot.app.screen.query_one("#custom-steps", Switch).value = True
+        await pilot.pause()
+        pilot.app.screen.query_one("#step-list", SelectionList).deselect("notes")
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert not showing(pilot.app, "#questions-title")
+        assert not showing(pilot.app, "#source-path")
+        assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_youtube_form_does_not_ask_when_the_notes_step_is_off(
+    repo, monkeypatch, asking
+):
+    seed(repo)
+    monkeypatch.setattr(config, "YOUTUBE_TEMPLATE", "asks")
+    video = video_for_form(monkeypatch)
+    calls = extraction_recorder(monkeypatch)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+        pilot.app.screen.query_one("#youtube-url", Input).value = video.url
+        pilot.app.screen.query_one("#youtube-steps", SelectionList).deselect("notes")
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert not showing(pilot.app, "#questions-title")
+        assert not showing(pilot.app, "#youtube-url")
+        assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ["not json", "[1,2]", '"str"', '{"goal":5}', '{"goal":null}'])
+async def test_odd_stored_answers_open_the_questions_empty_and_re_extract_still_runs(
+    repo, monkeypatch, asking, raw
+):
+    work, _home = seed(repo)
+    repo.save_extraction(work, "claude", NOTES, template="asks", answers={"goal": "x"})
+    repo.con.execute("UPDATE extractions SET answers=? WHERE memo_id=?", (raw, work))
+    repo.con.commit()
+    calls = extraction_recorder(monkeypatch)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await write_notes(pilot)
+
+        assert pilot.app.screen.query_one("#answer-goal", Input).value == ""
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_edited_note_is_asked_about_after_the_questions_and_extracts_exactly_once(
+    repo, monkeypatch, asking
+):
+    work, _home = seed(repo)
+    repo.save_extraction(work, "claude", NOTES, template="asks", answers={"goal": "ship"})
+    repo.save_notes_md(work, "# my own note")
+    forced: list[bool] = []
+
+    def extract(worker_repo, memo_id, force=False, template=None, answers=None):
+        forced.append(force)
+        worker_repo.save_extraction(
+            memo_id, "claude", NOTES, clear_edited=force, template=template, answers=answers
+        )
+        return "claude"
+
+    monkeypatch.setattr(services, "run_extraction", extract)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await write_notes(pilot)
+        assert showing(pilot.app, "#answer-goal")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not showing(pilot.app, "#answer-goal")
+        assert forced == []
+        await pilot.press("y")
+        await finish_jobs(pilot)
+
+        assert forced == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_question_removed_from_the_template_while_the_modal_was_open_is_a_one_line_error(
+    repo, monkeypatch, asking
+):
+    work, _home = seed(repo)
+    repo.save_extraction(work, "claude", NOTES, template="asks", answers={"goal": "ship"})
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await write_notes(pilot)
+        (asking / "asks.md").write_text(
+            '+++\n[ask]\naudience = "Who reads it?"\n+++\nNotes.\n\nTranscript:\n'
+        )
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert any("no question 'goal'" in message for message in said(pilot))
+        assert not pilot.app.jobs

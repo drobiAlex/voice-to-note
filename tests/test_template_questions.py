@@ -155,7 +155,6 @@ def test_a_video_memo_gets_an_about_block_with_title_channel_link_and_upload_dat
         "- Channel: Some Channel\n"
         "- Link: https://www.youtube.com/watch?v=abc123\n"
         "- Uploaded: 2026-01-15\n"
-        "- Project: learning\n"
         "\nTranscript:\nWORDS"
     )
 
@@ -602,3 +601,105 @@ def test_an_unreadable_template_does_not_crash_the_listing_or_info(
     assert "answer:" in text and "ship" in text
     with pytest.raises(services.InvalidInput):
         services.template_questions("asks")
+
+
+# --- review fixes ------------------------------------------------------------
+
+
+ODD_ANSWERS = ["not json", "[1,2]", '"str"', '{"goal":5}', '{"goal":null}', '{"goal":["a"]}']
+
+
+@pytest.mark.parametrize("raw", ODD_ANSWERS)
+def test_odd_stored_answers_read_as_none_and_never_block_info_or_a_re_extraction(
+    repo, monkeypatch, tmp_path, raw
+):
+    memo_id, prompts = wired(repo, monkeypatch, tmp_path)
+    services.run_extraction(repo, memo_id, template="asks", answers={"goal": "ship"})
+    repo.con.execute("UPDATE extractions SET answers=? WHERE memo_id=?", (raw, memo_id))
+    repo.con.commit()
+
+    assert repo.extraction(memo_id).answers == {}
+    assert services.extraction_answers(repo, memo_id, "asks") == {}
+    assert "answer:" not in services.memo_info_text(repo, memo_id)
+    services.run_extraction(repo, memo_id, template="asks", answers={"goal": "again"})
+    assert repo.extraction(memo_id).answers == {"goal": "again"}
+
+
+def test_a_dict_of_answers_keeps_only_string_pairs(repo, monkeypatch, tmp_path):
+    memo_id, _ = wired(repo, monkeypatch, tmp_path)
+    services.run_extraction(repo, memo_id, template="asks", answers={"goal": "ship"})
+    repo.con.execute(
+        "UPDATE extractions SET answers=? WHERE memo_id=?",
+        ('{"goal": "keep", "audience": 5}', memo_id),
+    )
+    repo.con.commit()
+
+    assert repo.extraction(memo_id).answers == {"goal": "keep"}
+
+
+def test_a_memo_with_no_recorded_day_is_not_given_the_day_it_was_imported(repo):
+    memo_id = repo.create_memo(
+        filename="a.m4a", wav_path="/x", duration_s=1.0, language="en",
+        segments=[Segment(0, 1, "x")],
+    )
+
+    details = services.recording_details(repo.memo(memo_id))
+
+    assert details.recorded == ""
+    assert "Recorded" not in compose_prompt(
+        parse_template("N.\nTranscript:\n"), "t", details=details
+    )
+
+
+def test_a_video_with_no_upload_day_has_no_uploaded_line(repo):
+    memo_id = repo.create_memo(
+        filename="v", wav_path="", duration_s=1.0, language="en",
+        segments=[Segment(0, 1, "x")], source_url="https://y.example/v", channel="C",
+    )
+
+    prompt = compose_prompt(
+        parse_template("{recorded}\nTranscript:\n"), "t",
+        details=services.recording_details(repo.memo(memo_id)),
+    )
+
+    assert "Uploaded" not in prompt and prompt.startswith("(not given)")
+
+
+def test_the_project_is_a_placeholder_but_never_in_the_about_block():
+    prompt = compose_prompt(
+        parse_template("P: {project}\nTranscript:\n"), "t", details=VIDEO
+    )
+
+    assert prompt.startswith("P: learning\n")
+    assert "Project" not in prompt
+
+
+def test_placeholders_in_a_section_hint_are_filled_and_headings_stay_literal():
+    template = parse_template(
+        '+++\n[ask]\ngoal = "G?"\n[sections]\n"About {goal}" = "Judge against {goal} on {title}."\n'
+        "+++\nNotes.\nTranscript:\n"
+    )
+
+    prompt = compose_prompt(template, "t", {"goal": "learning"}, VIDEO)
+
+    assert '- "About {goal}": Judge against learning on How to think.' in prompt
+
+
+def test_an_answer_saying_transcript_does_not_move_the_blocks(repo):
+    template = parse_template('+++\n[ask]\ngoal = "G?"\n+++\nGoal: {goal}\nthen more text\n')
+
+    prompt = compose_prompt(template, "WORDS", {"goal": "see Transcript: below"}, VIDEO)
+
+    assert prompt.startswith("Goal: see Transcript: below\nthen more text")
+    assert prompt.index("About this recording") > prompt.index("then more text")
+    assert prompt.endswith("WORDS")
+
+
+def test_info_shows_an_answer_with_newlines_on_one_line(repo, monkeypatch, tmp_path):
+    memo_id, _ = wired(repo, monkeypatch, tmp_path)
+    services.run_extraction(repo, memo_id, template="asks", answers={"goal": "one\ntwo\n\nthree"})
+
+    text = services.memo_info_text(repo, memo_id)
+
+    assert "— one two three" in text
+    assert repo.extraction(memo_id).answers == {"goal": "one\ntwo\n\nthree"}

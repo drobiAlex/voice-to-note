@@ -947,8 +947,9 @@ class Repository:
             return None
         # only parse_notes writes here, so the stored JSON already passed its check
         data = cast(NotesPayload, json.loads(row["json"]))
-        answers = json.loads(row["answers"]) if row["answers"] else {}
-        return Extraction(row["backend"], data, row["created_at"], row["template"], answers)
+        return Extraction(
+            row["backend"], data, row["created_at"], row["template"], _stored_answers(row["answers"])
+        )
 
     # --- to-dos ----------------------------------------------------------
 
@@ -1274,6 +1275,22 @@ class Repository:
         with self.con:
             cur = self.con.execute("DELETE FROM conversations WHERE id=?", (conversation_id,))
         return bool(cur.rowcount)
+
+
+def _stored_answers(raw: str | None) -> dict[str, str]:
+    """The answers column read tolerantly: whatever is not a JSON object gives
+    none, and inside an object only string keys with string values are kept.
+    A hand-edited or damaged value must not block the re-extraction that would
+    overwrite it, nor take down every screen that reads the extraction."""
+    if not raw:
+        return {}
+    try:
+        stored = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(stored, dict):
+        return {}
+    return {k: v for k, v in stored.items() if isinstance(k, str) and isinstance(v, str)}
 
 
 def _memo(row: sqlite3.Row) -> Memo:

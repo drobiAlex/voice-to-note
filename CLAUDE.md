@@ -121,7 +121,7 @@ exact `{key}` tokens in the template body — never `str.format`, the JSON shape
 for the ask keys and the built-in details `{title} {channel} {url} {recorded} {project}`; a known
 name with no value reads `(not given)`. Before the trailing `Transcript:` it adds, in order, the
 sections instruction, an "About this recording" block (a video: title, channel, link, upload day;
-anything else: only the recorded day; project "other" left out) and a block of the answered
+anything else: only the recorded day; never the project, which on a re-extraction is the memo's own earlier suggestion) and a block of the answered
 questions. Answers live in `extractions.answers` (JSON); `services.extraction_answers` lays `--var`
 or form answers over the stored ones and keeps only keys the template asks, so switching templates
 drops the rest. `run_extraction(..., *, answers=)`; the CLI takes repeatable `--var key=value` and

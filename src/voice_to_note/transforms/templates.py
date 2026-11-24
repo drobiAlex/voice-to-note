@@ -178,7 +178,10 @@ def fill_placeholders(body: str, values: Mapping[str, str]) -> str:
     nothing else. Not str.format: the prompt carries a JSON shape full of
     braces, and a stray one must stay a brace rather than raise or vanish.
     A known name with no value reads `(not given)`, so a sentence built around
-    it still makes sense to the model."""
+    it still makes sense to the model. Known limit: the built-in details are
+    placeholders in every note template, so a custom template that already
+    contained a literal `{title}`, `{channel}`, `{url}`, `{recorded}` or
+    `{project}` has it replaced."""
 
     def one(match: re.Match[str]) -> str:
         name = match.group(1)
@@ -193,8 +196,10 @@ def about_block(details: Details) -> str:
     """The short "About this recording" block: only what is known and worth
     the model's attention. A video gets its title, channel, link and upload
     date; anything else only the day it was recorded, since its title is a
-    file name. A project of "other" is the app's word for unfiled, not a fact
-    about the recording. Empty when nothing is left to say."""
+    file name. The project is left out on purpose: on a re-extraction it is
+    the project the memo's own earlier notes suggested, and handing that back
+    would anchor the next suggestion on the last one. `{project}` stays
+    available to a template that wants it. Empty when nothing is left to say."""
     if details.video:
         rows = [
             ("Title", details.title),
@@ -204,8 +209,6 @@ def about_block(details: Details) -> str:
         ]
     else:
         rows = [("Recorded", details.recorded)]
-    if details.project and details.project != "other":
-        rows.append(("Project", details.project))
     lines = [f"- {label}: {value.strip()}" for label, value in rows if value.strip()]
     if not lines:
         return ""
@@ -243,17 +246,23 @@ def compose_prompt(
     details = details or Details()
     values = details.values()
     values.update({key: answers.get(key, "") for key, _ in template.questions})
-    body = fill_placeholders(template.body, values)
+    # sections' hints are filled like the body, each text in one pass; the
+    # headings stay literal, since the reply is matched against them
+    sections = tuple((h, fill_placeholders(ask, values)) for h, ask in template.sections)
     blocks = [
-        sections_instruction(template.sections) if template.sections else "",
+        sections_instruction(sections) if sections else "",
         about_block(details),
         answers_block(template.questions, answers),
     ]
     added = "\n".join(block for block in blocks if block)
+    # the place for the blocks is found in the template's own text, before any
+    # answer is in it: an answer that says "Transcript:" must not move it
+    head, marker, tail = template.body.rpartition("Transcript:")
+    if marker and not tail.strip():
+        body = fill_placeholders(head, values)
+        inserted = f"{added}\n" if added else ""
+        return f"{body}{inserted}{marker}{tail}{transcript}"
+    body = fill_placeholders(template.body, values)
     if added:
-        head, marker, tail = body.rpartition("Transcript:")
-        if marker and not tail.strip():
-            body = f"{head}{added}\n{marker}{tail}"
-        else:
-            body = f"{body.rstrip()}\n\n{added}\n"
+        body = f"{body.rstrip()}\n\n{added}\n"
     return body + transcript
