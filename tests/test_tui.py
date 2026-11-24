@@ -5808,3 +5808,69 @@ async def test_re_extracting_with_a_template_that_asks_nothing_shows_no_question
 
         assert not showing(pilot.app, "#questions-title")
         assert calls == [{"template": "quiet", "answers": {}}]
+
+
+@pytest.mark.asyncio
+async def test_a_stale_default_template_still_lets_the_chooser_open_on_notes(
+    repo, monkeypatch
+):
+    work, _home = seed(repo)
+    monkeypatch.setattr(config, "FILE_TEMPLATE", "gone")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("space", "w")
+        await pilot.pause()
+
+        choices = pilot.app.screen.query_one("#template-choices", ListView)
+        assert choices.highlighted_child.name == "notes"
+        assert any("file_template" in message for message in said(pilot))
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_template_file_is_listed_by_the_chooser_and_refused_when_chosen(
+    repo, tmp_path, monkeypatch
+):
+    work, _home = seed(repo)
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "binary.md").write_bytes(b"\xff\xfe\x00 not text")
+    monkeypatch.setattr(config, "TEMPLATES_DIR", templates)
+    ran = []
+    monkeypatch.setattr(services, "run_extraction", lambda *a, **k: ran.append(k) or "claude")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_memo(pilot, work)
+        await pilot.press("space", "w")
+        await pilot.pause()
+        choices = pilot.app.screen.query_one("#template-choices", ListView)
+        names = [row.name for row in choices.children]
+        assert "binary" in names
+
+        choices.index = names.index("binary")
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert ran == []
+        assert any("binary.md" in message for message in said(pilot))
+
+
+@pytest.mark.asyncio
+async def test_a_template_that_became_unreadable_is_said_on_the_file_form_and_nothing_starts(
+    repo, tmp_path, monkeypatch, asking
+):
+    seed(repo)
+    monkeypatch.setattr(config, "FILE_TEMPLATE", "asks")
+    monkeypatch.setattr(config, "YOUTUBE_TEMPLATE", "asks")
+    ran: list = []
+    monkeypatch.setattr(services, "process_memo", lambda *a, **k: ran.append(a) or None)
+    broken = b"+++\n[ask]\ngoal = \xff\n+++\nbody"
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_add_modal(pilot, tmp_path)
+        pilot.app.screen.query_one("#source-path", Input).value = str(recording(tmp_path))
+        (asking / "asks.md").write_bytes(broken)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert showing(pilot.app, "#source-path") and not showing(pilot.app, "#questions-title")
+        assert ran == []

@@ -554,3 +554,51 @@ def test_the_template_listing_shows_each_templates_question_keys(
     out = capsys.readouterr().out
     assert any(line.startswith("video") and "? goal" in line for line in out.splitlines())
     assert any(line.startswith("asks") and "? goal, audience" in line for line in out.splitlines())
+
+
+# --- the same rules as the rest of the template handling -------------------
+
+
+def test_a_question_with_a_newline_becomes_one_line():
+    parsed = parse_template('+++\n[ask]\ngoal = """What for?\n   And why?"""\n+++\nbody')
+
+    assert parsed.questions == (("goal", "What for? And why?"),)
+
+
+def test_a_var_without_the_notes_step_is_refused_in_one_line_and_never_resolves_a_default(
+    monkeypatch,
+):
+    import argparse
+
+    monkeypatch.setattr(config, "RECORD_TEMPLATE", "gone")
+    args = argparse.Namespace(template=None, var=["goal=x"])
+
+    with pytest.raises(services.InvalidInput, match="leaves out notes"):
+        cli._settled_template(args, "record", frozenset({"speakers"}))
+
+
+def test_a_stale_default_and_no_var_still_lets_a_run_without_notes_go_ahead(monkeypatch):
+    import argparse
+
+    monkeypatch.setattr(config, "RECORD_TEMPLATE", "gone")
+    args = argparse.Namespace(template=None, var=[])
+
+    cli._settled_template(args, "record", frozenset({"speakers"}))
+
+    assert args.template is None and args.answers == {}
+
+
+def test_an_unreadable_template_does_not_crash_the_listing_or_info(
+    repo, monkeypatch, tmp_path, capsys
+):
+    memo_id, _ = wired(repo, monkeypatch, tmp_path)
+    services.run_extraction(repo, memo_id, template="asks", answers={"goal": "ship"})
+    (config.TEMPLATES_DIR / "asks.md").write_bytes(b"+++\n[ask]\ngoal = \xff\n+++\nbody")
+
+    run(monkeypatch, repo, "template")
+    assert "front matter unreadable" in capsys.readouterr().out
+    text = services.memo_info_text(repo, memo_id)
+
+    assert "answer:" in text and "ship" in text
+    with pytest.raises(services.InvalidInput):
+        services.template_questions("asks")

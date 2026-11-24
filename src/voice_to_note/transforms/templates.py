@@ -21,6 +21,19 @@ DETAILS = ("title", "channel", "url", "recorded", "project")
 NOT_GIVEN = "(not given)"
 
 
+# how many extra sections a note keeps. A template declares a handful; the cap
+# only exists so a runaway reply cannot turn one note into a wall of headings
+MAX_SECTIONS = 20
+
+
+def clean_heading(heading: str) -> str:
+    """A heading as one plain line: whitespace runs, newlines included, become
+    a single space and leading `#` marks go, since the renderers add their own
+    and a heading carrying a newline or a `#` would break out of its line into
+    the note around it. Empty means there is no heading to show."""
+    return re.sub(r"\s+", " ", heading).strip().lstrip("#").strip()
+
+
 class TemplateError(ValueError):
     """A template's front matter could not be read. A ValueError so the pure
     layer needs nothing from the layers above it; the service that reads the
@@ -50,6 +63,9 @@ def _split(text: str) -> tuple[str, str] | None:
     """The front matter and the prompt after it, or None for a template that
     does not start with a fence. Only the very first line can open the block,
     so a `+++` further down a prompt is just text."""
+    # an editor's byte-order mark or a blank line above the fence must not turn
+    # the block into prompt text the model is then asked to answer
+    text = re.sub(r"\A\ufeff?(?:[ \t]*\r?\n)*", "", text)
     lines = text.splitlines(keepends=True)
     if not lines or lines[0].rstrip() != FENCE:
         return None
@@ -75,7 +91,8 @@ def _questions(declared: Any) -> tuple[tuple[str, str], ...]:
             raise TemplateError(f"question key {key!r} is a built-in detail — pick another key")
         if not isinstance(question, str) or not question.strip():
             raise TemplateError(f"question {key!r} needs the text to show the person")
-        questions.append((key, question.strip()))
+        # one line, since it is a label in a form and a column in a listing
+        questions.append((key, " ".join(question.split())))
     return tuple(questions)
 
 
@@ -99,11 +116,12 @@ def parse_template(text: str) -> ParsedTemplate:
         raise TemplateError("[sections] must be a table of heading = \"what to put there\"")
     sections: list[tuple[str, str]] = []
     for heading, ask in declared.items():
-        if not isinstance(ask, str) or not ask.strip() or not heading.strip():
+        heading = clean_heading(heading)
+        if not isinstance(ask, str) or not ask.strip() or not heading:
             raise TemplateError(
                 f"section {heading!r} needs a heading and a text saying what belongs under it"
             )
-        sections.append((heading.strip(), ask.strip()))
+        sections.append((heading, ask.strip()))
     return ParsedTemplate(
         body=body.lstrip("\n"),
         sections=tuple(sections),

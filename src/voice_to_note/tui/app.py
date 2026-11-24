@@ -3016,9 +3016,11 @@ class MemoApp(App[None]):
             return
         try:
             current = services.extraction_template(self.repo, memo_id)
-        except services.InvalidInput as refused:
-            self.notify(str(refused), severity="warning")
-            return
+        except services.InvalidInput as stale:
+            # the chooser is how a stale default gets worked around, so it
+            # opens anyway, on the template that always exists
+            current = "notes"
+            self.notify(str(stale), severity="warning")
         self.push_screen(
             ChooseTemplate(services.note_templates(), current),
             lambda name: self._extract_with(memo_id, name),

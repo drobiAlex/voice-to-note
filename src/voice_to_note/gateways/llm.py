@@ -238,6 +238,8 @@ def parsed_template(name: str) -> ParsedTemplate:
     where = str(override) if override.exists() else f"built-in template {name}"
     try:
         return parse_template(template(name))
+    except (UnicodeDecodeError, OSError) as e:
+        raise TemplateError(f"{where}: cannot be read ({e})") from e
     except TemplateError as e:
         raise TemplateError(f"{where}: {e}") from e
 
