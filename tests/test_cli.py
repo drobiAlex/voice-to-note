@@ -819,7 +819,7 @@ def test_refine_runs_before_extraction_when_both_are_asked_for(tmp_path, monkeyp
         order.append("refine")
         return services.RefineResult(changes=[], flagged=[], untouched=0)
 
-    def run_extraction(_repo, _memo_id, force=False, template="notes"):
+    def run_extraction(_repo, _memo_id, force=False, template="notes", answers=None):
         order.append("extract")
         return "claude"
 
@@ -1163,7 +1163,7 @@ def test_the_tui_command_opens_the_browser_on_the_memo_database(monkeypatch):
 def test_re_extracting_can_be_told_to_overwrite_an_edited_note(monkeypatch, capsys):
     seen: dict = {}
 
-    def run_extraction(_repo, memo_id, force=False, template="notes"):
+    def run_extraction(_repo, memo_id, force=False, template="notes", answers=None):
         seen["memo_id"], seen["force"] = memo_id, force
         return "claude"
 
@@ -1670,7 +1670,7 @@ def test_youtube_imports_captions_and_prints_the_notes_on_stdout(monkeypatch, ca
         ),
     )
     monkeypatch.setattr(
-        services, "run_extraction", lambda repo, memo_id, force=False, template="notes": "claude"
+        services, "run_extraction", lambda repo, memo_id, force=False, template="notes", answers=None: "claude"
     )
     monkeypatch.setattr(services, "notes", lambda repo, memo_id: "## How to think")
 
@@ -1758,7 +1758,7 @@ def extraction_seen(monkeypatch) -> list:
     run_extraction call was handed."""
     seen: list = []
 
-    def run_extraction(_repo, _memo_id, force=False, template=None):
+    def run_extraction(_repo, _memo_id, force=False, template=None, answers=None):
         seen.append(template)
         return "claude"
 
