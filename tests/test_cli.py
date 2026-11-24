@@ -484,23 +484,52 @@ def test_processing_files_the_new_memo_under_a_project(tmp_path, monkeypatch, ca
     assert seen["project"] == "work"
 
 
-def test_processing_without_a_project_files_it_under_other(tmp_path, monkeypatch, capsys):
+def processing_with(monkeypatch, tmp_path, *argv):
+    """Runs `vtn process` over stubs and reports the project the pipeline was
+    given and whether extraction was allowed to file the memo."""
     src = tmp_path / "standup.m4a"
     src.write_bytes(b"fake audio")
     seen: dict = {}
 
-    def process_memo(_repo, _src, project="other", log=None, num_speakers=None, diarize=True):
+    def process_memo(_repo, _src, project=None, log=None, num_speakers=None, diarize=True):
         seen["project"] = project
         return services.ProcessResult(1, 0, [], "en")
 
+    def run_extraction(_repo, _id, force=False, template="notes", may_file=True):
+        seen["may_file"] = may_file
+        return "claude"
+
     monkeypatch.setattr(services, "process_memo", process_memo)
-    monkeypatch.setattr(services, "run_extraction", lambda *a, **k: "claude")
+    monkeypatch.setattr(services, "run_extraction", run_extraction)
     monkeypatch.setattr(services, "notes", lambda *a, **k: "the notes")
     fresh_import(monkeypatch)
 
-    run(monkeypatch, StubRepo(), "process", str(src))
+    run(monkeypatch, StubRepo(), "process", str(src), *argv)
+    return seen
 
-    assert seen["project"] == "other"
+
+def test_processing_without_a_project_leaves_the_choice_to_the_notes(
+    tmp_path, monkeypatch, capsys
+):
+    seen = processing_with(monkeypatch, tmp_path)
+
+    assert seen == {"project": None, "may_file": True}
+
+
+def test_a_project_given_on_the_command_line_is_kept_through_extraction(
+    tmp_path, monkeypatch, capsys
+):
+    seen = processing_with(monkeypatch, tmp_path, "--project", "work")
+
+    assert seen == {"project": "work", "may_file": False}
+
+
+def test_other_given_on_the_command_line_is_kept_through_extraction(
+    tmp_path, monkeypatch, capsys
+):
+    seen = processing_with(monkeypatch, tmp_path, "--project", "other")
+
+    assert seen == {"project": "other", "may_file": False}
 
 
 def test_events_report_friendly_pipeline_stages_and_transcript_readiness(
@@ -818,7 +847,7 @@ def test_refine_runs_before_extraction_when_both_are_asked_for(tmp_path, monkeyp
         order.append("refine")
         return services.RefineResult(changes=[], flagged=[], untouched=0)
 
-    def run_extraction(_repo, _memo_id, force=False, template="notes"):
+    def run_extraction(_repo, _memo_id, force=False, template="notes", may_file=True):
         order.append("extract")
         return "claude"
 
@@ -1162,7 +1191,7 @@ def test_the_tui_command_opens_the_browser_on_the_memo_database(monkeypatch):
 def test_re_extracting_can_be_told_to_overwrite_an_edited_note(monkeypatch, capsys):
     seen: dict = {}
 
-    def run_extraction(_repo, memo_id, force=False, template="notes"):
+    def run_extraction(_repo, memo_id, force=False, template="notes", may_file=True):
         seen["memo_id"], seen["force"] = memo_id, force
         return "claude"
 
@@ -1664,12 +1693,12 @@ def test_youtube_imports_captions_and_prints_the_notes_on_stdout(monkeypatch, ca
     monkeypatch.setattr(
         services,
         "import_youtube",
-        lambda repo, video, project="other", lang=None, log=None: services.ProcessResult(
+        lambda repo, video, project=None, lang=None, log=None: services.ProcessResult(
             7, 3, [], "en"
         ),
     )
     monkeypatch.setattr(
-        services, "run_extraction", lambda repo, memo_id, force=False, template="notes": "claude"
+        services, "run_extraction", lambda repo, memo_id, force=False, template="notes", may_file=True: "claude"
     )
     monkeypatch.setattr(services, "notes", lambda repo, memo_id: "## How to think")
 
@@ -1687,7 +1716,7 @@ def test_youtube_with_no_steps_stores_the_transcript_and_says_how_to_go_on(monke
     monkeypatch.setattr(
         services,
         "import_youtube",
-        lambda repo, video, project="other", lang=None, log=None: services.ProcessResult(
+        lambda repo, video, project=None, lang=None, log=None: services.ProcessResult(
             7, 3, [], "en"
         ),
     )

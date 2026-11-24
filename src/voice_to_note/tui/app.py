@@ -341,10 +341,17 @@ class ImportOptions:
 class YouTubeOptions:
     """How captions from one video are filed and turned into knowledge."""
 
-    project: str
+    project: str | None
     language: str | None
     template: str
     steps: frozenset[str]
+
+
+# What the project line says when it is empty, and the key that opens the
+# list of projects that already exist. An empty line is a choice too —
+# the notes pick — so the placeholder names it rather than leaving a blank.
+_PROJECT_PLACEHOLDER = "empty: the notes will pick the project"
+_PROJECT_LABEL = "Project (ctrl+o picks an existing one, or type a new name)"
 
 
 # the steps a form left untouched runs, reproducing `vtn process`'s own
@@ -421,6 +428,9 @@ class ProcessMemo(ModalScreen[None]):
         # Input does. Priority is what lets ctrl+s start the run regardless of
         # which control the cursor is actually resting on.
         Binding("ctrl+s", "start", "Start", priority=True),
+        # not priority: no control here uses ctrl+o, so it reaches the screen
+        # from whichever one has the cursor
+        Binding("ctrl+o", "pick_project", "Pick project"),
         ("escape", "cancel", "Cancel"),
     ]
 
@@ -430,14 +440,18 @@ class ProcessMemo(ModalScreen[None]):
         project: str,
         store: Callable[[str, str, ImportOptions], None],
         duplicate: Callable[[str], Memo | None],
+        projects: Callable[[], list[tuple[str, int]]] = lambda: [],
     ) -> None:
-        """Opens on the folder to browse from, the project being browsed, the
-        way to bring a file in, and the way to ask whether it is already in."""
+        """Opens on the folder to browse from, the project being browsed (empty
+        when none is, which leaves the choice to the notes), the way to bring a
+        file in, the way to ask whether it is already in, and the way to list
+        the projects that exist."""
         super().__init__()
         self.root = root
         self.project = project
         self.store = store
         self.duplicate = duplicate
+        self.projects = projects
 
     def compose(self) -> ComposeResult:
         """Where the recording is, what to file it under, how it should be run
@@ -445,7 +459,8 @@ class ProcessMemo(ModalScreen[None]):
         choice that reproduces today's default — and somewhere to go looking
         if the path is not already to hand."""
         yield Input(placeholder="path to a recording", id="source-path")
-        yield Input(self.project, id="source-project")
+        yield Label(_PROJECT_LABEL, id="source-project-label")
+        yield Input(self.project, placeholder=_PROJECT_PLACEHOLDER, id="source-project")
         with Horizontal(id="speakers-row"):
             yield Switch(value=True, id="speakers-auto")
             yield Label("auto-detect speakers", id="speakers-auto-label")
@@ -491,6 +506,19 @@ class ProcessMemo(ModalScreen[None]):
                 count.focus()
         elif event.switch.id == "custom-steps":
             self.query_one("#step-list", SelectionList).display = event.value
+
+    def action_pick_project(self) -> None:
+        """Lists the projects that exist over this form and writes the pick
+        into the project line, which keeps what else was typed: choosing a
+        project is one part of the form, not the end of it."""
+        line = self.query_one("#source-project", Input)
+
+        def write(name: str) -> None:
+            """Puts the pick on the line; the form stays open."""
+            line.value = name
+            line.cursor_position = len(name)
+
+        self.app.push_screen(MoveMemo(self.projects(), write))
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Enter from any line brings the recording in."""
@@ -570,19 +598,28 @@ class ImportYouTube(ModalScreen[None]):
 
     BINDINGS = [
         Binding("ctrl+s", "start", "Start", priority=True),
+        Binding("ctrl+o", "pick_project", "Pick project"),
         ("escape", "cancel", "Cancel"),
     ]
 
     def __init__(
-        self, project: str, store: Callable[[str, YouTubeOptions], None]
+        self,
+        project: str,
+        store: Callable[[str, YouTubeOptions], None],
+        projects: Callable[[], list[tuple[str, int]]] = lambda: [],
     ) -> None:
+        """Opens on the project being browsed (empty when none is, which leaves
+        the choice to the notes), the way to import, and the way to list the
+        projects that exist."""
         super().__init__()
         self.project = project
         self.store = store
+        self.projects = projects
 
     def compose(self) -> ComposeResult:
         yield Input(placeholder="YouTube URL", id="youtube-url")
-        yield Input(self.project, id="youtube-project")
+        yield Label(_PROJECT_LABEL, id="youtube-project-label")
+        yield Input(self.project, placeholder=_PROJECT_PLACEHOLDER, id="youtube-project")
         yield Input(
             placeholder="caption language (automatic)", id="youtube-language"
         )
@@ -605,13 +642,25 @@ class ImportYouTube(ModalScreen[None]):
     def action_start(self) -> None:
         self._send()
 
+    def action_pick_project(self) -> None:
+        """Lists the projects that exist over this form and writes the pick
+        into the project line, leaving the rest of the form as typed."""
+        line = self.query_one("#youtube-project", Input)
+
+        def write(name: str) -> None:
+            """Puts the pick on the line; the form stays open."""
+            line.value = name
+            line.cursor_position = len(name)
+
+        self.app.push_screen(MoveMemo(self.projects(), write))
+
     def _send(self) -> None:
         """Checks the cheap inputs here so a typo remains on screen to fix."""
         try:
             url = self.query_one("#youtube-url", Input).value.strip()
             if not url.startswith(("http://", "https://")):
                 raise services.InvalidInput(f"not a URL: {url or '(nothing)'}")
-            project = services.project_name(
+            project = services.project_typed(
                 self.query_one("#youtube-project", Input).value
             )
             template = self.query_one("#youtube-template", Select).value
@@ -2895,15 +2944,19 @@ class MemoApp(App[None]):
         self.push_screen(
             ProcessMemo(
                 self.browse_root,
-                self.project or "other",
+                self.project or "",
                 self._process,
                 self._already_stored,
+                lambda: services.projects(self.repo),
             )
         )
 
     def action_youtube(self) -> None:
         """Offers to import a video's captions and turn them into notes."""
-        self.push_screen(ImportYouTube(self.project or "other", self._youtube))
+        self.push_screen(ImportYouTube(
+                self.project or "", self._youtube, lambda: services.projects(self.repo)
+            )
+        )
 
     def _youtube(self, url: str, options: YouTubeOptions) -> None:
         """Fetches, imports, repairs and extracts away from the UI thread."""
@@ -2945,7 +2998,10 @@ class MemoApp(App[None]):
             self._stage("extracting notes …")
             try:
                 backend = services.run_extraction(
-                    repo, result.memo_id, template=options.template
+                    repo,
+                    result.memo_id,
+                    template=options.template,
+                    may_file=options.project is None,
                 )
             except (GatewayError, services.ExtractionError) as failed:
                 self.call_from_thread(self.notify, str(failed), severity="warning")
@@ -2976,14 +3032,15 @@ class MemoApp(App[None]):
             return None
 
     def _process(self, path: str, project: str, options: ImportOptions) -> None:
-        """Refuses what is plainly not a recording, and a project with no name,
-        here and now so the modal keeps what was typed. Past that the pipeline
-        decides: a file ffmpeg cannot make sense of fails the way any gateway
-        does, and says what ffmpeg said."""
+        """Refuses what is plainly not a recording here and now, so the modal
+        keeps what was typed. A blank project is not refused: it leaves the
+        choice to the notes. Past that the pipeline decides: a file ffmpeg
+        cannot make sense of fails the way any gateway does, and says what
+        ffmpeg said."""
         src = Path(path.strip())
         if not src.is_file():
             raise services.InvalidInput("no recording at that path")
-        name = services.project_name(project)
+        name = services.project_typed(project)
         started = self._start_job(
             src,
             src.name,
@@ -3027,7 +3084,7 @@ class MemoApp(App[None]):
         self.load_projects()
 
     def _processed(
-        self, repo: Repository, src: Path, project: str, options: ImportOptions
+        self, repo: Repository, src: Path, project: str | None, options: ImportOptions
     ) -> str:
         """Runs the whole pipeline, counting its stages off on the row standing
         in for the recording, and leaves the reader on whatever they were
@@ -3061,7 +3118,9 @@ class MemoApp(App[None]):
             self._stage("extracting notes …")
             self._import_at(src, TOTAL_STAGES, "extracting notes")
             try:
-                backend = services.run_extraction(repo, result.memo_id, template=options.template)
+                backend = services.run_extraction(
+                    repo, result.memo_id, template=options.template, may_file=project is None
+                )
             except (GatewayError, services.ExtractionError) as failed:
                 self.call_from_thread(self.notify, str(failed), severity="warning")
             else:

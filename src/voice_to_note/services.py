@@ -329,6 +329,38 @@ def _project_name(project: str) -> str:
     return name
 
 
+def project_typed(typed: str | None) -> str | None:
+    """What somebody typed into a project field, or None when they left it
+    blank. Blank is a real answer — "let the notes decide" — so it is told
+    apart from a name here rather than refused the way a nameless project is
+    everywhere else, and a front end asks this to know whether a project was
+    chosen before it decides whether extraction may refile the memo."""
+    if typed is None or not typed.strip():
+        return None
+    return typed.strip()
+
+
+def _existing_spelling(repo: Repository, name: str) -> str:
+    """The spelling a project already goes by, when the typed name differs from
+    it only in case. Projects are free text compared exactly, so "Work" typed
+    beside an existing "work" would start a second project that the sidebar
+    shows as a near-duplicate; an exact match, and a name nobody has used yet,
+    come back untouched."""
+    taken = [known for known, _count in repo.projects()] + ["other"]
+    if name in taken:
+        return name
+    folded = name.casefold()
+    return next((known for known in taken if known.casefold() == folded), name)
+
+
+def chosen_project(repo: Repository, typed: str | None) -> str | None:
+    """The project somebody chose, spelled as the library already spells it, or
+    None when they chose nothing. This is the one place a typed project becomes
+    a stored one for every import path and for moving a memo."""
+    name = project_typed(typed)
+    return None if name is None else _existing_spelling(repo, name)
+
+
 def open_repo(repo: Repository) -> Repository:
     """A second connection to the same database, for work happening off the main
     thread. Sqlite refuses a connection used from a thread that did not open it,
@@ -1029,21 +1061,23 @@ def process_steps(text: str) -> frozenset[str]:
 def process_memo(
     repo: Repository,
     src: Path,
-    project: str = "other",
+    project: str | None = None,
     log: Log = _silent,
     progress: Progress = _uncounted,
     num_speakers: int | None = None,
     diarize: bool = True,
 ) -> ProcessResult:
-    """The whole pipeline for a new recording: audio in, stored memo out. Each
+    """The whole pipeline for a new recording: audio in, stored memo out. A
+    project left as None files the memo under "other" until its notes say
+    where it belongs; the caller who passed one, "other" included, is the one
+    who tells run_extraction not to refile it. Each
     stage is reported as it starts rather than as it ends, so that a screen
     counting them off is never a stage behind the work. Speaker detection can
     be skipped outright, or pinned to a known voice count instead of guessed —
     a memo stored without it is legal and simply carries no speaker labels
     until a later `vtn diarize` adds them."""
     num_speakers = _speaker_count(num_speakers)
-    # before the minutes of converting and transcribing, not after
-    project = _project_name(project)
+    project = chosen_project(repo, project) or "other"
     with tracked(repo, "process", source=src.suffix.lower(), diarize=diarize) as run:
         return _process(repo, run, src, project, log, progress, num_speakers, diarize)
 
@@ -1411,7 +1445,7 @@ def start_live(
     system: Path,
     mic: Path,
     filename: str,
-    project: str = "other",
+    project: str | None = None,
     log: Log = _silent,
 ) -> LiveSession | None:
     """Starts transcribing a meeting that is being recorded right now, or says
@@ -1423,7 +1457,7 @@ def start_live(
     transcribed the ordinary way when the meeting ends."""
     if config.LIVE_TRANSCRIBE != "on":
         return None
-    project = _project_name(project)
+    project = chosen_project(repo, project) or "other"
     try:
         whisper.require(live_model_path())
         readers = [capture.TrackReader(p) for p in (system, mic)]
@@ -1611,7 +1645,7 @@ _NO_CAPTIONS = "no captions on this video — vtn imports captions, it does not 
 def import_youtube(
     repo: Repository,
     video: YouTubeVideo,
-    project: str = "other",
+    project: str | None = None,
     lang: str | None = None,
     log: Log = _silent,
 ) -> ProcessResult:
@@ -1622,7 +1656,7 @@ def import_youtube(
     other memo. A language asked for by name must be there or the import
     refuses, naming what is; the configured preference merely ranks the
     tracks, because a default must not make a video unimportable."""
-    project = _project_name(project)
+    project = chosen_project(repo, project) or "other"
     if lang:
         picked = pick_track(video, [lang], any_language=False)
         if picked is None:
@@ -1915,7 +1949,9 @@ def _suggested_project(data: NotesPayload) -> str | None:
         return None
 
 
-def _auto_name(repo: Repository, memo_id: int, data: NotesPayload) -> None:
+def _auto_name(
+    repo: Repository, memo_id: int, data: NotesPayload, may_file: bool = True
+) -> None:
     """Names a memo after what it turned out to be about — `<project> - <topic>`
     — so a list of them reads as work rather than as a folder of recordings.
 
@@ -1924,7 +1960,8 @@ def _auto_name(repo: Repository, memo_id: int, data: NotesPayload) -> None:
     takes the model's suggestion — which then files it there as well, so the
     name and the sidebar agree about where the memo belongs. Filing and naming
     are answered separately, so a memo somebody named by hand still gets grouped
-    with its own work.
+    with its own work. A caller who knows the project was chosen on purpose
+    says so with may_file=False, and then even "other" stays where it was put.
 
     A name is only ever written over one nobody chose. A filename still carrying
     an audio extension came off disk with the recording; anything else was typed
@@ -1935,9 +1972,10 @@ def _auto_name(repo: Repository, memo_id: int, data: NotesPayload) -> None:
     if memo is None:
         return
     suggestion = _suggested_project(data)
-    if memo.project == "other" and suggestion:
+    open_to_filing = may_file and memo.project == "other"
+    if open_to_filing and suggestion:
         repo.set_project(memo_id, suggestion)
-    project = memo.project if memo.project != "other" else suggestion or "other"
+    project = suggestion or "other" if open_to_filing else memo.project
     topic = data["title"].strip()
     if not topic or Path(memo.filename).suffix.lower() not in AUDIO_SUFFIXES:
         return
@@ -1945,7 +1983,11 @@ def _auto_name(repo: Repository, memo_id: int, data: NotesPayload) -> None:
 
 
 def run_extraction(
-    repo: Repository, memo_id: int, force: bool = False, template: str = "notes"
+    repo: Repository,
+    memo_id: int,
+    force: bool = False,
+    template: str = "notes",
+    may_file: bool = True,
 ) -> str:
     """Turns a memo into structured notes, shaped by the named note template,
     and files them against it. A memo whose notes somebody has since edited by
@@ -1961,7 +2003,15 @@ def run_extraction(
 
     The memo names and files itself from the same notes, last of all: the
     notes are what the run was for, so they are stored before anything that only
-    changes how the memo is listed."""
+    changes how the memo is listed.
+
+    may_file says whether the notes may move a memo sitting in "other" to the
+    project they guess. The import paths pass False when the person picked or
+    typed a project, "other" included, so that choice survives. There is no
+    record of that choice on the memo itself, so a later standalone
+    re-extraction (`vtn extract`, the TUI's re-extract) cannot tell a memo
+    chosen into "other" from one never filed, and files it as before: a known
+    limit, not an oversight."""
     note_template(template)
     _require_not_recording(require_memo(repo, memo_id))
     if not force and repo.notes_md(memo_id):
@@ -1979,7 +2029,7 @@ def run_extraction(
         )
     repo.save_extraction(memo_id, backend, data, clear_edited=force)
     repo.sync_todos(memo_id, data["action_items"])
-    _auto_name(repo, memo_id, data)
+    _auto_name(repo, memo_id, data, may_file)
     return backend
 
 
@@ -2588,7 +2638,7 @@ def speakers(repo: Repository, memo_id: int) -> dict[str, str]:
 
 def move_memo(repo: Repository, memo_id: int, project: str) -> None:
     """Files a memo under a different project, so it groups with its own work."""
-    name = _project_name(project)
+    name = _existing_spelling(repo, _project_name(project))
     require_memo(repo, memo_id)
     repo.set_project(memo_id, name)
 
