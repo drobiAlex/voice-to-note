@@ -1318,8 +1318,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// `--levels` is the one flag nobody would type: the recorder draws its own
     /// bars for a terminal, sees a pipe here and would draw nothing at all, and
     /// the numbers it prints instead are what the panel's waveforms are made of.
+    ///
+    /// A project is named only when one was picked. "other" is what this menu
+    /// shows until somebody chooses, so it means nothing was chosen, and leaving
+    /// the flag off is what lets the notes file the meeting: passing it would
+    /// pin the recording to "other" for good.
     private func recordArguments() -> [String] {
-        var arguments = ["record", "--project", chosenProject, "--levels", "--events"]
+        var arguments = ["record"]
+        if chosenProject != "other" {
+            arguments += ["--project", chosenProject]
+        }
+        arguments += ["--levels", "--events"]
         if let output = chosenOutput {
             arguments += ["--output-device", output.uid]
         }

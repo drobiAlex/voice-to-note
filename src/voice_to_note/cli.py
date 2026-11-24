@@ -208,6 +208,8 @@ def _finished(
                 repo,
                 result.memo_id,
                 template=args.template,
+                # a project given on the command line is kept, "other" included
+                may_file=services.project_typed(args.project) is None,
                 answers=getattr(args, "answers", None),
             )
             status(f"extracted via {backend}\n")
@@ -1046,7 +1048,10 @@ def main() -> None:
 
     sp = sub.add_parser("process", help="transcribe an audio file")
     sp.add_argument("file")
-    sp.add_argument("--project", default="other", help="file the memo under a project")
+    sp.add_argument(
+        "--project",
+        help="file the memo under a project (default: the notes pick one, else other)",
+    )
     sp.add_argument(
         "--template",
         default=None,
@@ -1074,7 +1079,10 @@ def main() -> None:
     sp.set_defaults(fn=cmd_process)
 
     sp = sub.add_parser("record", help="record this Mac's meeting, then transcribe it")
-    sp.add_argument("--project", default="other", help="file the memo under a project")
+    sp.add_argument(
+        "--project",
+        help="file the memo under a project (default: the notes pick one, else other)",
+    )
     sp.add_argument(
         "--template",
         default=None,
@@ -1120,7 +1128,10 @@ def main() -> None:
 
     sp = sub.add_parser("youtube", help="import a YouTube video's captions as a memo")
     sp.add_argument("url")
-    sp.add_argument("--project", default="other", help="file the memo under a project")
+    sp.add_argument(
+        "--project",
+        help="file the memo under a project (default: the notes pick one, else other)",
+    )
     sp.add_argument(
         "--template",
         default=None,

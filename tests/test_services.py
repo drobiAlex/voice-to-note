@@ -1248,18 +1248,37 @@ def test_a_project_name_is_tidied_before_it_is_stored(repo, wav):
     assert repo.memo(memo_id).project == "work"
 
 
-def test_processing_into_a_nameless_project_is_refused_before_any_work(repo, tmp_path, monkeypatch):
-    # the recording is converted and transcribed before it is stored; a name we
-    # will refuse at the end must be refused at the start
-    src = tmp_path / "standup.m4a"
-    src.write_bytes(b"fake audio")
-    converted: list = []
-    monkeypatch.setattr(services.audio, "to_wav16k", lambda *a: converted.append(a))
+def test_a_blank_project_reads_as_none_chosen_rather_than_as_a_nameless_one(repo, wav):
+    # blank is the form's way of saying "let the notes decide", so it must not
+    # be refused the way a nameless project is when moving a memo
+    assert services.project_typed("   ") is None
+    assert services.project_typed(None) is None
+    assert services.project_typed("  work ") == "work"
+    assert services.chosen_project(repo, "") is None
 
-    with pytest.raises(services.InvalidInput):
-        services.process_memo(repo, src, project="   ")
 
-    assert converted == []
+def test_a_project_typed_in_other_case_is_filed_under_the_spelling_that_exists(repo, wav):
+    add_project_memo(repo, wav, "work.m4a", "Work")
+
+    assert services.chosen_project(repo, "work") == "Work"
+    assert services.chosen_project(repo, " WORK ") == "Work"
+    assert services.chosen_project(repo, "Other") == "other"
+
+
+def test_an_exact_spelling_and_a_brand_new_project_are_left_as_typed(repo, wav):
+    add_project_memo(repo, wav, "work.m4a", "work")
+
+    assert services.chosen_project(repo, "work") == "work"
+    assert services.chosen_project(repo, "Orbit") == "Orbit"
+
+
+def test_moving_a_memo_into_a_project_by_the_wrong_case_uses_the_existing_spelling(repo, wav):
+    add_project_memo(repo, wav, "work.m4a", "Work")
+    memo_id = add_project_memo(repo, wav, "home.m4a", "personal")
+
+    services.move_memo(repo, memo_id, "work")
+
+    assert repo.memo(memo_id).project == "Work"
 
 
 def test_the_project_list_is_available_to_a_screen(repo, wav):
@@ -2591,6 +2610,33 @@ def test_the_project_somebody_filed_a_memo_under_is_the_one_its_name_carries(
     assert refiled == []
 
 
+def test_other_chosen_on_purpose_is_kept_when_the_notes_suggest_another_project(
+    repo, wav, monkeypatch
+):
+    # the person who typed "other" said where it belongs; the model's guess is
+    # only allowed to fill in for a memo nobody filed
+    memo_id = spoken_memo(repo, wav)
+    fake_llm(monkeypatch, claude=json.dumps(FILED))
+
+    services.run_extraction(repo, memo_id, may_file=False)
+
+    memo = repo.memo(memo_id)
+    assert (memo.filename, memo.project) == ("other - Sprint planning", "other")
+
+
+def test_a_standalone_re_extraction_still_refiles_a_memo_sitting_in_other(
+    repo, wav, monkeypatch
+):
+    # a known limit: nothing on the memo says "other" was chosen, so a later
+    # `vtn extract` cannot tell it from a memo nobody filed
+    memo_id = spoken_memo(repo, wav)
+    fake_llm(monkeypatch, claude=json.dumps(FILED))
+
+    services.run_extraction(repo, memo_id)
+
+    assert repo.memo(memo_id).project == "orbit"
+
+
 def test_a_memo_somebody_named_themselves_comes_out_of_an_extraction_unrenamed(
     repo, wav, monkeypatch
 ):
@@ -3139,6 +3185,45 @@ def test_setup_rebuilds_the_recorder_when_only_the_vendored_spring_source_change
         [services.config.MENUBAR_SRC, springs, services.config.MENUBAR_PLIST]
     )
 
+
+def test_any_case_of_other_resolves_to_the_canonical_other_even_beside_a_legacy_spelling(
+    repo, wav
+):
+    add_project_memo(repo, wav, "old.m4a", "Other")
+
+    assert services.chosen_project(repo, "OTHER") == "other"
+    assert services.chosen_project(repo, "Other") == "other"
+
+
+def test_two_spellings_differing_by_case_resolve_to_the_one_holding_more_memos(repo, wav):
+    add_project_memo(repo, wav, "a.m4a", "Work")
+    add_project_memo(repo, wav, "b.m4a", "work")
+    add_project_memo(repo, wav, "c.m4a", "work")
+
+    assert services.chosen_project(repo, "WORK") == "work"
+
+
+def test_two_spellings_holding_equally_many_memos_resolve_in_a_fixed_order(repo, wav):
+    add_project_memo(repo, wav, "a.m4a", "work")
+    add_project_memo(repo, wav, "b.m4a", "Work")
+
+    assert services.chosen_project(repo, "WORK") == "Work"
+
+
+def test_a_spelling_only_the_bin_and_the_archive_remember_still_wins(repo, wav):
+    binned = add_project_memo(repo, wav, "a.m4a", "Orbit")
+    archived = add_project_memo(repo, wav, "b.m4a", "Orbit")
+    services.delete_memo(repo, binned)
+    services.archive_memo(repo, archived)
+
+    assert services.chosen_project(repo, "orbit") == "Orbit"
+
+
+def test_moving_a_memo_says_the_spelling_it_was_stored_under(repo, wav):
+    add_project_memo(repo, wav, "a.m4a", "Work")
+    memo_id = add_project_memo(repo, wav, "b.m4a", "personal")
+
+    assert services.move_memo(repo, memo_id, "work") == "Work"
 
 # --- per-source templates, sections and the remembered template ---------------
 

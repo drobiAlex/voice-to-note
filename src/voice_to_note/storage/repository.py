@@ -479,6 +479,19 @@ class Repository:
             )
         ]
 
+    def project_spellings(self) -> list[tuple[str, int]]:
+        """Every spelling a project has ever been filed under and how many memos
+        carry it, archived and binned ones included. The sidebar's `projects`
+        hides those on purpose; spelling is the opposite question, because a
+        memo restored from the bin lands under whatever it was filed as, and a
+        spelling that only the bin remembers would come back as a second one."""
+        return [
+            (r["project"], r["n"])
+            for r in self.con.execute(
+                "SELECT project, count(*) AS n FROM memos GROUP BY project ORDER BY project"
+            )
+        ]
+
     def tags(self) -> list[tuple[str, int]]:
         """Every tag the live memos' notes carry and how many memos carry it,
         most used first, for a search to offer before anything is typed. Tags

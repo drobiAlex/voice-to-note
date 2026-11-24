@@ -472,7 +472,7 @@ def pipeline_stubs(monkeypatch, seen):
         ),
     )
 
-    def extract(_repo, _memo_id, force=False, template=None, answers=None):
+    def extract(_repo, _memo_id, force=False, template=None, answers=None, may_file=True):
         seen.append((template, answers))
         return "claude"
 
