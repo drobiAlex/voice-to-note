@@ -71,10 +71,10 @@ def test_a_fence_that_is_not_on_the_first_line_is_just_text():
 
 def test_unknown_tables_are_kept_for_a_later_reader_rather_than_rejected():
     parsed = parse_template(
-        '+++\n[ask]\nwhy = "Why does it matter?"\n[sections]\n"A" = "b"\n+++\nbody'
+        '+++\n[future]\nwhy = "Why does it matter?"\n[sections]\n"A" = "b"\n+++\nbody'
     )
 
-    assert parsed.tables == {"ask": {"why": "Why does it matter?"}}
+    assert parsed.tables == {"future": {"why": "Why does it matter?"}}
     assert parsed.sections == (("A", "b"),)
 
 

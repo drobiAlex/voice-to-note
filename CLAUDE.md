@@ -107,13 +107,26 @@ it (and into `services._TEMPLATE_DOCS`). `vtn template new <name> --from <existi
 into a custom file, front matter included.
 
 A template may open with TOML front matter between two `+++` lines; `transforms.templates.
-parse_template` splits it into a frozen `ParsedTemplate(body, sections, tables)`. `[sections]`
+parse_template` splits it into a frozen `ParsedTemplate(body, sections, questions, tables)`. `[sections]`
 (heading = what goes there, in file order) makes vtn itself add the instruction for an optional
 `sections` key to the prompt, ahead of the trailing `Transcript:` line — the author never edits the
 JSON shape. Other tables are kept in `tables`, not rejected. `parse_notes` keeps well-formed section
 entries and drops the rest; both renderers show them after the fixed sections. Broken front matter
 raises `InvalidInput` naming the file (`llm.parsed_template` adds the path, `services.note_template`
 converts it, so every `--template` check catches it early).
+
+`[ask]` (key = question, key `[a-z0-9_]+`, file order) lets a template ask the person things before
+it runs; every answer is optional. `compose_prompt(template, transcript, answers, details)` fills
+exact `{key}` tokens in the template body — never `str.format`, the JSON shape is full of braces —
+for the ask keys and the built-in details `{title} {channel} {url} {recorded} {project}`; a known
+name with no value reads `(not given)`. Before the trailing `Transcript:` it adds, in order, the
+sections instruction, an "About this recording" block (a video: title, channel, link, upload day;
+anything else: only the recorded day; never the project, which on a re-extraction is the memo's own earlier suggestion) and a block of the answered
+questions. Answers live in `extractions.answers` (JSON); `services.extraction_answers` lays `--var`
+or form answers over the stored ones and keeps only keys the template asks, so switching templates
+drops the rest. `run_extraction(..., *, answers=)`; the CLI takes repeatable `--var key=value` and
+never prompts, the TUI asks through `TemplateQuestions`, which returns its answers as the screen's
+result. `memos.channel` is what the video details read.
 
 Each source has a default template — settings `youtube_template` (`video`), `record_template` and
 `file_template` (`notes`) — resolved in `services.default_template(source)` / `resolve_template`.

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, NotRequired, TypedDict
 
 import numpy as np
@@ -139,6 +139,9 @@ class Memo:
     # everything stored under it is exactly as it was. Empty is a memo that has
     # never been deleted, or one that has been restored
     deleted_at: str | None = None
+    # who published the video this memo's words came from, when it was one. Empty
+    # for a memo made from audio, and for a video imported before this was kept
+    channel: str | None = None
 
 
 @dataclass(frozen=True)
@@ -181,6 +184,9 @@ class Extraction:
     # the note template that shaped it; None for notes stored before the name
     # was kept, which no longer say what they were asked to be
     template: str | None = None
+    # what the person answered to that template's questions, by question key;
+    # empty when nothing was asked or nothing answered
+    answers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

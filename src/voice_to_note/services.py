@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
@@ -80,7 +80,7 @@ from .transforms.speakers import (
     match_known_speakers,
     resolve_speaker_names,
 )
-from .transforms.templates import ParsedTemplate, TemplateError
+from .transforms.templates import Details, ParsedTemplate, TemplateError
 from .transforms.todos import is_mine, normalize
 from .transforms.youtube import (
     YouTubeVideo,
@@ -907,6 +907,83 @@ def template_sections(name: str) -> list[str]:
     if name not in note_templates():
         return []
     return [heading for heading, _ in parsed_template(name).sections]
+
+
+def template_questions(name: str) -> list[tuple[str, str]]:
+    """What a note template asks the person before it runs, as (key, question)
+    in file order — for a listing, a form and the check on `--var`. Prompts
+    that are not note templates ask nothing."""
+    if name not in note_templates():
+        return []
+    return list(parsed_template(name).questions)
+
+
+def _what_it_asks(template: str) -> str:
+    """One sentence on what a template asks, for the refusal that follows a
+    key it does not know: the person typing `--var` has no other way to learn
+    the keys short of opening the file."""
+    questions = template_questions(template)
+    if not questions:
+        return f"template {template} asks no questions"
+    listed = "; ".join(f"{key} ({question})" for key, question in questions)
+    return f"template {template} asks: {listed}"
+
+
+def checked_answers(template: str, answers: Mapping[str, str]) -> dict[str, str]:
+    """The answers with every key checked against the questions the template
+    asks. An unknown key is refused rather than dropped: a typo that silently
+    changed nothing would leave the person sure the notes had been told."""
+    keys = {key for key, _ in template_questions(template)}
+    for key in answers:
+        if key not in keys:
+            raise InvalidInput(f"no question {key!r} — {_what_it_asks(template)}")
+    return dict(answers)
+
+
+def parse_vars(template: str, pairs: Sequence[str]) -> dict[str, str]:
+    """Reads repeated `--var key=value` into answers for a template. Split at
+    the first `=`, so a value may contain one. A later pair for the same key
+    wins. A blank value is kept: on a re-extraction it clears the stored
+    answer, which is the only way a command line can take one back."""
+    answers: dict[str, str] = {}
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        if not sep or not key.strip():
+            raise InvalidInput(f"--var {pair!r} is not key=value — {_what_it_asks(template)}")
+        answers[key.strip()] = value.strip()
+    return checked_answers(template, answers)
+
+
+def extraction_answers(
+    repo: Repository, memo_id: int, template: str, given: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """The answers an extraction with this template runs on: what was stored
+    with the memo's notes, kept only where the template asks that key — so
+    switching templates drops what the new one never asked — then whatever
+    was given now laid over it key by key. Blank answers are dropped at the
+    end, after they have had their chance to clear a stored one."""
+    keys = {key for key, _ in template_questions(template)}
+    stored = repo.extraction(memo_id)
+    merged = {k: v for k, v in (stored.answers if stored else {}).items() if k in keys}
+    merged.update(checked_answers(template, given or {}))
+    return {k: v.strip() for k, v in merged.items() if v.strip()}
+
+
+def recording_details(memo: Memo) -> Details:
+    """What the prompt may say about a memo: for a video its title, channel,
+    link and upload day; for anything else the day it was recorded. A memo
+    with no recorded day says none: the day it was imported is not when it
+    was recorded or uploaded, and stating it as that would be a false fact."""
+    video = bool(memo.source_url)
+    when = memo.recorded_at or ""
+    return Details(
+        title=memo.filename,
+        channel=memo.channel or "",
+        url=memo.source_url or "",
+        recorded=when[:10],
+        project=memo.project,
+        video=video,
+    )
 
 
 # the setting behind each source's default note template. A video, a meeting
@@ -1746,6 +1823,7 @@ def import_youtube(
         project=project,
         recorded_at=video.uploaded_at,
         source_url=video.url,
+        channel=video.channel,
     )
     return ProcessResult(memo_id, len(segs), [], track_lang)
 
@@ -2036,7 +2114,12 @@ def _auto_name(repo: Repository, memo_id: int, data: NotesPayload) -> None:
 
 
 def run_extraction(
-    repo: Repository, memo_id: int, force: bool = False, template: str | None = None
+    repo: Repository,
+    memo_id: int,
+    force: bool = False,
+    template: str | None = None,
+    *,
+    answers: Mapping[str, str] | None = None,
 ) -> str:
     """Turns a memo into structured notes, shaped by the named note template,
     and files them against it along with the template's name. Without a name,
@@ -2051,11 +2134,18 @@ def run_extraction(
     extraction that did not feed it would leave the two disagreeing about what
     this memo said had to be done.
 
+    `answers` are the person's replies to the template's questions, by key. They
+    are laid over what was stored with the memo's last notes, so redoing an
+    extraction asks nothing again, and a key the template does not ask is
+    refused before anything else happens.
+
     The memo names and files itself from the same notes, last of all: the
     notes are what the run was for, so they are stored before anything that only
     changes how the memo is listed."""
-    _require_not_recording(require_memo(repo, memo_id))
+    memo = require_memo(repo, memo_id)
+    _require_not_recording(memo)
     template = note_template(template) if template else extraction_template(repo, memo_id)
+    answered = extraction_answers(repo, memo_id, template, answers)
     if not force and repo.notes_md(memo_id):
         raise InvalidInput(
             f"memo {memo_id} has notes you edited by hand;"
@@ -2063,13 +2153,15 @@ def run_extraction(
         )
     with tracked(repo, "extract", memo_id, template=template):
         backend, data = _complete(
-            llm.notes_prompt(transcript(repo, memo_id), template),
+            llm.notes_prompt(
+                transcript(repo, memo_id), template, answered, recording_details(memo)
+            ),
             schema=SCHEMA,
             parse=parse_notes,
             failure="extraction failed",
             unavailable="no extraction backend",
         )
-    repo.save_extraction(memo_id, backend, data, clear_edited=force, template=template)
+    repo.save_extraction(memo_id, backend, data, clear_edited=force, template=template, answers=answered)
     repo.sync_todos(memo_id, data["action_items"])
     _auto_name(repo, memo_id, data)
     return backend
@@ -2962,6 +3054,21 @@ class MemoInfo:
     # the note template behind the stored notes; empty when there are none, or
     # they were stored before the name was kept
     template: str = ""
+    # what was answered to that template's questions, by question
+    answers: tuple[tuple[str, str], ...] = ()
+
+
+def _answered_questions(extraction: Extraction | None) -> tuple[tuple[str, str], ...]:
+    """The stored answers as (question, answer), so `vtn info` can say what was
+    asked rather than a bare key. A template that has since been edited or
+    deleted can no longer say what a key meant, so the key stands in."""
+    if not extraction or not extraction.answers:
+        return ()
+    try:
+        asked = dict(template_questions(extraction.template or ""))
+    except InvalidInput:
+        asked = {}
+    return tuple((asked.get(key, key), value) for key, value in extraction.answers.items())
 
 
 def memo_info(repo: Repository, memo_id: int) -> MemoInfo:
@@ -2986,6 +3093,7 @@ def memo_info(repo: Repository, memo_id: int) -> MemoInfo:
         archived=bool(memo.archived_at),
         binned=bool(memo.deleted_at),
         template=(extraction.template or "") if extraction else "",
+        answers=_answered_questions(extraction),
     )
 
 
@@ -3014,6 +3122,8 @@ def memo_info_text(repo: Repository, memo_id: int) -> str:
     ]
     if info.template:
         rows.append(("template", info.template))
+    for question, answer in info.answers:
+        rows.append(("answer", f"{question} — {' '.join(answer.split())}"))
     if info.binned:
         # only said when it is true: the one command that describes a binned
         # memo has to say so, and every other memo has nothing to add

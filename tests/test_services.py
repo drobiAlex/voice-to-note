@@ -3297,7 +3297,7 @@ def test_a_template_with_broken_front_matter_is_refused_naming_its_file(
 def test_template_new_from_video_copies_the_front_matter_too(templates_dir):
     services.template_new("watched", source="video")
 
-    assert (templates_dir / "watched.md").read_text().startswith("+++\n[sections]")
+    assert (templates_dir / "watched.md").read_text().startswith("+++\n[ask]")
     assert services.template_sections("watched") == [
         "Worth watching?",
         "Questions answered",

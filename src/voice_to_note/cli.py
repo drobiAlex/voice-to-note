@@ -60,6 +60,25 @@ def cmd_setup(args: argparse.Namespace) -> None:
         print(services.setup(log, download))
 
 
+def _add_var(sp: argparse.ArgumentParser) -> None:
+    """Adds the repeatable `--var key=value` that answers a template's
+    questions. The command line never asks them interactively: whatever drives
+    it — an agent, a script, the menu bar — has no one to type at a prompt."""
+    sp.add_argument(
+        "--var",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="answer a question the note template asks (repeatable; see: vtn template)",
+    )
+
+
+def _answers(args: argparse.Namespace, template: str) -> dict[str, str]:
+    """The `--var` pairs read against the template that will run, before any
+    audio is touched, so a mistyped key costs a line and not a transcription."""
+    return services.parse_vars(template, getattr(args, "var", None) or [])
+
+
 def _settled_template(
     args: argparse.Namespace, source: str, steps: frozenset[str] | None = None
 ) -> None:
@@ -72,8 +91,16 @@ def _settled_template(
     business and is left unresolved; a name given on the command line is
     still checked."""
     if args.template is None and steps is not None and "notes" not in steps:
+        # no template will run, so there is nothing for a `--var` to answer;
+        # saying so beats accepting an answer that goes nowhere
+        if getattr(args, "var", None):
+            raise services.InvalidInput(
+                "--var answers a note template's questions, but --steps leaves out notes"
+            )
+        args.answers = {}
         return
     args.template = services.resolve_template(source, args.template)
+    args.answers = _answers(args, args.template)
 
 
 def _checked(args: argparse.Namespace) -> tuple[frozenset[str], int | None]:
@@ -177,7 +204,12 @@ def _finished(
         try:
             event and event("stage", "writing notes")
             status("extracting notes …")
-            backend = services.run_extraction(repo, result.memo_id, template=args.template)
+            backend = services.run_extraction(
+                repo,
+                result.memo_id,
+                template=args.template,
+                answers=getattr(args, "answers", None),
+            )
             status(f"extracted via {backend}\n")
             print(services.notes(repo, result.memo_id))
             event and event("ready", str(result.memo_id))
@@ -834,8 +866,20 @@ def cmd_extract(args: argparse.Namespace) -> None:
     """Redoes note extraction, for when it was skipped or came out poorly."""
     with Repository() as repo:
         services.require_memo(repo, args.id)
+        template, answers = args.template, None
+        if args.var:
+            # the template this run will use is settled here only to read
+            # `--var` against it; run_extraction settles it again, to the same
+            template = (
+                services.note_template(template)
+                if template
+                else services.extraction_template(repo, args.id)
+            )
+            answers = _answers(args, template)
         status(f"extracting memo {args.id} …")
-        backend = services.run_extraction(repo, args.id, force=args.force, template=args.template)
+        backend = services.run_extraction(
+            repo, args.id, force=args.force, template=template, answers=answers
+        )
         status(f"done via {backend}\n")
         print(services.notes(repo, args.id))
 
@@ -932,13 +976,16 @@ def cmd_config_reset(args: argparse.Namespace) -> None:
 def cmd_template(args: argparse.Namespace) -> None:
     """Lists every prompt template: whether it is built-in or a saved
     override, and where an override file would go — and, for a note template
-    that adds sections of its own, which ones. A template whose front matter
+    that adds sections of its own, which ones, and the keys of the questions it
+    asks, which are what `--var` takes. A template whose front matter
     cannot be read is still listed, saying so: the listing is how somebody
     finds out which file to fix."""
     for name, state in services.template_rows():
         try:
             headings = services.template_sections(name)
+            asked = [key for key, _ in services.template_questions(name)]
             extra = f"  + {', '.join(headings)}" if headings else ""
+            extra += f"  ? {', '.join(asked)}" if asked else ""
         except services.InvalidInput:
             extra = "  (front matter unreadable)"
         print(f"{name:<10} {state:<10} {config.TEMPLATES_DIR / f'{name}.md'}{extra}")
@@ -1005,6 +1052,7 @@ def main() -> None:
         default=None,
         help="note template to extract with (default: set per source in vtn config; see: vtn template)",
     )
+    _add_var(sp)
     sp.add_argument(
         "--speakers",
         default="auto",
@@ -1032,6 +1080,7 @@ def main() -> None:
         default=None,
         help="note template to extract with (default: set per source in vtn config; see: vtn template)",
     )
+    _add_var(sp)
     sp.add_argument(
         "--speakers",
         default="auto",
@@ -1077,6 +1126,7 @@ def main() -> None:
         default=None,
         help="note template to extract with (default: set per source in vtn config; see: vtn template)",
     )
+    _add_var(sp)
     sp.add_argument(
         "--lang",
         metavar="LANG",
@@ -1256,6 +1306,7 @@ def main() -> None:
         default=None,
         help="note template to extract with (default: set per source in vtn config; see: vtn template)",
     )
+    _add_var(sp)
     sp.set_defaults(fn=cmd_extract)
 
     sp = sub.add_parser("notes", help="show extracted notes for a memo")

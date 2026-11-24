@@ -3,13 +3,14 @@ import shutil
 import subprocess
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from .. import config
 from ..domain import Message, Segment
 from ..transforms.refine import Chunk
 from ..transforms.templates import (
+    Details,
     ParsedTemplate,
     TemplateError,
     compose_prompt,
@@ -131,12 +132,17 @@ Transcript:
 """
 
 VIDEO_PROMPT = f"""+++
+[ask]
+goal = "What do you want out of this video? (optional)"
+
 [sections]
-"Worth watching?" = "Yes or no, and why, in two sentences."
+"Worth watching?" = "Yes or no, and why, in two sentences. When the person's goal is given, judge it against that goal; otherwise judge it on its own merits."
 "Questions answered" = "Each question the video answers, with its answer in a line or two."
 "Hidden insights" = "What a casual viewer would miss: asides, implications, claims that deserve a second look."
 +++
 Extract structured notes from this transcript of a video somebody watched, so they can decide what it is worth and keep what mattered.
+
+What the person wants out of this video: {{goal}}
 
 {_NOTES_SHAPE}
 
@@ -242,12 +248,19 @@ class BackendError(GatewayError):
     """A backend was installed but the call to it failed."""
 
 
-def notes_prompt(transcript: str, template_name: str = "notes") -> str:
+def notes_prompt(
+    transcript: str,
+    template_name: str = "notes",
+    answers: Mapping[str, str] | None = None,
+    details: Details | None = None,
+) -> str:
     """Asks for the notes in the exact shape the app can store. The caller
     picks which note template shapes the extraction — a saved override, or
     one of the user's own templates dropped beside them — while the reply is
-    still held to the one JSON shape the parser downstream accepts."""
-    return compose_prompt(parsed_template(template_name), transcript)
+    still held to the one JSON shape the parser downstream accepts. What the
+    person answered and what is known about the recording go in beside the
+    transcript, never in place of any of it."""
+    return compose_prompt(parsed_template(template_name), transcript, answers, details)
 
 
 def ask_prompt(transcript: str, question: str) -> str:
