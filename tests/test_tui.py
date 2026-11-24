@@ -5613,3 +5613,81 @@ async def test_the_notice_for_a_move_and_a_rename_names_the_memo_they_changed(re
 
         assert 'moved "retro.m4a" to side' in said(pilot)
         assert 'renamed "planning.m4a" to "Planning"' in said(pilot)
+
+
+@pytest.mark.asyncio
+async def test_the_recording_form_starts_empty_while_the_other_project_is_browsed(
+    repo, tmp_path
+):
+    # "other" is where unfiled memos wait; prefilling it would pin an import there
+    repo.create_memo(
+        filename="loose.m4a", wav_path="/tmp/c.wav", duration_s=1.0, language="en",
+        segments=[Segment(0, 1000, "hello")], speakers=[Speaker("S1")], project="other",
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("other")
+        await pilot.pause()
+        await open_add_modal(pilot, tmp_path)
+
+        assert pilot.app.screen.query_one("#source-project", Input).value == ""
+
+
+@pytest.mark.asyncio
+async def test_the_youtube_form_starts_empty_while_the_other_project_is_browsed(repo):
+    repo.create_memo(
+        filename="loose.m4a", wav_path="/tmp/c.wav", duration_s=1.0, language="en",
+        segments=[Segment(0, 1000, "hello")], speakers=[Speaker("S1")], project="other",
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("other")
+        await pilot.pause()
+        await open_youtube_modal(pilot)
+
+        assert pilot.app.screen.query_one("#youtube-project", Input).value == ""
+
+
+@pytest.mark.asyncio
+async def test_enter_on_an_empty_picker_leaves_the_recording_forms_project_as_it_was(
+    repo, tmp_path
+):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        await open_add_modal(pilot, tmp_path)
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert pilot.app.screen.query_one("#source-project", Input).value == "work"
+
+
+@pytest.mark.asyncio
+async def test_enter_on_an_empty_picker_leaves_the_youtube_forms_project_as_it_was(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app.show_project("work")
+        await pilot.pause()
+        await open_youtube_modal(pilot)
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert pilot.app.screen.query_one("#youtube-project", Input).value == "work"
+
+
+@pytest.mark.asyncio
+async def test_the_notice_for_a_move_names_the_spelling_that_was_stored(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        pilot.app._move_memo(2, "WORK")
+        await pilot.pause()
+
+        assert 'moved "shopping.m4a" to work' in said(pilot)

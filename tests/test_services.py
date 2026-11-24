@@ -3184,3 +3184,43 @@ def test_setup_rebuilds_the_recorder_when_only_the_vendored_spring_source_change
     assert services.config.MENUBAR_STAMP.read_text() == services._source_stamp(
         [services.config.MENUBAR_SRC, springs, services.config.MENUBAR_PLIST]
     )
+
+
+def test_any_case_of_other_resolves_to_the_canonical_other_even_beside_a_legacy_spelling(
+    repo, wav
+):
+    add_project_memo(repo, wav, "old.m4a", "Other")
+
+    assert services.chosen_project(repo, "OTHER") == "other"
+    assert services.chosen_project(repo, "Other") == "other"
+
+
+def test_two_spellings_differing_by_case_resolve_to_the_one_holding_more_memos(repo, wav):
+    add_project_memo(repo, wav, "a.m4a", "Work")
+    add_project_memo(repo, wav, "b.m4a", "work")
+    add_project_memo(repo, wav, "c.m4a", "work")
+
+    assert services.chosen_project(repo, "WORK") == "work"
+
+
+def test_two_spellings_holding_equally_many_memos_resolve_in_a_fixed_order(repo, wav):
+    add_project_memo(repo, wav, "a.m4a", "work")
+    add_project_memo(repo, wav, "b.m4a", "Work")
+
+    assert services.chosen_project(repo, "WORK") == "Work"
+
+
+def test_a_spelling_only_the_bin_and_the_archive_remember_still_wins(repo, wav):
+    binned = add_project_memo(repo, wav, "a.m4a", "Orbit")
+    archived = add_project_memo(repo, wav, "b.m4a", "Orbit")
+    services.delete_memo(repo, binned)
+    services.archive_memo(repo, archived)
+
+    assert services.chosen_project(repo, "orbit") == "Orbit"
+
+
+def test_moving_a_memo_says_the_spelling_it_was_stored_under(repo, wav):
+    add_project_memo(repo, wav, "a.m4a", "Work")
+    memo_id = add_project_memo(repo, wav, "b.m4a", "personal")
+
+    assert services.move_memo(repo, memo_id, "work") == "Work"

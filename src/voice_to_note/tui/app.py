@@ -514,7 +514,10 @@ class ProcessMemo(ModalScreen[None]):
         line = self.query_one("#source-project", Input)
 
         def write(name: str) -> None:
-            """Puts the pick on the line; the form stays open."""
+            """Puts the pick on the line; the form stays open. An empty pick is
+            Enter on a blank picker, which chose nothing and so changes nothing."""
+            if not name.strip():
+                return
             line.value = name
             line.cursor_position = len(name)
 
@@ -648,7 +651,10 @@ class ImportYouTube(ModalScreen[None]):
         line = self.query_one("#youtube-project", Input)
 
         def write(name: str) -> None:
-            """Puts the pick on the line; the form stays open."""
+            """Puts the pick on the line; the form stays open. An empty pick is
+            Enter on a blank picker, which chose nothing and so changes nothing."""
+            if not name.strip():
+                return
             line.value = name
             line.cursor_position = len(name)
 
@@ -2939,12 +2945,20 @@ class MemoApp(App[None]):
         services.rediarize(repo, memo_id, num_speakers=num_speakers)
         return f"speakers identified in memo {memo_id}"
 
+    def _browsed_project(self) -> str:
+        """What an import form's project line opens on: the project being
+        browsed, or nothing at all. "other" counts as nothing, since it is where
+        unfiled memos wait rather than somewhere anybody chose to file into, and
+        prefilling it would pin the import there instead of leaving it to the
+        notes."""
+        return "" if self.project in (None, "other") else self.project
+
     def action_process(self) -> None:
         """Offers to bring a new recording in, filed where you are looking."""
         self.push_screen(
             ProcessMemo(
                 self.browse_root,
-                self.project or "",
+                self._browsed_project(),
                 self._process,
                 self._already_stored,
                 lambda: services.projects(self.repo),
@@ -2954,7 +2968,7 @@ class MemoApp(App[None]):
     def action_youtube(self) -> None:
         """Offers to import a video's captions and turn them into notes."""
         self.push_screen(ImportYouTube(
-                self.project or "", self._youtube, lambda: services.projects(self.repo)
+                self._browsed_project(), self._youtube, lambda: services.projects(self.repo)
             )
         )
 
@@ -3404,9 +3418,9 @@ class MemoApp(App[None]):
         project on screen, the memo drops out of the list, and panes left
         describing it would be describing a row that is no longer there."""
         filename = services.require_memo(self.repo, memo_id).filename
-        services.move_memo(self.repo, memo_id, project)
+        stored = services.move_memo(self.repo, memo_id, project)
         self._reload(self.project)
-        self.notify(f'moved "{filename}" to {services.project_name(project)}')
+        self.notify(f'moved "{filename}" to {stored}')
 
     def action_title_memo(self) -> None:
         """Offers to rename the memo being pointed at, if any memo is."""

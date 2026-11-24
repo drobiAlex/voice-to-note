@@ -345,18 +345,41 @@ def _existing_spelling(repo: Repository, name: str) -> str:
     it only in case. Projects are free text compared exactly, so "Work" typed
     beside an existing "work" would start a second project that the sidebar
     shows as a near-duplicate; an exact match, and a name nobody has used yet,
-    come back untouched."""
-    taken = [known for known, _count in repo.projects()] + ["other"]
-    if name in taken:
-        return name
+    come back untouched.
+
+    "other" is the default every import falls back to, so any case variant of
+    it means that one, whatever legacy "Other" may still sit in the library.
+    Otherwise, where two existing projects differ only by case, the one with
+    more memos wins, because it is the one most of the work already lives in;
+    ties fall to the name that sorts first, so the answer never depends on
+    row order. Archived and binned memos count: a restore must not bring back
+    a spelling the library had stopped showing.
+
+    Known limit: `rename_project` does not apply this, so renaming onto a name
+    that differs only in case from an existing project makes a second one."""
     folded = name.casefold()
-    return next((known for known in taken if known.casefold() == folded), name)
+    if folded == "other":
+        return "other"
+    taken = repo.project_spellings()
+    if any(known == name for known, _count in taken):
+        return name
+    same = sorted(
+        (known for known, _count in taken if known.casefold() == folded),
+        key=lambda known: (-dict(taken)[known], known),
+    )
+    return same[0] if same else name
 
 
 def chosen_project(repo: Repository, typed: str | None) -> str | None:
     """The project somebody chose, spelled as the library already spells it, or
     None when they chose nothing. This is the one place a typed project becomes
-    a stored one for every import path and for moving a memo."""
+    a stored one for every import path and for moving a memo.
+
+    "Chosen" includes "other": the menu bar recorder is the one front end that
+    cannot tell a deliberate "other" from its default, so it leaves the flag
+    off for it and somebody who ticks "other" there still gets the notes'
+    project. A later standalone re-extraction of a memo sitting in "other"
+    may refile it for the same reason (see run_extraction)."""
     name = project_typed(typed)
     return None if name is None else _existing_spelling(repo, name)
 
@@ -2636,11 +2659,14 @@ def speakers(repo: Repository, memo_id: int) -> dict[str, str]:
     return repo.display_names(memo_id)
 
 
-def move_memo(repo: Repository, memo_id: int, project: str) -> None:
-    """Files a memo under a different project, so it groups with its own work."""
+def move_memo(repo: Repository, memo_id: int, project: str) -> str:
+    """Files a memo under a different project, so it groups with its own work,
+    and returns the spelling it was stored under, which a screen names in its
+    notice because it may differ in case from what was typed."""
     name = _existing_spelling(repo, _project_name(project))
     require_memo(repo, memo_id)
     repo.set_project(memo_id, name)
+    return name
 
 
 def rename_memo(repo: Repository, memo_id: int, name: str) -> None:
@@ -2981,7 +3007,9 @@ def project_name(name: str) -> str:
 def rename_project(repo: Repository, old: str, new: str) -> int:
     """Renames a project by refiling every memo in it, reporting how many moved.
     A name already in use is a merge rather than a clash: projects are only a
-    value on a memo, so two piles answering to one name are one pile."""
+    value on a memo, so two piles answering to one name are one pile. The new
+    name is taken as typed: the existing-spelling rule of imports and moves is
+    not applied here, a known limit."""
     name = _project_name(new)
     moved = repo.refile_project(old, name)
     if not moved:
