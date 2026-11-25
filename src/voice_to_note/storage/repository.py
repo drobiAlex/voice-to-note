@@ -1062,6 +1062,62 @@ class Repository:
             self._touch(row["memo_id"])
         return True
 
+    def todo_exists(self, todo_id: int) -> bool:
+        """Whether a to-do is there to change: the check set_todo_status makes,
+        so that a batch can be refused before any of it is applied."""
+        return (
+            self.con.execute(
+                "SELECT 1 FROM todos t JOIN memos m ON m.id=t.memo_id"
+                " WHERE t.id=? AND m.deleted_at IS NULL",
+                (todo_id,),
+            ).fetchone()
+            is not None
+        )
+
+    def close_open_todos(self, memo_id: int) -> list[int]:
+        """Checks off every to-do of one memo that is still open, and returns
+        the ids it closed — the exact set, because putting them back has to
+        reopen those and not the ones somebody had already finished. Marked the
+        way a single check-off marks one, touched included, so the next
+        extraction neither rewords them nor brings them back."""
+        with self.con:
+            # one statement that only touches rows still open, so a row another
+            # process finished a moment ago is neither overwritten nor claimed
+            ids = [
+                r["id"]
+                for r in self.con.execute(
+                    "UPDATE todos SET status='done', done_at=datetime('now'), touched=1"
+                    " WHERE memo_id=? AND status='open' RETURNING id",
+                    (memo_id,),
+                ).fetchall()
+            ]
+            if ids:
+                self._touch(memo_id)
+        return ids
+
+    def reopen_todos(self, todo_ids: Sequence[int]) -> list[int]:
+        """Puts exactly these to-dos back on the list and returns the ones that
+        were actually done and so changed. A row somebody has reopened already,
+        or whose memo has since gone to the bin, is left alone rather than
+        counted."""
+        reopened: list[int] = []
+        with self.con:
+            for todo_id in todo_ids:
+                row = self.con.execute(
+                    "SELECT t.memo_id FROM todos t JOIN memos m ON m.id=t.memo_id"
+                    " WHERE t.id=? AND t.status='done' AND m.deleted_at IS NULL",
+                    (todo_id,),
+                ).fetchone()
+                if row is None:
+                    continue
+                self.con.execute(
+                    "UPDATE todos SET status='open', done_at=NULL, touched=1 WHERE id=?",
+                    (todo_id,),
+                )
+                self._touch(row["memo_id"])
+                reopened.append(todo_id)
+        return reopened
+
     def todos(
         self,
         project: str | None = None,

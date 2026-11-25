@@ -41,6 +41,7 @@ vtn youtube <url>                 # import a video's captions as a memo
 vtn tui                           # browse and edit everything
 vtn notes 3                       # print the notes for memo 3
 vtn todos                         # open to-dos across all memos
+vtn todo done --memo 3           # check off every open to-do of memo 3 (prints their ids)
 vtn ask 3 "who owns the launch?"  # ask a question about a memo
 ```
 

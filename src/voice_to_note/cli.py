@@ -660,17 +660,35 @@ def cmd_todos(args: argparse.Namespace) -> None:
 
 
 def cmd_todo_done(args: argparse.Namespace) -> None:
-    """Checks a to-do off."""
+    """Checks a to-do off, or with --memo every to-do a memo still has open.
+    The ids a --memo closes go to stdout, so that `todo open` can be handed
+    exactly those to put back; the count is the confirmation on stderr. Naming
+    neither or both is refused, since closing a whole memo by a stray argument
+    is not something to guess at."""
+    if (args.id is None) == (args.memo is None):
+        raise services.InvalidInput("name one to-do id, or --memo with a memo id")
     with Repository() as repo:
-        services.set_todo_status(repo, args.id, "done")
-    status(f"to-do {args.id} done")
+        if args.memo is None:
+            services.set_todo_status(repo, args.id, "done")
+            status(f"to-do {args.id} done")
+            return
+        closed = services.close_memo_todos(repo, args.memo)
+    if closed:
+        print(" ".join(str(i) for i in closed))
+    noun = "to-do" if len(closed) == 1 else "to-dos"
+    status(f"closed {len(closed)} {noun} of memo {args.memo}")
 
 
 def cmd_todo_open(args: argparse.Namespace) -> None:
-    """Puts a to-do back on the list, for one checked off too soon."""
+    """Puts to-dos back on the list, for ones checked off too soon — several
+    at once, so the ids a `todo done --memo` printed can be passed straight
+    back."""
     with Repository() as repo:
-        services.set_todo_status(repo, args.id, "open")
-    status(f"to-do {args.id} back on the list")
+        services.set_todos_status(repo, args.ids, "open")
+    if len(args.ids) == 1:
+        status(f"to-do {args.ids[0]} back on the list")
+    else:
+        status(f"{len(args.ids)} to-dos back on the list")
 
 
 def cmd_move(args: argparse.Namespace) -> None:
@@ -1211,15 +1229,16 @@ def main() -> None:
     )
     sp.set_defaults(fn=cmd_todos)
 
-    sp = sub.add_parser("todo", help="check a to-do off or put it back: todo done|open <id>")
+    sp = sub.add_parser("todo", help="check to-dos off or put them back: todo done|open")
     todo_sub = sp.add_subparsers(dest="todo_cmd", required=True)
 
-    tsp = todo_sub.add_parser("done", help="check a to-do off: todo done <id>")
-    tsp.add_argument("id", type=int)
+    tsp = todo_sub.add_parser("done", help="check a to-do off, or all of a memo's: todo done <id> | --memo <id>")
+    tsp.add_argument("id", type=int, nargs="?", help="the to-do to check off")
+    tsp.add_argument("--memo", type=int, help="check off every open to-do of this memo")
     tsp.set_defaults(fn=cmd_todo_done)
 
-    tsp = todo_sub.add_parser("open", help="put a to-do back on the list: todo open <id>")
-    tsp.add_argument("id", type=int)
+    tsp = todo_sub.add_parser("open", help="put to-dos back on the list: todo open <id>...")
+    tsp.add_argument("ids", type=int, nargs="+", metavar="id")
     tsp.set_defaults(fn=cmd_todo_open)
 
     sp = sub.add_parser("move", help="file a memo under a project: move <id> <project>")
