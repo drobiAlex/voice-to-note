@@ -9,11 +9,13 @@ from test_tui import (
     board_tasks,
     committed,
     from_menu,
+    open_bin,
+    owned,
     point_at_memo,
     seed,
 )
 
-from voice_to_note import services
+from voice_to_note import config, services
 from voice_to_note.storage.repository import Repository
 
 # --- the service ------------------------------------------------------------
@@ -317,3 +319,207 @@ async def test_u_takes_back_whichever_of_a_delete_and_a_close_came_last(repo):
         await pilot.press("u")
         await pilot.pause()
         assert not services.memo_is_binned(repo, work)
+
+
+# --- what a review found ------------------------------------------------------
+
+
+async def purge_through_the_bin(pilot) -> None:
+    """Sends the pointed-at memo to the bin and deletes it for good from there,
+    the way a person does: delete, open the bin, delete again, answer y."""
+    await pilot.press("delete")
+    await pilot.pause()
+    await open_bin(pilot)
+    await pilot.press("delete")
+    await pilot.pause()
+    await pilot.press("y")
+    await pilot.pause()
+
+
+@pytest.mark.ui
+@pytest.mark.asyncio
+async def test_u_after_a_purge_does_not_reopen_the_tasks_of_a_memo_that_took_its_id(repo):
+    _work, home = seed(repo)
+    committed(repo, home, "Cut the release")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await point_at_memo(pilot, "personal")
+        await from_menu(pilot, "space", "x")
+        await purge_through_the_bin(pilot)
+        assert repo.memo(home) is None
+        reused = cli_add_memo(repo, filename="new.m4a")
+        assert reused == home
+        committed(repo, reused, "Another task")
+        services.close_memo_todos(repo, reused)
+        pilot.app.show_project("other")
+        await pilot.pause()
+
+        await pilot.press("u")
+        await pilot.pause()
+
+        assert statuses(repo, reused) == {"Another task": "done"}
+
+
+@pytest.mark.ui
+@pytest.mark.asyncio
+async def test_u_after_emptying_the_bin_forgets_the_close_of_a_purged_memo(repo):
+    _work, home = seed(repo)
+    committed(repo, home, "Cut the release")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await point_at_memo(pilot, "personal")
+        await from_menu(pilot, "space", "x")
+        await pilot.press("delete")
+        await pilot.pause()
+        await open_bin(pilot)
+        await pilot.app.run_action("empty_bin")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+
+        assert repo.memo(home) is None
+        assert pilot.app.undo_log == []
+
+
+@pytest.mark.ui
+@pytest.mark.asyncio
+async def test_a_close_survives_a_board_visit_while_its_memo_is_in_the_bin(repo):
+    work, home = seed(repo)
+    committed(repo, work, "Cut the release")
+    committed(repo, home, "Buy milk")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await point_at_memo(pilot, "work")
+        await from_menu(pilot, "space", "x")
+        await pilot.press("delete")
+        await pilot.pause()
+        await open_board(pilot)
+        await pilot.press("u")
+        await pilot.pause()
+        assert notices(pilot)[-1] == "nothing to undo"
+        await pilot.press("escape")
+        await pilot.pause()
+        services.restore_memo(repo, work)
+        await pilot.press("u")
+        await pilot.pause()
+
+        assert statuses(repo, work) == {"Cut the release": "open"}
+
+
+@pytest.mark.ui
+@pytest.mark.asyncio
+async def test_x_with_an_owner_filter_says_how_many_of_the_closed_were_not_shown(
+    repo, monkeypatch
+):
+    monkeypatch.setattr(config, "MY_NAME", "")
+    work, _home = seed(repo)
+    owned(
+        repo,
+        work,
+        ("Cut the release", "Alice"),
+        ("Tag the build", "Bob"),
+        ("Mail the team", "Bob"),
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_board(pilot)
+        # everyone -> unassigned -> Alice, the first named owner
+        await pilot.press("o", "o")
+        await pilot.pause()
+        assert board_tasks(pilot) == ["Cut the release"]
+        await pilot.press("x")
+        await pilot.pause()
+
+        assert notices(pilot) == [
+            'closed 3 to-dos of "standup.m4a" (2 not shown here) — u to undo'
+        ]
+
+
+def test_reopening_several_ids_with_a_missing_one_changes_nothing(repo, monkeypatch):
+    first, _second = two_memos(repo)
+    closed = services.close_memo_todos(repo, first)
+
+    with pytest.raises(SystemExit) as err:
+        run(
+            monkeypatch,
+            Repository(repo.path),
+            "todo", "open", str(closed[0]), "999", str(closed[1]),
+        )
+
+    assert err.value.code == "no to-do with id 999"
+    assert set(statuses(repo, first).values()) == {"done"}
+
+
+def test_a_close_only_claims_rows_that_are_still_open(repo):
+    first, _second = two_memos(repo)
+
+    assert len(repo.close_open_todos(first)) == 3
+    assert repo.close_open_todos(first) == []
+
+
+@pytest.mark.ui
+@pytest.mark.asyncio
+async def test_closing_the_same_memo_twice_with_u_between_reopens_each_time(repo):
+    work, _home = seed(repo)
+    committed(repo, work, "Cut the release", "Tag the build")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await point_at_memo(pilot, "work")
+        await from_menu(pilot, "space", "x")
+        await pilot.press("u")
+        await pilot.pause()
+        assert set(statuses(repo, work).values()) == {"open"}
+        await from_menu(pilot, "space", "x")
+        assert set(statuses(repo, work).values()) == {"done"}
+        await pilot.press("u")
+        await pilot.pause()
+
+        assert set(statuses(repo, work).values()) == {"open"}
+
+
+@pytest.mark.ui
+@pytest.mark.asyncio
+async def test_x_on_an_empty_board_changes_nothing_and_says_nothing(repo):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_board(pilot)
+        await pilot.press("x")
+        await pilot.pause()
+
+        assert notices(pilot) == []
+
+
+@pytest.mark.ui
+@pytest.mark.asyncio
+async def test_x_on_an_already_done_task_still_closes_the_rest_of_its_memo(repo):
+    work, _home = seed(repo)
+    committed(repo, work, "Cut the release", "Tag the build")
+    first = next(t for t in repo.todos(memo_id=work) if t.text == "Cut the release")
+    services.set_todo_status(repo, first.id, "done")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_board(pilot)
+        await pilot.press("d")
+        await pilot.pause()
+        assert board_tasks(pilot)[0] == "Cut the release"
+        await pilot.press("x")
+        await pilot.pause()
+
+        assert notices(pilot) == ['closed 1 to-do of "standup.m4a" — u to undo']
+        assert set(statuses(repo, work).values()) == {"done"}
+
+
+@pytest.mark.ui
+@pytest.mark.asyncio
+async def test_x_on_a_memo_binned_meanwhile_is_a_notice_and_not_a_crash(repo):
+    work, _home = seed(repo)
+    committed(repo, work, "Cut the release")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_board(pilot)
+        services.delete_memo(repo, work)
+        await pilot.press("x")
+        await pilot.pause()
+
+        assert notices(pilot) == [f"memo {work} is in the bin — vtn restore {work}"]

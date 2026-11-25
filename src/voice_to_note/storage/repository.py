@@ -1062,6 +1062,18 @@ class Repository:
             self._touch(row["memo_id"])
         return True
 
+    def todo_exists(self, todo_id: int) -> bool:
+        """Whether a to-do is there to change: the check set_todo_status makes,
+        so that a batch can be refused before any of it is applied."""
+        return (
+            self.con.execute(
+                "SELECT 1 FROM todos t JOIN memos m ON m.id=t.memo_id"
+                " WHERE t.id=? AND m.deleted_at IS NULL",
+                (todo_id,),
+            ).fetchone()
+            is not None
+        )
+
     def close_open_todos(self, memo_id: int) -> list[int]:
         """Checks off every to-do of one memo that is still open, and returns
         the ids it closed — the exact set, because putting them back has to
@@ -1069,19 +1081,17 @@ class Repository:
         way a single check-off marks one, touched included, so the next
         extraction neither rewords them nor brings them back."""
         with self.con:
+            # one statement that only touches rows still open, so a row another
+            # process finished a moment ago is neither overwritten nor claimed
             ids = [
                 r["id"]
                 for r in self.con.execute(
-                    "SELECT id FROM todos WHERE memo_id=? AND status='open' ORDER BY id",
+                    "UPDATE todos SET status='done', done_at=datetime('now'), touched=1"
+                    " WHERE memo_id=? AND status='open' RETURNING id",
                     (memo_id,),
-                )
+                ).fetchall()
             ]
             if ids:
-                self.con.executemany(
-                    "UPDATE todos SET status='done', done_at=datetime('now'), touched=1"
-                    " WHERE id=?",
-                    [(i,) for i in ids],
-                )
                 self._touch(memo_id)
         return ids
 

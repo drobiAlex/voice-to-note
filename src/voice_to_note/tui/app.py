@@ -1786,7 +1786,10 @@ class TodoBoard(ModalScreen[int | None]):
         row = self._highlighted()
         if row is None:
             return
-        cast("MemoApp", self.app).close_todos(row.memo_id)
+        on_screen = sum(
+            1 for r in self.listed.values() if r.memo_id == row.memo_id and not r.done
+        )
+        cast("MemoApp", self.app).close_todos(row.memo_id, on_screen)
         self._refresh()
 
     def action_undo(self) -> None:
@@ -3753,22 +3756,35 @@ class MemoApp(App[None]):
         self.load_projects()
         self._relist()
 
-    def _undoable(self) -> tuple[str, int, tuple[int, ...]] | None:
-        """What u would take back: while the bin is on screen the memo the
-        cursor is on, and otherwise the latest thing this session did that is
-        still undoable — a delete whose memo is still in the bin, or a close
-        of to-dos that are still checked off. One that has since been put back
-        by hand, or deleted for good, is skipped rather than reported as an
-        error."""
+    def _undoable(
+        self, kinds: tuple[str, ...] = ("delete", "close")
+    ) -> tuple[str, int, tuple[int, ...]] | None:
+        """The one place that decides what u would take back, for the main
+        screen and the board alike so the two cannot drift. While the bin is on
+        screen it is the memo the cursor is on; otherwise the latest entry of
+        the asked-for kinds that can still be undone — a delete whose memo is
+        still in the bin, or a close whose memo is live and whose to-dos are
+        still checked off.
+
+        An entry is dropped only when its memo is gone for good, since ids are
+        recycled and an undo must never land on a different memo. One that
+        cannot be applied right now — a close whose memo is in the bin — is
+        skipped and kept, so that restoring the memo makes it undoable again."""
         if self._in_bin():
             binned = self._target_binned()
-            return None if binned is None else ("delete", binned, ())
-        for entry in reversed(self.undo_log):
+            return None if binned is None or "delete" not in kinds else ("delete", binned, ())
+        for entry in reversed(list(self.undo_log)):
             kind, memo_id, ids = entry
+            if kind not in kinds:
+                continue
+            if not services.memo_exists(self.repo, memo_id):
+                self.undo_log.remove(entry)
+                continue
+            binned = services.memo_is_binned(self.repo, memo_id)
             if kind == "delete":
-                if services.memo_is_binned(self.repo, memo_id):
+                if binned:
                     return entry
-            elif self._still_closed(memo_id, ids):
+            elif not binned and self._still_closed(memo_id, ids):
                 return entry
         return None
 
@@ -3785,10 +3801,9 @@ class MemoApp(App[None]):
         entry = self._undoable()
         if entry is None:
             return
-        kind, memo_id, ids = entry
+        kind, memo_id, _ids = entry
         if kind == "close":
-            self.undo_close()
-            self._refresh_open_memo()
+            self._reopen_closed(entry)
             return
         filename = services.restore_memo(self.repo, memo_id)
         if memo_id in self.deleted_here:
@@ -3805,41 +3820,59 @@ class MemoApp(App[None]):
             e for e in self.undo_log if not (e[0] == kind and e[1] == memo_id)
         ]
 
-    def close_todos(self, memo_id: int) -> None:
+    def close_todos(self, memo_id: int, hidden_from: int | None = None) -> None:
         """Checks off everything the memo still has open, and says so by name
         with the count. Nothing is asked first: u reopens exactly those rows,
         so a confirmation would only teach the hand to press y. A memo with
-        nothing open changes nothing and says that instead."""
-        filename = services.require_memo(self.repo, memo_id).filename
-        closed = services.close_memo_todos(self.repo, memo_id)
+        nothing open changes nothing and says that instead.
+
+        hidden_from is how many of its open tasks the caller was showing; when
+        the close reached more than that — an owner filter was hiding some —
+        the notice says how many were not on screen, since the action is about
+        the memo and the person should not be surprised by it.
+
+        Taking it back reopens the rows but leaves them marked as somebody's
+        say-so, as a hand reopen does: the mark is not restored."""
+        try:
+            filename = services.require_memo(self.repo, memo_id).filename
+            closed = services.close_memo_todos(self.repo, memo_id)
+        except services.NotFound as gone:
+            self.notify(str(gone), severity="warning")
+            return
         if not closed:
             self.notify(f'no open to-dos in "{filename}"')
             return
         self.undo_log.append(("close", memo_id, tuple(closed)))
         self._relist()
+        self._refresh_open_memo()
         noun = "to-do" if len(closed) == 1 else "to-dos"
-        self.notify(f'closed {len(closed)} {noun} of "{filename}" — u to undo')
+        unseen = ""
+        if hidden_from is not None and len(closed) > hidden_from:
+            unseen = f" ({len(closed) - hidden_from} not shown here)"
+        self.notify(f'closed {len(closed)} {noun} of "{filename}"{unseen} — u to undo')
 
     def undo_close(self) -> bool:
-        """Reopens the to-dos the latest close checked off — only those still
-        checked off, never rows that were done before it — and says how many
-        came back. Reports whether there was anything to take back, for the
-        board, whose own u takes back only this kind."""
-        for entry in reversed(self.undo_log):
-            kind, memo_id, ids = entry
-            if kind != "close":
-                continue
-            still = self._still_closed(memo_id, ids)
-            self.undo_log.remove(entry)
-            if not still:
-                continue
-            reopened = services.reopen_todos(self.repo, still)
-            filename = services.require_memo(self.repo, memo_id).filename
-            noun = "to-do" if len(reopened) == 1 else "to-dos"
-            self._relist()
-            self.notify(f'reopened {len(reopened)} {noun} of "{filename}"')
-            return True
-        return False
+        """Reopens what the latest close checked off, for the board, whose u
+        takes back only that kind. Reports whether there was anything to take
+        back."""
+        entry = self._undoable(("close",))
+        if entry is None:
+            return False
+        self._reopen_closed(entry)
+        return True
+
+    def _reopen_closed(self, entry: tuple[str, int, tuple[int, ...]]) -> None:
+        """Reopens the rows of one close that are still checked off — never
+        rows done before it — drops the entry now that it is applied, and says
+        how many came back."""
+        _kind, memo_id, ids = entry
+        self.undo_log.remove(entry)
+        reopened = services.reopen_todos(self.repo, self._still_closed(memo_id, ids))
+        filename = services.require_memo(self.repo, memo_id).filename
+        noun = "to-do" if len(reopened) == 1 else "to-dos"
+        self._relist()
+        self._refresh_open_memo()
+        self.notify(f'reopened {len(reopened)} {noun} of "{filename}"')
 
     def action_close_todos(self) -> None:
         """Closes every open to-do of the pointed-at memo, from the memo list
@@ -3847,7 +3880,6 @@ class MemoApp(App[None]):
         memo_id = self._target_memo()
         if memo_id is not None:
             self.close_todos(memo_id)
-            self._refresh_open_memo()
 
     def _refresh_open_memo(self) -> None:
         """Redraws the open memo, whose note shows its boxes ticked from what
@@ -3897,9 +3929,9 @@ class MemoApp(App[None]):
         hands a deleted row's id to the next memo stored, so an id left behind
         could one day make u restore somebody else's memo."""
         self.deleted_here = [i for i in self.deleted_here if i not in memo_ids]
-        self.undo_log = [
-            e for e in self.undo_log if not (e[0] == "delete" and e[1] in memo_ids)
-        ]
+        # a close goes too: its memo's id and its to-dos' ids are handed to the
+        # next ones stored, and an undo must not reopen somebody else's tasks
+        self.undo_log = [e for e in self.undo_log if e[1] not in memo_ids]
 
     def action_empty_bin(self) -> None:
         """Offers to remove everything in the bin permanently, stating how many

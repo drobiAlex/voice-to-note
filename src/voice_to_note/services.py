@@ -2945,6 +2945,13 @@ def purge_memo(
     return memo.filename
 
 
+def memo_exists(repo: Repository, memo_id: int) -> bool:
+    """Whether a memo is still stored, binned or not — false once it has been
+    deleted for good, which is when a screen must forget what it remembers
+    about that id."""
+    return repo.memo(memo_id) is not None
+
+
 def memo_is_binned(repo: Repository, memo_id: int) -> bool:
     """Whether a memo is in the bin right now, for a screen that remembers what
     it deleted and has to ask whether that is still true."""
@@ -3320,6 +3327,20 @@ def set_todo_status(repo: Repository, todo_id: int, status: str) -> None:
     read back as work marked done."""
     if not repo.set_todo_status(todo_id, status):
         raise NotFound(f"no to-do with id {todo_id}")
+
+
+def set_todos_status(repo: Repository, todo_ids: Sequence[int], status: str) -> None:
+    """Checks off or reopens several to-dos as one move: every id is looked for
+    first and any that are missing are refused together, in one line, before a
+    single row changes — a list that stopped halfway would leave the caller
+    guessing which of its ids had taken effect."""
+    missing = [i for i in todo_ids if not repo.todo_exists(i)]
+    if len(missing) == 1:
+        raise NotFound(f"no to-do with id {missing[0]}")
+    if missing:
+        raise NotFound(f"no to-dos with ids {', '.join(str(i) for i in missing)}")
+    for todo_id in todo_ids:
+        repo.set_todo_status(todo_id, status)
 
 
 def close_memo_todos(repo: Repository, memo_id: int) -> list[int]:

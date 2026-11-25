@@ -684,8 +684,7 @@ def cmd_todo_open(args: argparse.Namespace) -> None:
     at once, so the ids a `todo done --memo` printed can be passed straight
     back."""
     with Repository() as repo:
-        for todo_id in args.ids:
-            services.set_todo_status(repo, todo_id, "open")
+        services.set_todos_status(repo, args.ids, "open")
     if len(args.ids) == 1:
         status(f"to-do {args.ids[0]} back on the list")
     else:
