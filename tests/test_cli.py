@@ -2010,3 +2010,54 @@ def test_youtube_lang_accepts_a_name_and_passes_it_on_to_the_import(monkeypatch,
     )
 
     assert seen["lang"] == "ukrainian,polish"
+
+
+# --- the review's cases ------------------------------------------------------------
+
+
+def ukrainian_spoken_video():
+    listed = {
+        "uk-orig": [{"url": "https://c.example/uk-orig", "ext": "json3"}],
+        "uk": [{"url": "https://c.example/api?tlang=uk", "ext": "json3"}],
+    }
+    for code in ("en", "pl", "de"):
+        listed[code] = [{"url": f"https://c.example/api?tlang={code}", "ext": "json3"}]
+    return yt_video(language="uk", subtitles={}, automatic_captions=listed)
+
+
+def test_youtube_captions_for_a_ukrainian_video_takes_ukrainian_under_every_preference(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(services, "youtube_video", lambda _url: ukrainian_spoken_video())
+    taken = []
+    for preference in ("en", "en,uk,pl", ""):
+        monkeypatch.setattr(services.config, "YOUTUBE_LANG", preference)
+        run(monkeypatch, StubRepo(), "youtube", "https://youtu.be/abc123", "--captions", "--json")
+        listed = json.loads(capsys.readouterr().out)
+        taken.append([c["code"] for c in listed if c["taken"]])
+
+    assert taken == [["uk"], ["uk"], ["uk"]]
+
+
+def test_youtube_lang_of_only_separators_is_refused_before_the_network(monkeypatch, capsys):
+    monkeypatch.setattr(
+        services, "youtube_video", lambda _url: pytest.fail("fetched despite an empty --lang")
+    )
+
+    with pytest.raises(SystemExit) as err:
+        run(monkeypatch, StubRepo(), "youtube", "https://youtu.be/abc123", "--lang", ",")
+
+    assert "name a caption language" in str(err.value.code)
+
+
+def test_youtube_captions_says_when_only_machine_translations_exist(monkeypatch, capsys):
+    only = yt_video(
+        language=None,
+        automatic_captions={"de": [{"url": "https://c.example/?tlang=de", "ext": "json3"}]},
+    )
+    monkeypatch.setattr(services, "youtube_video", lambda _url: only)
+
+    run(monkeypatch, StubRepo(), "youtube", "https://youtu.be/abc123", "--captions")
+
+    out, err = capsys.readouterr()
+    assert "[translated]" in out and "machine-translated" in err

@@ -6441,7 +6441,7 @@ async def test_a_looked_up_video_is_named_and_its_real_languages_replace_the_pic
 
     async with MemoApp(repo).run_test() as pilot:
         await open_youtube_modal(pilot)
-        await type_link(pilot, "https://youtu.be/abc")
+        await type_link(pilot, "https://youtu.be/abcdefghijk")
 
         assert "A lecture" in video_line(pilot) and "Teacher" in video_line(pilot)
         # preferred ones first; German is a translation nobody asked for, so absent
@@ -6462,7 +6462,7 @@ async def test_leaving_the_link_field_looks_the_video_up_without_waiting(
 
     async with MemoApp(repo).run_test() as pilot:
         await open_youtube_modal(pilot)
-        pilot.app.screen.query_one("#youtube-url", Input).value = "https://youtu.be/abc"
+        pilot.app.screen.query_one("#youtube-url", Input).value = "https://youtu.be/abcdefghijk"
         await pilot.press("tab")
         await lookups_done(pilot)
 
@@ -6484,7 +6484,7 @@ async def test_a_video_without_captions_says_so_on_the_form_and_will_not_be_sent
 
     async with MemoApp(repo).run_test() as pilot:
         await open_youtube_modal(pilot)
-        await type_link(pilot, "https://youtu.be/abc")
+        await type_link(pilot, "https://youtu.be/abcdefghijk")
 
         assert "no captions on this video" in video_line(pilot)
         await pilot.press("ctrl+s")
@@ -6507,7 +6507,7 @@ async def test_a_failed_lookup_says_why_in_one_line_and_leaves_the_form_usable(
 
     async with MemoApp(repo).run_test() as pilot:
         await open_youtube_modal(pilot)
-        await type_link(pilot, "https://youtu.be/abc")
+        await type_link(pilot, "https://youtu.be/abcdefghijk")
 
         assert video_line(pilot) == "could not look the video up: yt-dlp failed reading the link"
         assert language_choices(pilot)[0] == ("automatic", "")
@@ -6530,7 +6530,7 @@ async def test_a_lookup_that_finishes_after_the_link_changed_does_not_touch_the_
     async with MemoApp(repo).run_test() as pilot:
         await open_youtube_modal(pilot)
         line = pilot.app.screen.query_one("#youtube-url", Input)
-        line.value = "https://youtu.be/abc"
+        line.value = "https://youtu.be/abcdefghijk"
         await pilot.pause(0.9)
         line.value = "https://youtu.be/other"
         release.set()
@@ -6568,13 +6568,13 @@ async def test_the_language_chosen_on_the_form_reaches_the_import_with_the_video
 
     async with MemoApp(repo).run_test() as pilot:
         await open_youtube_modal(pilot)
-        await type_link(pilot, "https://youtu.be/abc")
+        await type_link(pilot, "https://youtu.be/abcdefghijk")
         pilot.app.screen.query_one("#youtube-language", Select).value = "pl"
         await pilot.press("enter")
         await finish_jobs(pilot)
 
         assert seen["lang"] == "pl"
-        assert fetches == ["https://youtu.be/abc"]
+        assert fetches == ["https://youtu.be/abcdefghijk"]
 
 
 @pytest.mark.asyncio
@@ -6600,8 +6600,137 @@ async def test_a_form_sent_before_any_lookup_leaves_the_language_to_the_preferen
 
     async with MemoApp(repo).run_test() as pilot:
         await open_youtube_modal(pilot)
-        pilot.app.screen.query_one("#youtube-url", Input).value = "https://youtu.be/abc"
+        pilot.app.screen.query_one("#youtube-url", Input).value = "https://youtu.be/abcdefghijk"
         await pilot.press("ctrl+s")
         await finish_jobs(pilot)
 
         assert seen["lang"] is None
+
+
+# --- the review's cases ------------------------------------------------------------
+
+
+def ukrainian_spoken_video():
+    listed = {
+        "uk-orig": [{"url": "https://c.example/uk-orig", "ext": "json3"}],
+        "uk": [{"url": "https://c.example/api?tlang=uk", "ext": "json3"}],
+    }
+    for code in ("en", "pl", "de"):
+        listed[code] = [{"url": f"https://c.example/api?tlang={code}", "ext": "json3"}]
+    return captioned(language="uk", subtitles={}, automatic_captions=listed)
+
+
+@pytest.mark.asyncio
+async def test_a_ukrainian_video_preselects_ukrainian_and_labels_the_translations(
+    repo, monkeypatch, wanted_languages
+):
+    seed(repo)
+    monkeypatch.setattr(services, "youtube_video", lambda _url: ukrainian_spoken_video())
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+        await type_link(pilot, "https://youtu.be/abcdefghijk")
+
+        assert language_choices(pilot) == [
+            ("English (translated)", "en"),
+            ("Ukrainian (auto-generated)", "uk"),
+            ("Polish (translated)", "pl"),
+        ]
+        assert picked_language(pilot) == "uk"
+
+
+@pytest.mark.asyncio
+async def test_a_misspelt_youtube_lang_does_not_take_the_form_down_after_a_lookup(
+    repo, monkeypatch
+):
+    seed(repo)
+    monkeypatch.setattr(config, "YOUTUBE_LANG", "ukranian,ua")
+    monkeypatch.setattr(services, "youtube_video", lambda _url: captioned())
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+        assert language_choices(pilot) == [("automatic", "")]
+        await type_link(pilot, "https://youtu.be/abcdefghijk")
+
+        assert showing(pilot.app, "#youtube-url")
+        assert "A lecture" in video_line(pilot)
+        assert [code for _label, code in language_choices(pilot)] == ["uk", "en"]
+        assert any("youtube_lang" in message for message in said(pilot))
+
+
+@pytest.mark.asyncio
+async def test_a_video_with_only_translations_is_labelled_and_can_be_sent(
+    repo, monkeypatch, wanted_languages
+):
+    seed(repo)
+    only = captioned(
+        language=None, subtitles={},
+        automatic_captions={"de": [{"url": "https://c.example/?tlang=de", "ext": "json3"}]},
+    )
+    monkeypatch.setattr(services, "youtube_video", lambda _url: only)
+    sent = []
+    monkeypatch.setattr(services, "find_youtube_duplicate", lambda _repo, _video: None)
+    monkeypatch.setattr(
+        services, "import_youtube",
+        lambda r, v, project=None, lang=None, log=None: sent.append(lang)
+        or services.ProcessResult(r.create_memo(
+            filename="x", wav_path="", duration_s=1.0, language="de",
+            segments=[Segment(0, 1000, "an idea")], speakers=(), project="other",
+            source_url=v.url), 1, [], "de"),
+    )
+    monkeypatch.setattr(services, "run_extraction", lambda *a, **k: "claude")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+        await type_link(pilot, "https://youtu.be/abcdefghijk")
+
+        assert "machine-translated" in video_line(pilot)
+        assert language_choices(pilot) == [("German (translated)", "de")]
+        await pilot.press("ctrl+s")
+        await finish_jobs(pilot)
+
+        assert sent == ["de"]
+
+
+@pytest.mark.asyncio
+async def test_a_partial_link_is_not_looked_up(repo, monkeypatch, wanted_languages):
+    seed(repo)
+    asked = []
+    monkeypatch.setattr(services, "youtube_video", lambda url: asked.append(url) or captioned())
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+        await type_link(pilot, "https://youtu.be/abcdef")
+        pilot.app.screen.query_one("#youtube-url", Input).focus()
+        await pilot.press("tab")
+        await lookups_done(pilot)
+
+        assert asked == []
+        assert video_line(pilot) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_link_whose_lookup_failed_is_not_asked_again_until_the_text_changes(
+    repo, monkeypatch, wanted_languages
+):
+    seed(repo)
+    asked = []
+
+    def offline(url):
+        asked.append(url)
+        raise GatewayError("offline")
+
+    monkeypatch.setattr(services, "youtube_video", offline)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+        await type_link(pilot, "https://youtu.be/abcdefghijk")
+        await pilot.press("tab")
+        await lookups_done(pilot)
+        await pilot.press("shift+tab")
+        await pilot.press("tab")
+        await lookups_done(pilot)
+        assert asked == ["https://youtu.be/abcdefghijk"]
+
+        await type_link(pilot, "https://youtu.be/abcdefghijl")
+        assert asked[-1] == "https://youtu.be/abcdefghijl" and len(asked) == 2

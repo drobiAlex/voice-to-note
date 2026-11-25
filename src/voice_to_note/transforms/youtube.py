@@ -1,4 +1,5 @@
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TypedDict
@@ -190,10 +191,11 @@ def pick_track(
     video's own tongue reads better downstream than a machine's unpunctuated
     guess in the preferred one. Within each kind the caller's languages win in
     order; asked to take any language, the video's own comes next, then
-    English, then whatever exists. YouTube's machine translations are the last
-    resort and only into a language the caller named: a translation of
-    speech nobody asked to read in that language is not a caption the video
-    "has", so it is never the surprise fallback. A caller that says
+    English, then whatever exists. YouTube's machine translations come last of
+    all: a translation of speech nobody asked to read in that language is not
+    a caption the video "has", so one is taken only into a language the caller
+    named — or, when the video has no written or recognised track whatever, as
+    the only thing there is to import. A caller that says
     any_language=False asked for exactly the languages it named, and is told
     plainly when none of them is there rather than handed a surprise."""
     candidates = _candidates(video)
@@ -214,9 +216,20 @@ def pick_track(
                 if url is not None:
                     return lang, url, kind == AUTO
     translated = {c.code: c.tracks for c in candidates if c.kind == TRANSLATED}
-    for pref in preferred:
+    # a video with nothing but translations is still a video with captions:
+    # when no written or recognised track exists to prefer, the caller's
+    # languages come first, then English, then whatever there is
+    order = list(preferred)
+    if any_language:
+        order.append("en")
+    for pref in order:
         lang = _match(translated, pref)
         if lang is not None:
+            url = _track_url(translated[lang])
+            if url is not None:
+                return lang, url, True
+    if any_language:
+        for lang in sorted(translated):
             url = _track_url(translated[lang])
             if url is not None:
                 return lang, url, True
@@ -229,6 +242,28 @@ def caption_langs(video: YouTubeVideo) -> list[str]:
     asked for is not. Machine translations are left out: they number a
     hundred on nearly every video and would bury the answer."""
     return [c.code for c in _candidates(video) if c.kind != TRANSLATED]
+
+
+def track_codes(video: YouTubeVideo) -> list[str]:
+    """Every language code the video offers a track in, translations included
+    — what a language typed by a person is allowed to be, whether or not the
+    table of known languages has heard of it."""
+    return [c.code for c in _candidates(video)]
+
+
+_VIDEO_ID = r"[A-Za-z0-9_-]{11}"
+_VIDEO_LINK = re.compile(
+    rf"^https?://(?:(?:www\.|m\.|music\.)?youtube\.com/(?:watch\?(?:[^#]*&)?v={_VIDEO_ID}"
+    rf"|(?:shorts|live|embed|v)/{_VIDEO_ID})|youtu\.be/{_VIDEO_ID})(?:[?&#/].*)?$"
+)
+
+
+def looks_like_video_link(text: str) -> bool:
+    """Whether text is a complete YouTube video link: a watch, shorts, live or
+    embed address or a youtu.be one with a full 11-character id. Typing a link
+    passes through every prefix of it, and each of those would otherwise be
+    sent to yt-dlp as a request that can only fail."""
+    return _VIDEO_LINK.match(text.strip()) is not None
 
 
 @dataclass(frozen=True)
@@ -259,14 +294,15 @@ def describe_captions(
     with written captions ahead of recognised ones. Machine translations are
     listed only into a preferred language — offered because it was asked for,
     after everything the video really has — so a hundred translations do not
-    drown the few real tracks. The track the chooser would take is marked, by
+    drown the few real tracks — except the one the chooser settles on when a
+    video has nothing else, so what is taken is always on the list. The track the chooser would take is marked, by
     asking the chooser itself rather than repeating its rules."""
     picked = pick_track(video, preferred, any_language)
     taken = picked[0] if picked else None
     wanted = [primary(p) for p in preferred]
     found = [
         c for c in _candidates(video)
-        if c.kind != TRANSLATED or primary(c.code) in wanted
+        if c.kind != TRANSLATED or primary(c.code) in wanted or c.code == taken
     ]
 
     kinds = {MANUAL: 0, AUTO: 1, TRANSLATED: 2}

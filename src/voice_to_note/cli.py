@@ -299,6 +299,10 @@ def cmd_youtube(args: argparse.Namespace) -> None:
     first when the same video is already here. The options are checked before
     the network is touched, and the video is named before its captions are
     fetched, so a mispasted link is caught at the earliest line it can be."""
+    if args.lang:
+        # before any network call: a language nobody could match is the
+        # quickest thing to find out
+        services.caption_preference(args.lang)
     if args.captions:
         _youtube_captions(args)
         return
@@ -324,12 +328,9 @@ def cmd_youtube(args: argparse.Namespace) -> None:
 def _youtube_captions(args: argparse.Namespace) -> None:
     """Lists the caption languages a video has, importing nothing, so a person
     or an agent can see what exists before choosing — without remembering codes
-    or guessing whether a language is there. The language being asked about is
-    checked before the network is touched; the title goes to stderr so the
+    or guessing whether a language is there. The title goes to stderr so the
     list alone is what a pipe receives. A star marks the track an import would
     take."""
-    if args.lang:
-        services.caption_preference(args.lang)
     status("fetching video info …")
     video = services.youtube_video(args.url)
     status(services.youtube_heading(video))
@@ -344,6 +345,9 @@ def _youtube_captions(args: argparse.Namespace) -> None:
         status("no captions on this video")
     elif not any(c.taken for c in langs):
         status("none of these would be taken by an import with that preference")
+    notice = services.caption_notice(video)
+    if notice:
+        status(notice)
 
 
 def _taped(track: Path) -> bool:

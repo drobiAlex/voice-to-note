@@ -253,7 +253,9 @@ def test_a_translation_only_video_is_taken_in_the_preferred_language():
     v = video(language=None, automatic_captions={"pl": translated("pl"), "de": translated("de")})
 
     assert pick_track(v, ["pl"])[0] == "pl"
-    assert pick_track(v, ["fr"]) is None
+    # nothing preferred is there, but a video that has something is not refused
+    assert pick_track(v, ["fr"])[0] == "de"
+    assert pick_track(v, ["fr"], any_language=False) is None
 
 
 def test_the_chooser_walks_the_preference_list_in_order():
@@ -295,3 +297,66 @@ def test_the_label_names_the_kind_unless_a_person_wrote_it():
         caption_label(CaptionLang("uk", "Ukrainian", "auto")),
         caption_label(CaptionLang("pl", "Polish", "translated")),
     ] == ["English", "Ukrainian (auto-generated)", "Polish (translated)"]
+
+
+# --- the review's cases ------------------------------------------------------------
+
+
+def ukrainian_spoken(**overrides):
+    """A video spoken in Ukrainian the way yt-dlp lists one: the recognised
+    track under both uk-orig and uk, and a machine translation into many
+    languages, English and Polish among them."""
+    listed = {
+        "uk-orig": [track("https://c.example/uk-orig")],
+        "uk": [track("https://c.example/api?tlang=uk")],
+    }
+    for code in ("en", "pl", "de", "fr", "ja"):
+        listed[code] = [track(f"https://c.example/api?tlang={code}")]
+    return video(language="uk", automatic_captions=listed, **overrides)
+
+
+def test_a_ukrainian_video_takes_its_own_track_not_the_english_translation():
+    v = ukrainian_spoken()
+
+    assert [pick_track(v, p)[:2] for p in (["en"], ["en", "uk", "pl"], [])] == [
+        ("uk", "https://c.example/uk-orig")
+    ] * 3
+
+
+def test_a_ukrainian_video_lists_its_own_language_first_among_the_unpreferred():
+    assert described(ukrainian_spoken(), ["en"]) == [
+        ("en", "English", "translated", False),
+        ("uk", "Ukrainian", "auto", True),
+    ]
+    assert described(ukrainian_spoken(), ["en", "uk", "pl"]) == [
+        ("en", "English", "translated", False),
+        ("uk", "Ukrainian", "auto", True),
+        ("pl", "Polish", "translated", False),
+    ]
+    assert described(ukrainian_spoken(), []) == [("uk", "Ukrainian", "auto", True)]
+
+
+def test_a_video_whose_only_tracks_are_translations_still_takes_one():
+    v = video(language=None, automatic_captions={"de": translated("de"), "en": translated("en")})
+
+    assert pick_track(v, ["pl"])[0] == "en"
+    assert described(v, ["pl"]) == [("en", "English", "translated", True)]
+
+
+def test_a_video_complete_link_is_recognised_and_a_partial_one_is_not():
+    from voice_to_note.transforms.youtube import looks_like_video_link as ok
+
+    assert ok("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL1")
+    assert ok("https://youtu.be/dQw4w9WgXcQ?t=5")
+    assert ok("https://www.youtube.com/shorts/dQw4w9WgXcQ")
+    assert not ok("https://youtu.be/dQw4w9")
+    assert not ok("https://www.youtube.com/watch?v=dQw")
+    assert not ok("https://www.youtube.com")
+    assert not ok("https://example.com/watch?v=dQw4w9WgXcQ")
+
+
+def test_a_track_code_the_table_does_not_know_is_still_listed_and_pickable():
+    v = video(language="xx", subtitles={"xx": [track("https://c.example/xx")]})
+
+    assert described(v, ["en"]) == [("xx", "xx", "manual", True)]
+    assert pick_track(v, ["xx"], any_language=False)[0] == "xx"

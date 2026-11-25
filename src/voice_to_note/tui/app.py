@@ -758,6 +758,9 @@ class ImportYouTube(ModalScreen[None]):
         self.query_one("#youtube-url", Input).focus()
         if self.stale_template:
             self.notify(self.stale_template, severity="warning")
+        broken = services.caption_preference_problem()
+        if broken:
+            self.notify(broken, severity="warning")
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         self._send()
@@ -778,6 +781,8 @@ class ImportYouTube(ModalScreen[None]):
             self._looked = None
             self._show_choices(services.preferred_caption_choices(), "", keep=False)
             self.query_one("#youtube-video", Label).update("")
+        if self._asked != self._link():
+            self._asked = ""
         if self._pause is not None:
             self._pause.stop()
         self._pause = self.set_timer(0.6, self._lookup)
@@ -789,13 +794,15 @@ class ImportYouTube(ModalScreen[None]):
             self._lookup()
 
     def _lookup(self) -> None:
-        """Starts the lookup for the link in the field, unless it is not a link
-        yet or is the one already known or already being asked about."""
+        """Starts the lookup for the link in the field, unless it is not yet a
+        whole video link, or is one already known, being asked about, or asked
+        about and failed — a failure is final until the text changes, or a
+        blur would retry the same doomed request every time focus moved."""
         if self._pause is not None:
             self._pause.stop()
             self._pause = None
         url = self._link()
-        if not url.startswith(("http://", "https://")):
+        if not services.is_video_link(url):
             return
         if url == self._asked or (self._looked is not None and self._looked[0] == url):
             return
@@ -836,7 +843,6 @@ class ImportYouTube(ModalScreen[None]):
         answer for a link that has since been changed is dropped."""
         if url != self._link():
             return
-        self._asked = ""
         first = reason.strip().splitlines()[0] if reason.strip() else "unknown error"
         self.query_one("#youtube-video", Label).update(f"could not look the video up: {first}")
 
@@ -858,7 +864,8 @@ class ImportYouTube(ModalScreen[None]):
             label.update(f"{heading}\nno captions on this video — nothing to import")
             self._show_choices([("no captions", "")], "")
             return
-        label.update(heading)
+        notice = services.caption_notice(video)
+        label.update(f"{heading}\n{notice}" if notice else heading)
         self._show_choices(options, services.taken_caption(video))
 
     def action_start(self) -> None:

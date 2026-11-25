@@ -1,5 +1,6 @@
 import difflib
 import re
+from collections.abc import Collection
 
 # the languages somebody is likely to want captions in, by the code YouTube
 # files them under. Not every language yt-dlp can report: a track in a
@@ -20,9 +21,53 @@ LANGUAGES: dict[str, str] = {
 }
 
 _BY_NAME = {name.lower(): code for code, name in LANGUAGES.items()}
-# what a language code looks like: two or three letters, then optional
-# regional or script subtags ("pt-BR", "zh-Hans")
-_CODE = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]+)*$")
+
+# what people call their own language, for the ones likely to be typed that
+# way; matched case-insensitively like the English names
+_NATIVE = {
+    "українська": "uk", "polski": "pl", "deutsch": "de", "español": "es",
+    "francais": "fr", "français": "fr", "italiano": "it", "português": "pt",
+    "portugues": "pt", "nederlands": "nl", "русский": "ru", "čeština": "cs",
+    "svenska": "sv", "norsk": "no", "suomi": "fi", "magyar": "hu",
+    "română": "ro", "türkçe": "tr", "日本語": "ja", "한국어": "ko", "中文": "zh",
+}
+
+# every two-letter code ISO 639-1 defines. A code outside this list is a typo
+# or a country code, and passing it on would only ever fail to match
+ISO_639_1 = frozenset(
+    "aa ab ae af ak am an ar as av ay az ba be bg bh bi bm bn bo br bs ca ce ch"
+    " co cr cs cu cv cy da de dv dz ee el en eo es et eu fa ff fi fj fo fr fy ga"
+    " gd gl gn gu gv ha he hi ho hr ht hu hy hz ia id ie ig ii ik io is it iu ja"
+    " jv ka kg ki kj kk kl km kn ko kr ks ku kv kw ky la lb lg li ln lo lt lu lv"
+    " mg mh mi mk ml mn mr ms mt my na nb nd ne ng nl nn no nr nv ny oc oj om or"
+    " os pa pi pl ps pt qu rm rn ro ru rw sa sc sd se sg si sk sl sm sn so sq sr"
+    " ss st su sv sw ta te tg th ti tk tl tn to tr ts tt tw ty ug uk ur uz ve vi"
+    " vo wa wo xh yi yo za zh zu".split()
+)
+
+# the three-letter ISO 639-2 codes people reach for, for the languages in the
+# table (both the bibliographic and the terminologic spelling where they differ)
+_THREE = {
+    "ara": "ar", "bul": "bg", "ben": "bn", "cat": "ca", "ces": "cs", "cze": "cs",
+    "dan": "da", "deu": "de", "ger": "de", "ell": "el", "gre": "el", "eng": "en",
+    "spa": "es", "est": "et", "fas": "fa", "per": "fa", "fin": "fi", "fra": "fr",
+    "fre": "fr", "heb": "he", "hin": "hi", "hrv": "hr", "hun": "hu", "ind": "id",
+    "ita": "it", "jpn": "ja", "kor": "ko", "lit": "lt", "lav": "lv", "nld": "nl",
+    "dut": "nl", "nor": "no", "pol": "pl", "por": "pt", "ron": "ro", "rum": "ro",
+    "rus": "ru", "slk": "sk", "slo": "sk", "slv": "sl", "srp": "sr", "swe": "sv",
+    "tha": "th", "tur": "tr", "ukr": "uk", "vie": "vi", "zho": "zh", "chi": "zh",
+}
+
+# country codes mistaken for language codes. "kr" is a real ISO code (Kanuri)
+# but no video is captioned in it, and Korea's "kr" is by far the likelier
+# intent, so it is treated as the mistake it almost always is
+_COUNTRY = {
+    "ua": "uk", "jp": "ja", "cn": "zh", "gr": "el", "cz": "cs", "dk": "da",
+    "kr": "ko", "se": "sv", "us": "en", "gb": "en",
+}
+
+# a language code: two or three letters, optional regional or script subtags
+_CODE = re.compile(r"^([A-Za-z]{2,3})(-[A-Za-z0-9]+)*$")
 
 
 def primary(code: str) -> str:
@@ -45,35 +90,57 @@ def language_name(code: str, reported: str = "") -> str:
     return LANGUAGES.get(base.lower()) or name or code
 
 
-def resolve_language(text: str) -> str:
-    """One language as a person typed it — a name ("Ukrainian") or a code
-    ("uk", "pt-BR") — as the code to look for. Names resolve through the
-    table only. Anything that is neither a known name nor shaped like a code
-    is refused with the nearest names, because a typo passed on as a code would
-    surface as a misleading "no such captions" after a network round trip.
-    Codes outside the table are let through for the same reason the table is
-    not exhaustive."""
+def resolve_language(text: str, offered: Collection[str] = ()) -> str:
+    """One language as a person typed it — a name ("Ukrainian", "polski") or a
+    code ("uk", "ukr", "pt-BR") — as the code to look for. Names resolve
+    through the table; two-letter codes must be real ISO 639-1 codes and
+    three-letter ones are mapped to them where the language is in the table.
+    The usual country-code slips ("ua", "jp") are refused with what was
+    probably meant, because passing one on would silently never match and the
+    preference would quietly lose a language. Strictness is for what a person
+    types: a code the video itself offers (`offered`) is always accepted, so a
+    track the table has never heard of can still be picked from the video's own
+    list."""
     word = text.strip()
     key = word.lower()
+    for code in offered:
+        if code.lower() == key:
+            return code
     if key in _BY_NAME:
         return _BY_NAME[key]
-    if key in LANGUAGES:
-        return key
-    if _CODE.match(word) and (len(word) <= 3 or "-" in word):
-        return primary(word) + word[len(primary(word)):]
+    if key in _NATIVE:
+        return _NATIVE[key]
+    if key in _COUNTRY:
+        meant = _COUNTRY[key]
+        raise ValueError(
+            f"unknown caption language {word!r} — did you mean {meant}"
+            f" ({LANGUAGES[meant]})?"
+        )
+    match = _CODE.match(word)
+    if match:
+        base = match.group(1).lower()
+        rest = word[len(base):]
+        if len(base) == 2 and base in ISO_639_1:
+            return base + rest
+        if len(base) == 3 and base in _THREE:
+            return _THREE[base] + rest
+        if len(base) == 3 and base not in _BY_NAME:
+            # a three-letter code outside the table ("fil", "yue") is what
+            # yt-dlp itself uses for languages that have no two-letter one
+            return base + rest
     close = difflib.get_close_matches(key, list(_BY_NAME), n=3, cutoff=0.6)
     hint = f" — did you mean {', '.join(name.title() for name in close)}?" if close else ""
     raise ValueError(f"unknown caption language {word!r}{hint}")
 
 
-def parse_languages(text: str) -> list[str]:
+def parse_languages(text: str, offered: Collection[str] = ()) -> list[str]:
     """A comma-separated preference as codes, in the order given, duplicates
     dropped. Blank entries are skipped so a trailing comma in a hand-edited
     config is harmless."""
     codes: list[str] = []
     for part in text.split(","):
         if part.strip():
-            code = resolve_language(part)
+            code = resolve_language(part, offered)
             if code not in codes:
                 codes.append(code)
     return codes

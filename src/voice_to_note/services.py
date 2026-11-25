@@ -89,8 +89,10 @@ from .transforms.youtube import (
     caption_label,
     caption_langs,
     describe_captions,
+    looks_like_video_link,
     pick_track,
     segments_from_captions,
+    track_codes,
     video_from_info,
 )
 
@@ -1837,19 +1839,52 @@ def youtube_heading(video: YouTubeVideo) -> str:
 _NO_CAPTIONS = "no captions on this video — vtn imports captions, it does not transcribe audio"
 
 
-def caption_preference(text: str | None = None) -> list[str]:
+def is_video_link(text: str) -> bool:
+    """Whether text is a complete YouTube video link, so a form can wait to
+    look a video up until what was typed could be one."""
+    return looks_like_video_link(text)
+
+
+def caption_preference(text: str | None = None, offered: Sequence[str] = ()) -> list[str]:
     """The caption languages to look for, as codes in order of preference:
     what was asked for, or the youtube_lang setting when nothing was. Names and
     codes are both accepted, so "english, uk, Polish" is a valid answer in a
-    config file or on a command line. A name nobody knows is refused with the
-    nearest ones, saying which of the two places it came from, since the same
-    typo means different fixes in each."""
+    config file or on a command line, and a code the video itself offers is
+    accepted whatever it is. A name nobody knows is refused with the nearest
+    ones, saying which of the two places it came from, since the same typo
+    means different fixes in each. A request that names no language at all
+    (only separators) is refused rather than read as "any"."""
     source = text if text is not None else config.YOUTUBE_LANG
     try:
-        return parse_languages(source)
+        codes = parse_languages(source, offered)
     except ValueError as e:
         origin = "" if text is not None else " (setting youtube_lang)"
         raise InvalidInput(f"{e}{origin}") from e
+    if text is not None and not codes:
+        raise InvalidInput("name a caption language, e.g. --lang ukrainian")
+    return codes
+
+
+def caption_preference_problem() -> str | None:
+    """What is wrong with the youtube_lang setting, in one line, or nothing
+    when it reads. For a front end to say out loud once: a setting edited by
+    hand must not stop a form from working, but it must not fail silently
+    either."""
+    try:
+        caption_preference()
+    except InvalidInput as e:
+        return str(e)
+    return None
+
+
+def _setting_preference() -> list[str]:
+    """The youtube_lang preference, or none at all when it does not read. Used
+    where a listing is built for a person to look at: an unreadable setting
+    then shows the video's own languages instead of taking the screen down."""
+    try:
+        return caption_preference()
+    except InvalidInput:
+        return []
 
 
 def preferred_caption_choices() -> list[tuple[str, str]]:
@@ -1857,22 +1892,31 @@ def preferred_caption_choices() -> list[tuple[str, str]]:
     "automatic" — leave the choice to the preference order — and then each
     preferred language by name, so the languages somebody always wants are one
     pick away without knowing whether this video has them. A preference that
-    cannot be read yields only "automatic": the import itself will say why."""
-    try:
-        codes = caption_preference()
-    except InvalidInput:
-        codes = []
-    return [("automatic", "")] + [(language_name(code), code) for code in codes]
+    cannot be read yields only "automatic"."""
+    return [("automatic", "")] + [
+        (language_name(code), code) for code in _setting_preference()
+    ]
 
 
 def youtube_captions(video: YouTubeVideo, lang: str | None = None) -> list[CaptionLang]:
     """The languages a video can be captioned in, as the import would see them:
     preferred ones first and the one it would take marked. Given a language
     the way --lang is, the walk is strict about it, so what is marked is what
-    that flag would fetch."""
+    that flag would fetch. An unreadable setting counts as no preference."""
     if lang:
-        return describe_captions(video, caption_preference(lang), any_language=False)
-    return describe_captions(video, caption_preference())
+        wanted = caption_preference(lang, track_codes(video))
+        return describe_captions(video, wanted, any_language=False)
+    return describe_captions(video, _setting_preference())
+
+
+def caption_notice(video: YouTubeVideo) -> str | None:
+    """A caution to show beside a video whose only captions are YouTube's
+    machine translation of its speech, which read worse than anything written
+    or recognised from the audio."""
+    for c in youtube_captions(video):
+        if c.taken and c.kind == "translated":
+            return "only machine-translated captions are available"
+    return None
 
 
 def caption_options(video: YouTubeVideo) -> list[tuple[str, str]]:
@@ -1908,7 +1952,9 @@ def import_youtube(
     make a video unimportable."""
     project = chosen_project(repo, project) or "other"
     if lang:
-        picked = pick_track(video, caption_preference(lang), any_language=False)
+        picked = pick_track(
+            video, caption_preference(lang, track_codes(video)), any_language=False
+        )
         if picked is None:
             offered = caption_langs(video)
             if not offered and not video.automatic_captions:
