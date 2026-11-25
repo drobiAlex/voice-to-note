@@ -3322,6 +3322,25 @@ def set_todo_status(repo: Repository, todo_id: int, status: str) -> None:
         raise NotFound(f"no to-do with id {todo_id}")
 
 
+def close_memo_todos(repo: Repository, memo_id: int) -> list[int]:
+    """Checks off everything one memo still has open, for a recording whose
+    tasks went stale without anybody revisiting it, and returns the ids closed
+    so the caller can offer to reopen exactly those. A memo with nothing open
+    closes nothing and says so with an empty list: that is an answer, not a
+    failure. The note's boxes need no touching here, since a note is drawn from
+    the stored statuses every time it is read. A binned memo is refused like
+    every other action on one."""
+    require_memo(repo, memo_id)
+    return repo.close_open_todos(memo_id)
+
+
+def reopen_todos(repo: Repository, todo_ids: Sequence[int]) -> list[int]:
+    """Puts exactly the given to-dos back on the list — the undo of closing a
+    memo's, which must not reopen what was finished by hand before it. Returns
+    the ones that really changed."""
+    return repo.reopen_todos(todo_ids)
+
+
 def rename_speaker(repo: Repository, memo_id: int, label: str, name: str) -> None:
     """Puts a real name on a speaker so later memos recognise that voice. A name
     of nothing is refused: empty is not the same as unnamed to the database, so
