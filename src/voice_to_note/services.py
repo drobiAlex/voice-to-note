@@ -49,6 +49,7 @@ from .gateways import (
 )
 from .storage.repository import Repository
 from .transforms import metrics
+from .transforms.languages import language_name, parse_languages
 from .transforms.live import (
     SEARCH_S,
     cut_offset,
@@ -83,8 +84,11 @@ from .transforms.speakers import (
 from .transforms.templates import Details, ParsedTemplate, TemplateError
 from .transforms.todos import is_mine, normalize
 from .transforms.youtube import (
+    CaptionLang,
     YouTubeVideo,
+    caption_label,
     caption_langs,
+    describe_captions,
     pick_track,
     segments_from_captions,
     video_from_info,
@@ -1833,6 +1837,60 @@ def youtube_heading(video: YouTubeVideo) -> str:
 _NO_CAPTIONS = "no captions on this video — vtn imports captions, it does not transcribe audio"
 
 
+def caption_preference(text: str | None = None) -> list[str]:
+    """The caption languages to look for, as codes in order of preference:
+    what was asked for, or the youtube_lang setting when nothing was. Names and
+    codes are both accepted, so "english, uk, Polish" is a valid answer in a
+    config file or on a command line. A name nobody knows is refused with the
+    nearest ones, saying which of the two places it came from, since the same
+    typo means different fixes in each."""
+    source = text if text is not None else config.YOUTUBE_LANG
+    try:
+        return parse_languages(source)
+    except ValueError as e:
+        origin = "" if text is not None else " (setting youtube_lang)"
+        raise InvalidInput(f"{e}{origin}") from e
+
+
+def preferred_caption_choices() -> list[tuple[str, str]]:
+    """What a language picker offers before any video has been looked up:
+    "automatic" — leave the choice to the preference order — and then each
+    preferred language by name, so the languages somebody always wants are one
+    pick away without knowing whether this video has them. A preference that
+    cannot be read yields only "automatic": the import itself will say why."""
+    try:
+        codes = caption_preference()
+    except InvalidInput:
+        codes = []
+    return [("automatic", "")] + [(language_name(code), code) for code in codes]
+
+
+def youtube_captions(video: YouTubeVideo, lang: str | None = None) -> list[CaptionLang]:
+    """The languages a video can be captioned in, as the import would see them:
+    preferred ones first and the one it would take marked. Given a language
+    the way --lang is, the walk is strict about it, so what is marked is what
+    that flag would fetch."""
+    if lang:
+        return describe_captions(video, caption_preference(lang), any_language=False)
+    return describe_captions(video, caption_preference())
+
+
+def caption_options(video: YouTubeVideo) -> list[tuple[str, str]]:
+    """A video's caption languages as (label, code) pairs for a picker, in the
+    order the captions listing gives them. Empty for a video with no captions,
+    which is the caller's cue to say so rather than offer a choice."""
+    return [(caption_label(c), c.code) for c in youtube_captions(video)]
+
+
+def taken_caption(video: YouTubeVideo) -> str | None:
+    """The code of the language an import with no explicit choice would take,
+    for preselecting it in a picker."""
+    for c in youtube_captions(video):
+        if c.taken:
+            return c.code
+    return None
+
+
 def import_youtube(
     repo: Repository,
     video: YouTubeVideo,
@@ -1844,27 +1902,31 @@ def import_youtube(
     were never audio on this machine. The memo lands exactly where a
     transcription does ('transcribed', timed segments, no speakers), so
     everything downstream — extract, refine, ask, chat — treats it as any
-    other memo. A language asked for by name must be there or the import
-    refuses, naming what is; the configured preference merely ranks the
-    tracks, because a default must not make a video unimportable."""
+    other memo. Languages asked for by name (one, or several in order of
+    preference) must be there or the import refuses, naming what is; the
+    configured preference merely ranks the tracks, because a default must not
+    make a video unimportable."""
     project = chosen_project(repo, project) or "other"
     if lang:
-        picked = pick_track(video, [lang], any_language=False)
+        picked = pick_track(video, caption_preference(lang), any_language=False)
         if picked is None:
             offered = caption_langs(video)
-            if not offered:
+            if not offered and not video.automatic_captions:
                 raise InvalidInput(_NO_CAPTIONS)
             listed = ", ".join(offered[:20]) + (" …" if len(offered) > 20 else "")
-            raise InvalidInput(f"no {lang} captions on this video — available: {listed}")
+            raise InvalidInput(
+                f"no {lang} captions on this video — available: {listed or 'none'}"
+            )
     else:
-        preferred = [t.strip() for t in config.YOUTUBE_LANG.split(",") if t.strip()]
-        picked = pick_track(video, preferred)
+        picked = pick_track(video, caption_preference())
         if picked is None:
             raise InvalidInput(_NO_CAPTIONS)
     track_lang, track_url, auto = picked
+    kind = next((c.kind for c in youtube_captions(video, lang) if c.code == track_lang), "")
     # auto-generated is worth flagging while the download runs: unpunctuated
     # captions are why these notes may read rougher than a manual track's
-    log(f"downloading captions ({track_lang}, {'auto-generated' if auto else 'manual'}) …")
+    how = {"auto": "auto-generated", "translated": "machine-translated"}.get(kind, "manual")
+    log(f"downloading captions ({track_lang}, {how}) …")
     with tracked(repo, "youtube", auto_captions=auto) as run, stage("captions"):
         run.audio_s = video.duration_s
         segs = segments_from_captions(youtube.captions(track_url))

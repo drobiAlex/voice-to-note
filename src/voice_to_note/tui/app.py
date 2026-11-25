@@ -417,6 +417,9 @@ class YouTubeOptions:
     template: str
     steps: frozenset[str]
     answers: dict[str, str] = field(default_factory=dict)
+    # the video the form already looked up for this very link, so the import
+    # does not ask YouTube about it a second time
+    video: services.YouTubeVideo | None = None
 
 
 # What the project line says when it is empty, and the key that opens the
@@ -722,13 +725,24 @@ class ImportYouTube(ModalScreen[None]):
         self.store = store
         self.projects = projects
         self.template, self.stale_template = _form_template("youtube")
+        # the link last looked up and what it turned out to be, and the link a
+        # lookup is in flight for — so the same text is never asked twice and an
+        # answer for a link that has since been edited is recognised as stale
+        self._looked: tuple[str, services.YouTubeVideo] | None = None
+        self._asked = ""
+        self._pause: Timer | None = None
 
     def compose(self) -> ComposeResult:
         yield Input(placeholder="YouTube URL", id="youtube-url")
+        yield Label("", id="youtube-video")
         yield Label(_PROJECT_LABEL, id="youtube-project-label")
         yield Input(self.project, placeholder=_PROJECT_PLACEHOLDER, id="youtube-project")
-        yield Input(
-            placeholder="caption language (automatic)", id="youtube-language"
+        yield Label("Caption language", id="youtube-language-label")
+        yield Select(
+            services.preferred_caption_choices(),
+            allow_blank=False,
+            value="",
+            id="youtube-language",
         )
         yield Select(
             [(name, name) for name in services.note_templates()],
@@ -747,6 +761,105 @@ class ImportYouTube(ModalScreen[None]):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         self._send()
+
+    def _link(self) -> str:
+        """The link as it stands in the field right now."""
+        return self.query_one("#youtube-url", Input).value.strip()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Forgets what was known about the previous link the moment the text
+        stops being that link, and looks the new one up after a short pause in
+        typing — a lookup per keystroke would hammer YouTube with half a URL,
+        and waiting for Enter would leave the language list guessing until the
+        form is already being sent."""
+        if event.input.id != "youtube-url":
+            return
+        if self._looked is not None and self._looked[0] != self._link():
+            self._looked = None
+            self._show_choices(services.preferred_caption_choices(), "", keep=False)
+            self.query_one("#youtube-video", Label).update("")
+        if self._pause is not None:
+            self._pause.stop()
+        self._pause = self.set_timer(0.6, self._lookup)
+
+    def on_input_blurred(self, event: Input.Blurred) -> None:
+        """Leaving the link field looks the video up at once, without waiting
+        out the typing pause."""
+        if event.input.id == "youtube-url":
+            self._lookup()
+
+    def _lookup(self) -> None:
+        """Starts the lookup for the link in the field, unless it is not a link
+        yet or is the one already known or already being asked about."""
+        if self._pause is not None:
+            self._pause.stop()
+            self._pause = None
+        url = self._link()
+        if not url.startswith(("http://", "https://")):
+            return
+        if url == self._asked or (self._looked is not None and self._looked[0] == url):
+            return
+        self._asked = url
+        self.query_one("#youtube-video", Label).update("looking up the video …")
+        self._fetch(url)
+
+    @work(thread=True)
+    def _fetch(self, url: str) -> None:
+        """Asks about the video off the UI thread, because it waits on yt-dlp
+        for seconds. Only failures a person can act on are caught; a bug keeps
+        its traceback."""
+        try:
+            video = services.youtube_video(url)
+        except (GatewayError, services.InvalidInput) as failed:
+            self.app.call_from_thread(self._lookup_failed, url, str(failed))
+            return
+        self.app.call_from_thread(self._looked_up, url, video)
+
+    def _show_choices(
+        self, options: list[tuple[str, str]], chosen: str | None, keep: bool = True
+    ) -> None:
+        """Replaces what the language picker offers, keeping the person's own
+        pick when it is still on offer (unless `keep` is off, as when the video
+        changed and the old pick belonged to it) and otherwise taking `chosen`."""
+        picker = self.query_one("#youtube-language", Select)
+        before = picker.value
+        picker.set_options(options)
+        codes = [code for _label, code in options]
+        if keep and before in codes:
+            picker.value = before
+        elif chosen in codes:
+            picker.value = chosen
+
+    def _lookup_failed(self, url: str, reason: str) -> None:
+        """Says in one line why the video could not be looked up and leaves the
+        form as usable as before: automatic and the preferred languages. An
+        answer for a link that has since been changed is dropped."""
+        if url != self._link():
+            return
+        self._asked = ""
+        first = reason.strip().splitlines()[0] if reason.strip() else "unknown error"
+        self.query_one("#youtube-video", Label).update(f"could not look the video up: {first}")
+
+    def _looked_up(self, url: str, video: services.YouTubeVideo) -> None:
+        """Shows what the video is — so a wrong link is caught here — and
+        replaces the picker with the languages it really has, named with their
+        kind and the one an import would take preselected. A video with no
+        captions says so now instead of failing after submit. An answer for a
+        link that has since been changed is dropped, or it would overwrite the
+        picker of the video now in the field."""
+        if url != self._link():
+            return
+        self._asked = ""
+        self._looked = (url, video)
+        heading = services.youtube_heading(video)
+        options = services.caption_options(video)
+        label = self.query_one("#youtube-video", Label)
+        if not options:
+            label.update(f"{heading}\nno captions on this video — nothing to import")
+            self._show_choices([("no captions", "")], "")
+            return
+        label.update(heading)
+        self._show_choices(options, services.taken_caption(video))
 
     def action_start(self) -> None:
         self._send()
@@ -780,11 +893,18 @@ class ImportYouTube(ModalScreen[None]):
                 template = self.template
             template = str(template)
             services.note_template(template)
-            language = self.query_one("#youtube-language", Input).value.strip() or None
+            picked = self.query_one("#youtube-language", Select).value
+            language = picked if isinstance(picked, str) and picked else None
+            looked = self._looked[1] if self._looked and self._looked[0] == url else None
+            if looked is not None and not services.caption_options(looked):
+                raise services.InvalidInput(
+                    "no captions on this video — vtn imports captions, it does not"
+                    " transcribe audio"
+                )
             steps = frozenset(
                 self.query_one("#youtube-steps", SelectionList).selected
             )
-            options = YouTubeOptions(project, language, template, steps)
+            options = YouTubeOptions(project, language, template, steps, video=looked)
             questions = services.template_questions(template) if "notes" in steps else []
             if not questions:
                 self.store(url, options)
@@ -3222,8 +3342,10 @@ class MemoApp(App[None]):
     def _youtube_imported(
         self, repo: Repository, url: str, options: YouTubeOptions
     ) -> str:
-        self._stage("fetching video info …")
-        video = services.youtube_video(url)
+        video = options.video
+        if video is None:
+            self._stage("fetching video info …")
+            video = services.youtube_video(url)
         self._stage(services.youtube_heading(video))
         stored = services.find_youtube_duplicate(repo, video)
         if stored is not None:

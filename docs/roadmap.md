@@ -22,6 +22,7 @@ What vtn can do today, and what has been planned but not built.
 - [x] See live level meters and a silence hint while recording (`--levels` for scripts)
 - [x] Transcribe a meeting while it records, so stopping leaves only the last stretch to do
 - [x] Import a YouTube video's captions as a memo with `vtn youtube`
+- [x] Choose caption languages by name: an ordered `youtube_lang` preference (names or codes), `vtn youtube --captions` to list what a video has, and a language picker in the TUI form that looks the video up and names each language with its kind (written, auto-generated, translated)
 
 ### Transcription
 

@@ -38,6 +38,8 @@ Re-run it to upgrade.
 vtn record --project work         # tape this Mac's meeting, then process it
 vtn process ~/memos/standup.m4a   # transcribe, diarize, extract notes
 vtn youtube <url>                 # import a video's captions as a memo
+vtn youtube <url> --captions      # list which caption languages the video has (add --json), importing nothing
+vtn youtube <url> --lang ukrainian,polish   # languages by name or code, tried in order
 vtn tui                           # browse and edit everything
 vtn notes 3                       # print the notes for memo 3
 vtn todos                         # open to-dos across all memos
@@ -52,6 +54,7 @@ vtn ask 3 "who owns the launch?"  # ask a question about a memo
 - To-dos survive re-extraction: checked-off items stay checked.
 - Projects, tags, an archive drawer and a bin that deleted memos wait in until you empty it, from the TUI or the CLI.
 - Live transcription while a meeting records.
+- Caption languages by name. Set `youtube_lang` once (`vtn config`, e.g. `english, ukrainian, polish`; codes like `en,uk,pl` work too) and the import form (`y`) offers those languages, then, once a link is pasted, looks the video up and lists the languages it really has: `English`, `Ukrainian (auto-generated)`, `Polish (translated)`. A translation is YouTube's machine translation of the speech, offered only into a language you prefer and never taken in place of a track the video has.
 - Custom note templates beside the built-in ones. A template can add sections of its own with a few lines of TOML front matter (the shipped `video` template asks "Worth watching?", "Questions answered" and "Hidden insights"), and can ask the person questions first, answered in the TUI or with `--var key=value` (see below), each kind of source has its own default (`vtn config` → `youtube_template`, `record_template`, `file_template`), and a memo remembers its template for the next re-extraction.
 - A menu bar recorder: [`docs/menubar.md`](docs/menubar.md).
 

@@ -242,7 +242,8 @@ SETTINGS: dict[str, Setting] = {
     "youtube_lang": Setting(
         "en",
         str,
-        "caption languages preferred for a youtube import, in order; first available wins",
+        "caption languages preferred for a youtube import, in order, as names or codes"
+        " (english, ukrainian, polish or en,uk,pl); first available wins",
     ),
     # the three template settings take any note template, built-in or one the
     # user dropped into templates/, and those are only known at run time — so

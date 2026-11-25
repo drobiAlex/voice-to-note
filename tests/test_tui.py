@@ -6360,3 +6360,248 @@ async def test_an_empty_project_survives_the_questions_and_leaves_the_filing_to_
     assert [m.project for m in repo.memos() if m.filename == "A lecture"] == ["other"]
     assert seen["answers"] == {"goal": "", "audience": "juniors"}
     assert seen["may_file"] is True
+
+
+# --- choosing a caption language in the YouTube form ----------------------------
+
+
+def captioned(**overrides):
+    fields = dict(
+        video_id="abc", url="https://www.youtube.com/watch?v=abc", title="A lecture",
+        channel="Teacher", duration_s=60.0, uploaded_at="2026-01-01T00:00:00Z",
+        language="en", is_live=False,
+        subtitles={"uk": [{"url": "https://c.example/uk", "ext": "json3"}]},
+        automatic_captions={
+            "en-orig": [{"url": "https://c.example/en", "ext": "json3"}],
+            "pl": [{"url": "https://c.example/?tlang=pl", "ext": "json3"}],
+            "de": [{"url": "https://c.example/?tlang=de", "ext": "json3"}],
+        },
+    )
+    fields.update(overrides)
+    return services.YouTubeVideo(**fields)
+
+
+def language_choices(pilot) -> list[tuple[str, str]]:
+    """What the language picker offers as (words, code), read from the widget."""
+    picker = pilot.app.screen.query_one("#youtube-language", Select)
+    return [(str(label), value) for label, value in picker._options if value != Select.NULL]
+
+
+def picked_language(pilot):
+    return pilot.app.screen.query_one("#youtube-language", Select).value
+
+
+def video_line(pilot) -> str:
+    return str(pilot.app.screen.query_one("#youtube-video", Label).content)
+
+
+async def lookups_done(pilot) -> None:
+    """Waits for any video lookup the form started, and the screen to catch up."""
+    lookups = [w for w in pilot.app.workers if w.name == "_fetch"]
+    if lookups:
+        await pilot.app.workers.wait_for_complete(lookups)
+    await pilot.pause()
+
+
+async def type_link(pilot, url: str) -> None:
+    """Types a link into the form and waits out the pause after which the video
+    is looked up, and the lookup itself."""
+    pilot.app.screen.query_one("#youtube-url", Input).value = url
+    await pilot.pause(0.9)
+    await lookups_done(pilot)
+
+
+@pytest.fixture
+def wanted_languages(monkeypatch):
+    monkeypatch.setattr(config, "YOUTUBE_LANG", "english,ukrainian,polish")
+    monkeypatch.setattr(config, "YOUTUBE_TEMPLATE", "notes")
+
+
+@pytest.mark.asyncio
+async def test_the_language_picker_offers_automatic_and_the_preferred_languages_before_a_lookup(
+    repo, wanted_languages
+):
+    seed(repo)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+
+        assert language_choices(pilot) == [
+            ("automatic", ""), ("English", "en"), ("Ukrainian", "uk"), ("Polish", "pl"),
+        ]
+        assert picked_language(pilot) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_looked_up_video_is_named_and_its_real_languages_replace_the_picker(
+    repo, monkeypatch, wanted_languages
+):
+    seed(repo)
+    monkeypatch.setattr(services, "youtube_video", lambda _url: captioned())
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+        await type_link(pilot, "https://youtu.be/abc")
+
+        assert "A lecture" in video_line(pilot) and "Teacher" in video_line(pilot)
+        # preferred ones first; German is a translation nobody asked for, so absent
+        assert language_choices(pilot) == [
+            ("English (auto-generated)", "en"),
+            ("Ukrainian", "uk"),
+            ("Polish (translated)", "pl"),
+        ]
+        assert picked_language(pilot) == "uk"
+
+
+@pytest.mark.asyncio
+async def test_leaving_the_link_field_looks_the_video_up_without_waiting(
+    repo, monkeypatch, wanted_languages
+):
+    seed(repo)
+    monkeypatch.setattr(services, "youtube_video", lambda _url: captioned())
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+        pilot.app.screen.query_one("#youtube-url", Input).value = "https://youtu.be/abc"
+        await pilot.press("tab")
+        await lookups_done(pilot)
+
+        assert picked_language(pilot) == "uk"
+
+
+@pytest.mark.asyncio
+async def test_a_video_without_captions_says_so_on_the_form_and_will_not_be_sent(
+    repo, monkeypatch, wanted_languages
+):
+    seed(repo)
+    monkeypatch.setattr(
+        services, "youtube_video",
+        lambda _url: captioned(subtitles={}, automatic_captions={}),
+    )
+    monkeypatch.setattr(
+        services, "import_youtube", lambda *a, **k: pytest.fail("imported a captionless video")
+    )
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+        await type_link(pilot, "https://youtu.be/abc")
+
+        assert "no captions on this video" in video_line(pilot)
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        assert showing(pilot.app, "#youtube-url")
+        assert any("no captions" in message for message in said(pilot))
+
+
+@pytest.mark.asyncio
+async def test_a_failed_lookup_says_why_in_one_line_and_leaves_the_form_usable(
+    repo, monkeypatch, wanted_languages
+):
+    seed(repo)
+
+    def offline(_url):
+        raise GatewayError("yt-dlp failed reading the link\nsecond line of detail")
+
+    monkeypatch.setattr(services, "youtube_video", offline)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+        await type_link(pilot, "https://youtu.be/abc")
+
+        assert video_line(pilot) == "could not look the video up: yt-dlp failed reading the link"
+        assert language_choices(pilot)[0] == ("automatic", "")
+        assert len(language_choices(pilot)) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_lookup_that_finishes_after_the_link_changed_does_not_touch_the_picker(
+    repo, monkeypatch, wanted_languages
+):
+    seed(repo)
+    release = threading.Event()
+
+    def slow(_url):
+        release.wait(5)
+        return captioned()
+
+    monkeypatch.setattr(services, "youtube_video", slow)
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+        line = pilot.app.screen.query_one("#youtube-url", Input)
+        line.value = "https://youtu.be/abc"
+        await pilot.pause(0.9)
+        line.value = "https://youtu.be/other"
+        release.set()
+        await lookups_done(pilot)
+
+        assert "A lecture" not in video_line(pilot)
+        assert [code for _label, code in language_choices(pilot)] == ["", "en", "uk", "pl"]
+
+
+@pytest.mark.asyncio
+async def test_the_language_chosen_on_the_form_reaches_the_import_with_the_video_already_fetched(
+    repo, monkeypatch, wanted_languages
+):
+    seed(repo)
+    fetches = []
+    seen = {}
+
+    def lookup(url):
+        fetches.append(url)
+        return captioned()
+
+    def import_video(worker_repo, video, project=None, lang=None, log=None):
+        seen["lang"] = lang
+        memo_id = worker_repo.create_memo(
+            filename=video.title, wav_path="", duration_s=60.0, language="pl",
+            segments=[Segment(0, 1000, "an idea")], speakers=(),
+            project=project or "other", source_url=video.url,
+        )
+        return services.ProcessResult(memo_id, 1, [], "pl")
+
+    monkeypatch.setattr(services, "youtube_video", lookup)
+    monkeypatch.setattr(services, "find_youtube_duplicate", lambda _repo, _video: None)
+    monkeypatch.setattr(services, "import_youtube", import_video)
+    monkeypatch.setattr(services, "run_extraction", lambda *a, **k: "claude")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+        await type_link(pilot, "https://youtu.be/abc")
+        pilot.app.screen.query_one("#youtube-language", Select).value = "pl"
+        await pilot.press("enter")
+        await finish_jobs(pilot)
+
+        assert seen["lang"] == "pl"
+        assert fetches == ["https://youtu.be/abc"]
+
+
+@pytest.mark.asyncio
+async def test_a_form_sent_before_any_lookup_leaves_the_language_to_the_preference(
+    repo, monkeypatch, wanted_languages
+):
+    seed(repo)
+    seen = {}
+
+    def import_video(worker_repo, video, project=None, lang=None, log=None):
+        seen["lang"] = lang
+        memo_id = worker_repo.create_memo(
+            filename=video.title, wav_path="", duration_s=60.0, language="en",
+            segments=[Segment(0, 1000, "an idea")], speakers=(),
+            project=project or "other", source_url=video.url,
+        )
+        return services.ProcessResult(memo_id, 1, [], "en")
+
+    monkeypatch.setattr(services, "youtube_video", lambda _url: captioned())
+    monkeypatch.setattr(services, "find_youtube_duplicate", lambda _repo, _video: None)
+    monkeypatch.setattr(services, "import_youtube", import_video)
+    monkeypatch.setattr(services, "run_extraction", lambda *a, **k: "claude")
+
+    async with MemoApp(repo).run_test() as pilot:
+        await open_youtube_modal(pilot)
+        pilot.app.screen.query_one("#youtube-url", Input).value = "https://youtu.be/abc"
+        await pilot.press("ctrl+s")
+        await finish_jobs(pilot)
+
+        assert seen["lang"] is None

@@ -183,3 +183,115 @@ def test_newline_only_events_never_reach_a_segment():
 def test_a_track_that_is_not_json_names_the_format_problem():
     with pytest.raises(ValueError, match="not json3"):
         segments_from_captions("WEBVTT\n\n00:00.000 --> 00:02.000\nhello")
+
+
+# --- describing a video's captions --------------------------------------------
+
+
+def translated(lang):
+    """How yt-dlp lists YouTube's machine translation into a language: an
+    automatic_captions entry whose URL asks for it with tlang."""
+    return [{"url": f"https://captions.example/api?lang=en&tlang={lang}", "ext": "json3",
+             "name": lang}]
+
+
+def described(v, preferred, **kw):
+    from voice_to_note.transforms.youtube import describe_captions
+
+    return [(c.code, c.name, c.kind, c.taken) for c in describe_captions(v, preferred, **kw)]
+
+
+def test_a_video_with_only_written_captions_lists_them_by_name():
+    v = video(subtitles={"en": [track()], "fr": [track()]})
+
+    assert described(v, ["en"]) == [
+        ("en", "English", "manual", True),
+        ("fr", "French", "manual", False),
+    ]
+
+
+def test_a_video_with_only_auto_captions_marks_them_as_auto_generated():
+    v = video(automatic_captions={"en-orig": [track()], "en": translated("en")})
+
+    assert described(v, ["en"]) == [("en", "English", "auto", True)]
+
+
+def test_a_language_both_written_and_recognised_is_listed_once_as_written():
+    v = video(subtitles={"en": [track()]}, automatic_captions={"en-orig": [track()]})
+
+    assert described(v, ["en"]) == [("en", "English", "manual", True)]
+
+
+def test_machine_translations_are_listed_only_into_a_preferred_language():
+    v = video(
+        automatic_captions={
+            "en-orig": [track()], "pl": translated("pl"), "de": translated("de"),
+        }
+    )
+
+    assert described(v, ["pl", "en"]) == [
+        ("pl", "Polish", "translated", False),
+        ("en", "English", "auto", True),
+    ]
+
+
+def test_a_translation_is_never_taken_over_a_track_the_video_really_has():
+    v = video(automatic_captions={"en-orig": [track("https://c/en")], "pl": translated("pl")})
+
+    assert pick_track(v, ["pl"])[0] == "en"
+
+
+def test_a_translation_is_taken_when_the_language_was_asked_for_by_name():
+    v = video(automatic_captions={"en-orig": [track("https://c/en")], "pl": translated("pl")})
+
+    picked = pick_track(v, ["pl"], any_language=False)
+
+    assert picked is not None and picked[0] == "pl" and picked[2] is True
+
+
+def test_a_translation_only_video_is_taken_in_the_preferred_language():
+    v = video(language=None, automatic_captions={"pl": translated("pl"), "de": translated("de")})
+
+    assert pick_track(v, ["pl"])[0] == "pl"
+    assert pick_track(v, ["fr"]) is None
+
+
+def test_the_chooser_walks_the_preference_list_in_order():
+    v = video(subtitles={"pl": [track("https://c/pl")], "uk": [track("https://c/uk")]})
+
+    assert pick_track(v, ["uk", "pl"])[0] == "uk"
+    assert pick_track(v, ["pl", "uk"])[0] == "pl"
+
+
+def test_preferred_languages_come_first_in_the_order_asked_and_the_taken_one_is_marked():
+    v = video(
+        language="de",
+        subtitles={"de": [track()], "uk": [track()]},
+        automatic_captions={"pl": [track()], "de-orig": [track()]},
+    )
+
+    assert described(v, ["uk", "pl"]) == [
+        ("uk", "Ukrainian", "manual", True),
+        ("pl", "Polish", "auto", False),
+        ("de", "German", "manual", False),
+    ]
+
+
+def test_a_video_with_no_captions_describes_nothing():
+    assert described(video(), ["en"]) == []
+
+
+def test_a_language_matches_its_regional_track_without_regard_to_case():
+    v = video(subtitles={"pt-BR": [track()]})
+
+    assert pick_track(v, ["pt-br"], any_language=False)[0] == "pt-BR"
+
+
+def test_the_label_names_the_kind_unless_a_person_wrote_it():
+    from voice_to_note.transforms.youtube import CaptionLang, caption_label
+
+    assert [
+        caption_label(CaptionLang("en", "English", "manual")),
+        caption_label(CaptionLang("uk", "Ukrainian", "auto")),
+        caption_label(CaptionLang("pl", "Polish", "translated")),
+    ] == ["English", "Ukrainian (auto-generated)", "Polish (translated)"]

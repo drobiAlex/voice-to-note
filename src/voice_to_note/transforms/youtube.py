@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, TypedDict
 
 from ..domain import Segment
+from .languages import language_name, primary
 
 
 class CaptionTrack(TypedDict, total=False):
@@ -12,6 +13,7 @@ class CaptionTrack(TypedDict, total=False):
 
     url: str
     ext: str
+    name: str
 
 
 class VideoInfo(TypedDict, total=False):
@@ -94,14 +96,74 @@ def video_from_info(info: VideoInfo) -> YouTubeVideo:
     )
 
 
+MANUAL = "manual"
+AUTO = "auto"
+TRANSLATED = "translated"
+
+
+@dataclass(frozen=True)
+class _Candidate:
+    """One language a video can be captioned in, with the kind of track that
+    would supply it, after the two yt-dlp dictionaries have been told apart."""
+
+    code: str
+    kind: str
+    name: str
+    tracks: list[CaptionTrack]
+
+
+def _is_translation(key: str, tracks: Sequence[CaptionTrack], spoken: str | None) -> bool:
+    """Whether an automatic_captions entry is YouTube's machine translation of
+    the speech rather than a recognition of it. yt-dlp lists both in one
+    dictionary: the spoken language's own track (often keyed "xx-orig") and a
+    translation into ~100 others whose URLs carry a tlang parameter. A track
+    in the video's own language is never a translation, whatever its URL says."""
+    if key.endswith("-orig") or (spoken and primary(key) == primary(spoken)):
+        return False
+    return any("tlang=" in (t.get("url") or "") for t in tracks)
+
+
+def _name_of(tracks: Sequence[CaptionTrack]) -> str:
+    """The name yt-dlp gave a language's tracks, empty when it gave none."""
+    for track in tracks:
+        if track.get("name"):
+            return track["name"]
+    return ""
+
+
+def _candidates(video: YouTubeVideo) -> list[_Candidate]:
+    """Every language the video can be captioned in, one entry each, sorted by
+    code. A language both written by a person and recognised from the speech
+    is listed once, as the person's — the same preference as the chooser, kept
+    here so a listing can never promise a track the chooser would not take. A
+    language that has both a "-orig" and a plain automatic entry keeps the
+    "-orig" one, the recognition itself rather than its translation into the
+    language it already is."""
+    found: dict[str, _Candidate] = {}
+    for key, tracks in sorted(video.subtitles.items()):
+        found[key] = _Candidate(key, MANUAL, _name_of(tracks), tracks)
+    for key, tracks in sorted(video.automatic_captions.items()):
+        if key + "-orig" in video.automatic_captions:
+            continue
+        code = key.removesuffix("-orig")
+        if code in found and found[code].kind == MANUAL:
+            continue
+        kind = TRANSLATED if _is_translation(key, tracks, video.language) else AUTO
+        found[code] = _Candidate(code, kind, _name_of(tracks), tracks)
+    return [found[code] for code in sorted(found)]
+
+
 def _match(langs: Mapping[str, Any], pref: str) -> str | None:
     """The track language a preference names: itself when it is there, else a
-    regional variant of it ("en" finds "en-US"), sorted so two variants pick
-    the same one on every filesystem and every run."""
-    if pref in langs:
-        return pref
+    regional variant of it ("en" finds "en-US"), compared without regard to
+    case since "pt-br" and "pt-BR" are one language. Sorted so two variants
+    pick the same one on every filesystem and every run."""
+    want = pref.lower()
     for lang in sorted(langs):
-        if lang.startswith(pref + "-"):
+        if lang.lower() == want:
+            return lang
+    for lang in sorted(langs):
+        if lang.lower().startswith(want + "-"):
             return lang
     return None
 
@@ -128,10 +190,15 @@ def pick_track(
     video's own tongue reads better downstream than a machine's unpunctuated
     guess in the preferred one. Within each kind the caller's languages win in
     order; asked to take any language, the video's own comes next, then
-    English, then whatever exists. A caller that says any_language=False asked
-    for exactly the languages it named, and is told plainly when none of them
-    is there rather than handed a surprise."""
-    for tracks, auto in ((video.subtitles, False), (video.automatic_captions, True)):
+    English, then whatever exists. YouTube's machine translations are the last
+    resort and only into a language the caller named: a translation of
+    speech nobody asked to read in that language is not a caption the video
+    "has", so it is never the surprise fallback. A caller that says
+    any_language=False asked for exactly the languages it named, and is told
+    plainly when none of them is there rather than handed a surprise."""
+    candidates = _candidates(video)
+    for kind in (MANUAL, AUTO):
+        tracks = {c.code: c.tracks for c in candidates if c.kind == kind}
         order = list(preferred)
         if any_language:
             order += [lang for lang in (video.language, "en") if lang]
@@ -140,19 +207,79 @@ def pick_track(
             if lang is not None:
                 url = _track_url(tracks[lang])
                 if url is not None:
-                    return lang, url, auto
+                    return lang, url, kind == AUTO
         if any_language:
             for lang in sorted(tracks):
                 url = _track_url(tracks[lang])
                 if url is not None:
-                    return lang, url, auto
+                    return lang, url, kind == AUTO
+    translated = {c.code: c.tracks for c in candidates if c.kind == TRANSLATED}
+    for pref in preferred:
+        lang = _match(translated, pref)
+        if lang is not None:
+            url = _track_url(translated[lang])
+            if url is not None:
+                return lang, url, True
     return None
 
 
 def caption_langs(video: YouTubeVideo) -> list[str]:
-    """Every language this video has any captions in, for the error that
-    names what *is* there when the one asked for is not."""
-    return sorted(set(video.subtitles) | set(video.automatic_captions))
+    """Every language this video has captions in that somebody wrote or a
+    recogniser heard, for the error that names what *is* there when the one
+    asked for is not. Machine translations are left out: they number a
+    hundred on nearly every video and would bury the answer."""
+    return [c.code for c in _candidates(video) if c.kind != TRANSLATED]
+
+
+@dataclass(frozen=True)
+class CaptionLang:
+    """One language a video can be captioned in, as a person would be shown
+    it: the code to ask for, its name in words, what kind of track it is, and
+    whether it is the one an import would take."""
+
+    code: str
+    name: str
+    kind: str
+    taken: bool = False
+
+
+def caption_label(lang: CaptionLang) -> str:
+    """A language in words with the kind of track after it, unless a person
+    wrote it: "Ukrainian (auto-generated)", "Polish (translated)". Written
+    captions carry no suffix because they are the unremarkable case."""
+    suffix = {AUTO: " (auto-generated)", TRANSLATED: " (translated)"}.get(lang.kind, "")
+    return lang.name + suffix
+
+
+def describe_captions(
+    video: YouTubeVideo, preferred: Sequence[str], any_language: bool = True
+) -> list[CaptionLang]:
+    """What a video's captions come to, for showing before an import: every
+    language it has, preferred ones first in the order asked, then the rest
+    with written captions ahead of recognised ones. Machine translations are
+    listed only into a preferred language — offered because it was asked for,
+    after everything the video really has — so a hundred translations do not
+    drown the few real tracks. The track the chooser would take is marked, by
+    asking the chooser itself rather than repeating its rules."""
+    picked = pick_track(video, preferred, any_language)
+    taken = picked[0] if picked else None
+    wanted = [primary(p) for p in preferred]
+    found = [
+        c for c in _candidates(video)
+        if c.kind != TRANSLATED or primary(c.code) in wanted
+    ]
+
+    kinds = {MANUAL: 0, AUTO: 1, TRANSLATED: 2}
+
+    def rank(c: _Candidate) -> tuple[int, int, str]:
+        pref = wanted.index(primary(c.code)) if primary(c.code) in wanted else len(wanted)
+        return pref, kinds[c.kind], c.code
+
+    found.sort(key=rank)
+    return [
+        CaptionLang(c.code, language_name(c.code, c.name), c.kind, c.code == taken)
+        for c in found
+    ]
 
 
 # how caption events are folded into transcript paragraphs. A paragraph runs
