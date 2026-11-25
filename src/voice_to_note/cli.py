@@ -6,6 +6,7 @@ import sys
 import time
 import traceback
 from collections.abc import Callable
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
@@ -298,6 +299,13 @@ def cmd_youtube(args: argparse.Namespace) -> None:
     first when the same video is already here. The options are checked before
     the network is touched, and the video is named before its captions are
     fetched, so a mispasted link is caught at the earliest line it can be."""
+    if args.lang:
+        # before any network call: a language nobody could match is the
+        # quickest thing to find out
+        services.caption_preference(args.lang)
+    if args.captions:
+        _youtube_captions(args)
+        return
     steps = services.youtube_steps(args.steps)
     _settled_template(args, "youtube", steps)
     with Repository() as repo:
@@ -315,6 +323,31 @@ def cmd_youtube(args: argparse.Namespace) -> None:
             repo, video, project=args.project, lang=args.lang, log=status
         )
         _finished(repo, result, args, steps)
+
+
+def _youtube_captions(args: argparse.Namespace) -> None:
+    """Lists the caption languages a video has, importing nothing, so a person
+    or an agent can see what exists before choosing — without remembering codes
+    or guessing whether a language is there. The title goes to stderr so the
+    list alone is what a pipe receives. A star marks the track an import would
+    take."""
+    status("fetching video info …")
+    video = services.youtube_video(args.url)
+    status(services.youtube_heading(video))
+    langs = services.youtube_captions(video, args.lang)
+    if args.json:
+        print(json.dumps([asdict(c) for c in langs], ensure_ascii=False, indent=2))
+    elif langs:
+        width = max(len(c.code) for c in langs)
+        for c in langs:
+            print(f"{'*' if c.taken else ' '} {c.code:<{width}}  {c.name}  [{c.kind}]")
+    if not langs:
+        status("no captions on this video")
+    elif not any(c.taken for c in langs):
+        status("none of these would be taken by an import with that preference")
+    notice = services.caption_notice(video)
+    if notice:
+        status(notice)
 
 
 def _taped(track: Path) -> bool:
@@ -1159,8 +1192,18 @@ def main() -> None:
     sp.add_argument(
         "--lang",
         metavar="LANG",
-        help="caption language to fetch, refused if the video lacks it"
+        help="caption language to fetch, as a name or a code (english, uk); several,"
+        " comma-separated, are tried in order; refused if the video has none of them"
         " (default: the youtube_lang setting's preference order)",
+    )
+    sp.add_argument(
+        "--captions",
+        action="store_true",
+        help="list the video's caption languages and which one would be taken,"
+        " without importing",
+    )
+    sp.add_argument(
+        "--json", action="store_true", help="with --captions, print the list as JSON"
     )
     sp.add_argument(
         "--steps",

@@ -1922,3 +1922,142 @@ def test_the_template_listing_names_the_sections_a_template_adds(monkeypatch, ca
     video = next(line for line in lines if line.startswith("video"))
     assert "Worth watching?, Questions answered, Hidden insights" in video
     assert "+" not in next(line for line in lines if line.startswith("notes "))
+
+
+# --- listing a video's caption languages -----------------------------------------
+
+
+def captioned_video():
+    return yt_video(
+        subtitles={"uk": [{"url": "https://c.example/uk", "ext": "json3"}]},
+        automatic_captions={
+            "en-orig": [{"url": "https://c.example/en", "ext": "json3"}],
+            "pl": [{"url": "https://c.example/?tlang=pl", "ext": "json3"}],
+        },
+    )
+
+
+def test_youtube_captions_lists_the_languages_without_importing(monkeypatch, capsys):
+    monkeypatch.setattr(services.config, "YOUTUBE_LANG", "english,ukrainian,polish")
+    monkeypatch.setattr(services, "youtube_video", lambda _url: captioned_video())
+    monkeypatch.setattr(
+        services, "import_youtube", lambda *a, **k: pytest.fail("imported while listing")
+    )
+
+    run(monkeypatch, StubRepo(), "youtube", "https://youtu.be/abc123", "--captions")
+
+    out, err = capsys.readouterr()
+    assert out.splitlines() == [
+        "  en  English  [auto]",
+        "* uk  Ukrainian  [manual]",
+        "  pl  Polish  [translated]",
+    ]
+    assert "How to think" in err
+
+
+def test_youtube_captions_as_json_marks_the_one_an_import_would_take(monkeypatch, capsys):
+    monkeypatch.setattr(services.config, "YOUTUBE_LANG", "english,ukrainian,polish")
+    monkeypatch.setattr(services, "youtube_video", lambda _url: captioned_video())
+
+    run(monkeypatch, StubRepo(), "youtube", "https://youtu.be/abc123", "--captions", "--json")
+
+    listed = json.loads(capsys.readouterr().out)
+    assert listed == [
+        {"code": "en", "name": "English", "kind": "auto", "taken": False},
+        {"code": "uk", "name": "Ukrainian", "kind": "manual", "taken": True},
+        {"code": "pl", "name": "Polish", "kind": "translated", "taken": False},
+    ]
+
+
+def test_youtube_captions_on_a_video_without_any_says_so_on_stderr(monkeypatch, capsys):
+    monkeypatch.setattr(
+        services, "youtube_video", lambda _url: yt_video(automatic_captions={})
+    )
+
+    run(monkeypatch, StubRepo(), "youtube", "https://youtu.be/abc123", "--captions", "--json")
+
+    out, err = capsys.readouterr()
+    assert json.loads(out) == [] and "no captions" in err
+
+
+def test_youtube_captions_refuses_an_unknown_language_before_the_network(monkeypatch, capsys):
+    monkeypatch.setattr(
+        services, "youtube_video", lambda _url: pytest.fail("fetched despite a bad language")
+    )
+
+    with pytest.raises(SystemExit) as err:
+        run(
+            monkeypatch, StubRepo(), "youtube", "https://youtu.be/abc123",
+            "--captions", "--lang", "ukranian",
+        )
+
+    assert "did you mean Ukrainian" in str(err.value.code)
+
+
+def test_youtube_lang_accepts_a_name_and_passes_it_on_to_the_import(monkeypatch, capsys):
+    seen = {}
+
+    def import_youtube(repo, video, project="other", lang=None, log=None):
+        seen["lang"] = lang
+        return services.ProcessResult(7, 3, [], "uk")
+
+    monkeypatch.setattr(services, "youtube_video", lambda _url: yt_video())
+    monkeypatch.setattr(services, "import_youtube", import_youtube)
+
+    run(
+        monkeypatch, StubRepo(), "youtube", "https://youtu.be/abc123",
+        "--lang", "ukrainian,polish", "--steps", "",
+    )
+
+    assert seen["lang"] == "ukrainian,polish"
+
+
+# --- the review's cases ------------------------------------------------------------
+
+
+def ukrainian_spoken_video():
+    listed = {
+        "uk-orig": [{"url": "https://c.example/uk-orig", "ext": "json3"}],
+        "uk": [{"url": "https://c.example/api?tlang=uk", "ext": "json3"}],
+    }
+    for code in ("en", "pl", "de"):
+        listed[code] = [{"url": f"https://c.example/api?tlang={code}", "ext": "json3"}]
+    return yt_video(language="uk", subtitles={}, automatic_captions=listed)
+
+
+def test_youtube_captions_for_a_ukrainian_video_takes_ukrainian_under_every_preference(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(services, "youtube_video", lambda _url: ukrainian_spoken_video())
+    taken = []
+    for preference in ("en", "en,uk,pl", ""):
+        monkeypatch.setattr(services.config, "YOUTUBE_LANG", preference)
+        run(monkeypatch, StubRepo(), "youtube", "https://youtu.be/abc123", "--captions", "--json")
+        listed = json.loads(capsys.readouterr().out)
+        taken.append([c["code"] for c in listed if c["taken"]])
+
+    assert taken == [["uk"], ["uk"], ["uk"]]
+
+
+def test_youtube_lang_of_only_separators_is_refused_before_the_network(monkeypatch, capsys):
+    monkeypatch.setattr(
+        services, "youtube_video", lambda _url: pytest.fail("fetched despite an empty --lang")
+    )
+
+    with pytest.raises(SystemExit) as err:
+        run(monkeypatch, StubRepo(), "youtube", "https://youtu.be/abc123", "--lang", ",")
+
+    assert "name a caption language" in str(err.value.code)
+
+
+def test_youtube_captions_says_when_only_machine_translations_exist(monkeypatch, capsys):
+    only = yt_video(
+        language=None,
+        automatic_captions={"de": [{"url": "https://c.example/?tlang=de", "ext": "json3"}]},
+    )
+    monkeypatch.setattr(services, "youtube_video", lambda _url: only)
+
+    run(monkeypatch, StubRepo(), "youtube", "https://youtu.be/abc123", "--captions")
+
+    out, err = capsys.readouterr()
+    assert "[translated]" in out and "machine-translated" in err

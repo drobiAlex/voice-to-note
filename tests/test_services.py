@@ -3410,3 +3410,89 @@ def test_memo_info_names_the_template_behind_the_notes(repo, wav, templates_dir)
 
     assert services.memo_info(repo, memo_id).template == "video"
     assert "template:" in services.memo_info_text(repo, memo_id)
+
+
+# --- caption languages by name -------------------------------------------------
+
+
+def uk_pl_video():
+    return yt_video(
+        language="en",
+        subtitles={"uk": [{"url": "https://captions.example/uk", "ext": "json3"}]},
+        automatic_captions={
+            "en-orig": [{"url": "https://captions.example/en", "ext": "json3"}],
+            "pl": [{"url": "https://c.example/?tlang=pl", "ext": "json3"}],
+        },
+    )
+
+
+def test_the_youtube_lang_setting_still_reads_a_plain_code(monkeypatch):
+    monkeypatch.setattr(services.config, "YOUTUBE_LANG", "en")
+
+    assert services.caption_preference() == ["en"]
+
+
+def test_the_youtube_lang_setting_reads_names_and_codes_in_order(monkeypatch):
+    monkeypatch.setattr(services.config, "YOUTUBE_LANG", "English, uk,polish")
+
+    assert services.caption_preference() == ["en", "uk", "pl"]
+
+
+def test_an_unknown_name_in_the_setting_is_refused_naming_the_setting(monkeypatch):
+    monkeypatch.setattr(services.config, "YOUTUBE_LANG", "ukranian")
+
+    with pytest.raises(services.InvalidInput, match="Ukrainian.*youtube_lang"):
+        services.caption_preference()
+
+
+def test_a_language_asked_for_by_name_fetches_that_track(repo, monkeypatch):
+    fetched = []
+    monkeypatch.setattr(
+        services.youtube, "captions", lambda url: fetched.append(url) or CAPTIONS
+    )
+
+    result = services.import_youtube(repo, uk_pl_video(), lang="ukrainian")
+
+    assert result.language == "uk" and fetched == ["https://captions.example/uk"]
+
+
+def test_several_languages_asked_for_are_tried_in_order(repo, monkeypatch):
+    monkeypatch.setattr(services.youtube, "captions", lambda _url: CAPTIONS)
+
+    result = services.import_youtube(repo, uk_pl_video(), lang="german, english")
+
+    assert result.language == "en"
+
+
+def test_a_translated_language_asked_for_by_name_is_imported(repo, monkeypatch):
+    monkeypatch.setattr(services.youtube, "captions", lambda _url: CAPTIONS)
+
+    assert services.import_youtube(repo, uk_pl_video(), lang="polish").language == "pl"
+
+
+def test_an_unknown_language_name_is_refused_before_anything_is_fetched(repo, monkeypatch):
+    monkeypatch.setattr(
+        services.youtube, "captions", lambda _url: pytest.fail("fetched an unknown language")
+    )
+
+    with pytest.raises(services.InvalidInput, match="did you mean Polish"):
+        services.import_youtube(repo, uk_pl_video(), lang="polsh")
+
+
+def test_the_picker_before_any_lookup_offers_automatic_and_the_preferred_languages(monkeypatch):
+    monkeypatch.setattr(services.config, "YOUTUBE_LANG", "english,ukrainian,polish")
+
+    assert services.preferred_caption_choices() == [
+        ("automatic", ""), ("English", "en"), ("Ukrainian", "uk"), ("Polish", "pl"),
+    ]
+
+
+def test_the_picker_after_a_lookup_names_each_language_with_its_kind(monkeypatch):
+    monkeypatch.setattr(services.config, "YOUTUBE_LANG", "english,ukrainian,polish")
+
+    assert services.caption_options(uk_pl_video()) == [
+        ("English (auto-generated)", "en"),
+        ("Ukrainian", "uk"),
+        ("Polish (translated)", "pl"),
+    ]
+    assert services.taken_caption(uk_pl_video()) == "uk"
